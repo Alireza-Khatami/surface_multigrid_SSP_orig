@@ -23,5 +23,10 @@ add_executable(${PROJECT_NAME}_bin ${SRCFILES})
 
 target_link_libraries(${PROJECT_NAME}_bin igl::core igl::opengl igl::opengl_glfw)
 
+# MSVC does not define M_PI by default; this enables it globally
+if(MSVC)
+  target_compile_definitions(${PROJECT_NAME}_bin PRIVATE _USE_MATH_DEFINES)
+endif()
+
 
 

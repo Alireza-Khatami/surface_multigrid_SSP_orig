@@ -117,30 +117,42 @@ int main(int argc, char *argv[])
 	using namespace Eigen;
 	using namespace std;
 
+	// parsing arguments: main_bin [mesh_path] [target_faces] [num_subdivisions]
+	string mesh_path;
+	int tarF, num_subdivs;
+	if (argc == 4)
+	{
+		mesh_path  = argv[1];
+		tarF       = stoi(argv[2]);
+		num_subdivs = stoi(argv[3]);
+	}
+	else
+	{
+		throw std::invalid_argument("usage: main_bin [mesh_path] [target_faces] [num_subdivisions]");
+	}
+
 	// load mesh
 	MatrixXd VO;
 	MatrixXi FO;
-	igl::read_triangle_mesh("../../meshes/bunny.obj", VO, FO);
+	igl::read_triangle_mesh(mesh_path, VO, FO);
 	cout << "original mesh: |V| " << VO.rows() << ", |F|: " << FO.rows() << endl;
 
 	// decimate the input mesh using SSP
 	MatrixXd V; // coarse vertices
 	MatrixXi F; // coarse faces
 	SparseMatrix<double> P;
-	int tarF = 500; // target number of faces
 	int dec_type = 1; // decimation type (0:qslim, 1:midpoint, 2:vertex removal)
 	VectorXi IM, FIM;
 	vector<single_collapse_data> decInfo;
 	vector<vector<int>> decIM;
-	VectorXi IMF; 
+	VectorXi IMF;
 	SSP_decimate(VO,FO,tarF, dec_type, V,F,IMF, IM, decInfo, decIM, FIM);
 
-	// loop upsample the mesh 
-	MatrixXd BC; // barycentric coordinates 
-	MatrixXi BF; // barycentric faces 
+	// loop upsample the mesh
+	MatrixXd BC; // barycentric coordinates
+	MatrixXi BF; // barycentric faces
 	VectorXi FIdx; // indices of barycentric faces
 	MatrixXi SF; // subdivided faces
-	int num_subdivs = 2; // number of subdivisions
 	loop_upsample_barycentric(V,F,num_subdivs,BC,BF,FIdx,SF);
 	query_coarse_to_fine(decInfo, IM, decIM, IMF, BC, BF, FIdx);
 
@@ -160,7 +172,7 @@ int main(int argc, char *argv[])
 		igl::upsample(V,F,NV,NF,iter);
 		int nV = NV.rows();
 		NV = SV.block(0,0,nV,3);
-		std::string output_name = "../output_s" + std::to_string(iter) + ".obj";
+		std::string output_name = "./output_s" + std::to_string(iter) + ".obj";
 		igl::writeOBJ(output_name, NV,NF);
 	}
 }
