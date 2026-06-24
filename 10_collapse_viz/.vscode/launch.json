@@ -1,0 +1,33 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug – collapse_viz",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/debug/Debug/collapse_viz_bin.exe",
+      "args": [
+        "C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\meshes\\bunny.obj",
+        "500"
+      ],
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "console": "internalConsole",
+      "preLaunchTask": "cmake: build debug"
+    },
+    {
+      "name": "Release – collapse_viz",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/release/Release/collapse_viz_bin.exe",
+      "args": [
+        "C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\meshes\\bunny.obj",
+        "500"
+      ],
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "console": "internalConsole",
+      "preLaunchTask": "cmake: build release"
+    }
+  ]
+}

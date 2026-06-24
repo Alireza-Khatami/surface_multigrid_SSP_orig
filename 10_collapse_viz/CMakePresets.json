@@ -1,0 +1,45 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "windows-debug",
+      "displayName": "Windows x64 Debug (MSVC)",
+      "generator": "Visual Studio 17 2022",
+      "architecture": { "value": "x64", "strategy": "set" },
+      "binaryDir": "${sourceDir}/build/debug",
+      "toolchainFile": "C:/Users/alirz/Projects/vcpkg/scripts/buildsystems/vcpkg.cmake",
+      "environment": { "CMAKE_POLICY_VERSION_MINIMUM": "3.5" },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "windows-release",
+      "displayName": "Windows x64 Release (MSVC)",
+      "generator": "Visual Studio 17 2022",
+      "architecture": { "value": "x64", "strategy": "set" },
+      "binaryDir": "${sourceDir}/build/release",
+      "toolchainFile": "C:/Users/alirz/Projects/vcpkg/scripts/buildsystems/vcpkg.cmake",
+      "environment": { "CMAKE_POLICY_VERSION_MINIMUM": "3.5" },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "debug",
+      "displayName": "Build Debug",
+      "configurePreset": "windows-debug",
+      "configuration": "Debug",
+      "jobs": 8
+    },
+    {
+      "name": "release",
+      "displayName": "Build Release",
+      "configurePreset": "windows-release",
+      "configuration": "Release",
+      "jobs": 8
+    }
+  ]
+}

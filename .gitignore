@@ -1,6 +1,10 @@
 */build
 *.DS_Store
 
+# Markdown docs and logs
+*.md
+build_log.txt
+
 # Prerequisites
 *.d
 
