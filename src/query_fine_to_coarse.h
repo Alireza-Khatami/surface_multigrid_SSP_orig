@@ -19,6 +19,7 @@ void query_fine_to_coarse(
   const Eigen::VectorXi & IM,
   const std::vector<std::vector<int>> & decIM,
   const Eigen::VectorXi & FIM,
+  const Eigen::VectorXi & faceSheetID,
   Eigen::MatrixXd & BC,
   Eigen::MatrixXi & BF,
   Eigen::VectorXi & FIdx);

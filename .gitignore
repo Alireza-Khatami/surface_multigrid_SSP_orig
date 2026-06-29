@@ -2,7 +2,7 @@
 *.DS_Store
 
 # Markdown docs and logs
-*.md
+# *.md
 build_log.txt
 
 # Prerequisites

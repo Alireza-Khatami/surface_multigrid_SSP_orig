@@ -234,22 +234,23 @@ bool SSP_random_collapse_edge(
   // if (verbose)
     // cout << "finish collapse checks\n";
 
-  // single_collapse_data data;
+  // Pack into SheetData (manifold path → always one sheet, global_sheet_id = 0)
   {
-    data.b.resize(b.size());
-    data.b = b;
-    data.subsetVIdx.resize(subsetVIdx.size());
-    data.subsetVIdx = subsetVIdx;
-    data.V_pre.resize(V_pre.rows(), V_pre.cols()); data.V_pre = V_pre; // could be deleted
-    data.V_post.resize(V_post.rows(), V_post.cols()); data.V_post = V_post; // could be deleted
-    data.Nsv = Nsv_local; // could be deleted
-    data.Ndv = Ndv_local; // could be deleted
-    data.UV_pre.resize(UV_pre.rows(), UV_pre.cols()); data.UV_pre = UV_pre;
-    data.UV_post.resize(UV_post.rows(), UV_post.cols()); data.UV_post = UV_post;
-    data.FUV_pre.resize(FUV_pre.rows(), FUV_pre.cols()); data.FUV_pre = FUV_pre;
-    data.FUV_post.resize(FUV_post.rows(), FUV_post.cols()); data.FUV_post = FUV_post;
-    data.FIdx_pre = FIdx_onering_pre;
-    data.FIdx_post = FIdx_onering_post;
+    SheetData sd;
+    sd.global_sheet_id = 0;
+    sd.b         = b;
+    sd.subsetVIdx = subsetVIdx;
+    sd.UV_pre    = UV_pre;
+    sd.UV_post   = UV_post;
+    sd.FUV_pre   = FUV_pre;
+    sd.FUV_post  = FUV_post;
+    sd.FIdx_pre  = FIdx_onering_pre;
+    sd.FIdx_post = FIdx_onering_post;
+    data.sheets.push_back(sd);
+    data.V_pre  = V_pre;
+    data.V_post = V_post;
+    data.Nsv    = Nsv_local;
+    data.Ndv    = Ndv_local;
   }
   // ===================
   // Derek modifications end

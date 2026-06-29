@@ -1,19 +1,16 @@
 #include "SSP_collapse_edge.h"
-#include <igl/circulation.h>
 #include <igl/edge_collapse_is_valid.h>
 #include <always_try_never_care.h>
 #include <vector>
-#include <math.h>
-#include <fstream>
+#include <map>
+#include <set>
+#include <cstdio>
 
-void printVector(
-  std::vector<int> vec)
-  {
-    for(int ii = 0; ii < vec.size(); ii++)
-      std::cout << vec[ii] << ", ";
-    std::cout << "\n";
-  }
-
+// ============================================================
+// Inner overload
+// Performs per-sheet UV computation and VF-based topology update.
+// EF/EI are left stale after the first collapse; only EMAP and E are maintained.
+// ============================================================
 bool SSP_collapse_edge(
   const int e,
   const Eigen::RowVectorXd & p,
@@ -34,350 +31,414 @@ bool SSP_collapse_edge(
   std::vector<single_collapse_data> & decInfo,
   std::vector<std::vector<int>> & decIM,
   single_collapse_data & data,
-  Eigen::VectorXi & FIdx_onering_pre)
+  Eigen::VectorXi & FIdx_onering_pre,
+  const Eigen::VectorXi & faceSheetID,
+  Eigen::VectorXi & EQ)
 {
-  // Assign this to 0 rather than, say, -1 so that deleted elements will get
-  // draw as degenerate elements at vertex 0 (which should always exist and
-  // never get collapsed to anything else since it is the smallest index)
   using namespace Eigen;
   using namespace std;
   using namespace igl;
-  const int eflip = E(e,0)>E(e,1);
-  // source and destination
-  const int s = eflip?E(e,1):E(e,0);
-  const int d = eflip?E(e,0):E(e,1);
 
-  // if(!edge_collapse_is_valid(Nsv,Ndv))
-  // {
-  //   return false;
-  // }
-
-  vector<int> Nsv_alec = Nsv;
-  vector<int> Ndv_alec = Ndv;
-  if(!igl::edge_collapse_is_valid(Nsv_alec,Ndv_alec))
-  {
-    return false;
-  }
-
-  // ===================
-  // Derek modifications:
-  // ===================
   if ((decInfo.size()+1) % 100000 == 0)
-    cout << "#collapses: " << decInfo.size()+1 << endl;
-  bool isDebug = false;
-  bool verbose = false;
-  int vi = s;
-  int vj = d;
-  // int vi = E(e,0); // last one of Nsv
-  // int vj = E(e,1); // last one of Ndv
-  // {
-  //   if (vj < vi)
-  //   {
-  //     int vtmp = vi;
-  //     vi = vj;
-  //     vj = vtmp;
-  //   }
-  // }
-  // cout << "finish fliping Nsv, Ndv\n";
+    fprintf(stderr, "#collapses: %zu\n", decInfo.size()+1);
 
-  // VectorXi FIdx_onering_pre, FIdx_onering_post;
-  VectorXi FIdx_onering_post;
-  MatrixXi F_onering_pre, F_onering_post;
+  const int eflip = E(e,0) > E(e,1);
+  const int s = eflip ? E(e,1) : E(e,0);   // surviving vertex (smaller index)
+  const int d = eflip ? E(e,0) : E(e,1);   // absorbed vertex  (larger  index)
+  const int vi = s;
+  const int vj = d;
+
+  assert(s < d && "s should be less than d");
+
+  // Validity check — uses full one-ring (unordered, order doesn't matter here)
   {
-    // PROFC_NODE("dec: get 1-ring mesh");
-    bool validEdge = get_collapse_onering_faces(V,F,vi,vj,Nsf,Ndf,
-      FIdx_onering_pre,FIdx_onering_post,F_onering_pre,F_onering_post);
-    if (validEdge == false)
-    {
+    vector<int> Nsv_alec = Nsv;
+    vector<int> Ndv_alec = Ndv;
+    if (!igl::edge_collapse_is_valid(Nsv_alec, Ndv_alec))
       return false;
-    }
   }
 
-  // get local mesh (V_pre, FUV_pre)
-  MatrixXd V_pre;
-  MatrixXi FUV_pre;
-  VectorXi subsetVIdx;
+  const int m             = F.rows();
+  const int infVtx        = (int)V.rows() - 1;
+  const int numOrigFaces  = (int)faceSheetID.size();
+
+  // ---- helpers ----
+
+  auto null_face = [&](int f) -> bool {
+    return F(f,0) == IGL_COLLAPSE_EDGE_NULL &&
+           F(f,1) == IGL_COLLAPSE_EDGE_NULL &&
+           F(f,2) == IGL_COLLAPSE_EDGE_NULL;
+  };
+
+  // fan_walk_local
+  // Walks the face fan around 'center', ending at 'end_vtx', in face-adjacency order.
+  // face_list = real faces of this sheet + adjacent infinity faces (for boundary detection).
+  // Returns local indices via svIdx; infVtx maps to -1 (joint_lscm boundary sentinel).
+  // Last element is always local(end_vtx) — required by joint_lscm.
+  auto fan_walk_local = [&](
+      const int center,
+      const int end_vtx,
+      const vector<int> & face_list,
+      const VectorXi & svIdx) -> vector<int>
   {
-    // PROFC_NODE("dec: get local V");
-    std::map<int, int> IM;
-    remove_unreferenced_lessF(V,F_onering_pre,V_pre,FUV_pre,IM,subsetVIdx);
-  }
+    // Filter null faces; keep infinity faces (boundary detection)
+    vector<int> faces;
+    faces.reserve(face_list.size());
+    for (int f : face_list)
+      if (!null_face(f)) faces.push_back(f);
+    if (faces.empty()) return {};
 
-  // get constraint vertices b for pre flattening
-  // cout << "get constraint vertices b for pre flattening" << endl;
-  VectorXi b(2);
-  {
-    // find vi (b(0)) and vj (b(1)) in subsetVIdx
-    for (int ii=0; ii<subsetVIdx.size(); ii++){
-      if (subsetVIdx(ii) == vi)
-        b(0) = ii;
-      else if (subsetVIdx(ii) == vj)
-        b(1) = ii;
-    }
-    assert(b(0) < b(1));
-  }
+    const int sz = svIdx.size();
+    auto to_local = [&](int gv) -> int {
+      if (gv == infVtx) return -1;
+      for (int i = 0; i < sz; i++)
+        if (svIdx(i) == gv) return i;
+      return -1;
+    };
 
-  // Post collapse:
-  // get V_post
-  MatrixXd V_post = V_pre;
-  V_post.row(b(0)) = p;
+    // Count face appearances per neighbor to detect boundary vertices (count == 1)
+    map<int,int> nb_count;
+    for (int f : faces)
+      for (int c = 0; c < 3; c++)
+        if (F(f,c) != center) nb_count[F(f,c)]++;
 
-  // get FUV_post
-  MatrixXi FUV_post;
-  VectorXi FUV_pre_keep;
-  {
-    // PROFC_NODE("dec: get local F");
-    get_post_faces(FUV_pre, b(0), b(1), FUV_pre_keep, FUV_post);
-  }
+    // Start vertex: boundary vertex != end_vtx; for closed fan pick CCW neighbor of end_vtx
+    int start_vtx = -1;
+    for (auto & kv : nb_count)
+      if (kv.second == 1 && kv.first != end_vtx) { start_vtx = kv.first; break; }
 
-  if (isDebug) 
-  {
-    igl::writeOBJ("V_pre.obj", V_pre, FUV_pre);
-    igl::writeOBJ("V_post.obj", V_post, FUV_post);
-  }
-
-  // get local Nsv, Ndv
-  vector<int> Nsv_local, Ndv_local;
-  {
-    // PROFC_NODE("dec: get local Nv");
-    int infVIdx = V.rows() - 1;
-
-    // get local Nsv
-    Nsv_local = Nsv;
-    for (int ii=0; ii<Nsv_local.size(); ii++)
-    {
-      if (Nsv_local[ii] == infVIdx)
-        Nsv_local[ii] = -1;
-      else
-      {
-        for (int jj=0; jj<subsetVIdx.size(); jj++)
-        {
-          if (Nsv_local[ii] == subsetVIdx(jj))
-            Nsv_local[ii] = jj;
+    if (start_vtx == -1) {
+      // Closed fan: pick third vertex of any face containing (center, end_vtx)
+      for (int f : faces) {
+        bool hc = false, he = false;
+        for (int c = 0; c < 3; c++) {
+          if (F(f,c) == center)  hc = true;
+          if (F(f,c) == end_vtx) he = true;
         }
+        if (!hc || !he) continue;
+        for (int c = 0; c < 3; c++) {
+          int v = F(f,c);
+          if (v != center && v != end_vtx) { start_vtx = v; break; }
+        }
+        if (start_vtx != -1) break;
+      }
+    }
+    if (start_vtx == -1) return {};
+
+    // Walk: start_vtx → … → end_vtx (one step per face)
+    vector<int> walk;
+    walk.push_back(start_vtx);
+    int prev_f = -1, cur = start_vtx;
+    const int max_steps = (int)faces.size() + 2;
+
+    for (int step = 0; step < max_steps && cur != end_vtx; step++) {
+      int next_v = -1, next_f = -1;
+      for (int f : faces) {
+        if (f == prev_f) continue;
+        bool hc = false, hcur = false;
+        for (int c = 0; c < 3; c++) {
+          if (F(f,c) == center) hc   = true;
+          if (F(f,c) == cur)    hcur = true;
+        }
+        if (!hc || !hcur) continue;
+        for (int c = 0; c < 3; c++) {
+          int v = F(f,c);
+          if (v != center && v != cur) { next_v = v; break; }
+        }
+        next_f = f;
+        break;
+      }
+      if (next_f == -1) break;  // boundary dead-end
+      prev_f = next_f;
+      cur    = next_v;
+      walk.push_back(cur);
+    }
+
+    vector<int> result;
+    result.reserve(walk.size());
+    for (int gv : walk) result.push_back(to_local(gv));
+    return result;
+  };
+  // ---- end fan_walk_local ----
+
+  // ---- Bucket Nsf/Ndf by sheet (real faces only) ----
+  map<int, vector<int>> sheets_Nsf, sheets_Ndf;
+  for (int f : Nsf) {
+    if (null_face(f) || f >= numOrigFaces) continue;
+    sheets_Nsf[faceSheetID(f)].push_back(f);
+  }
+  for (int f : Ndf) {
+    if (null_face(f) || f >= numOrigFaces) continue;
+    sheets_Ndf[faceSheetID(f)].push_back(f);
+  }
+
+  // Active sheets: only those where BOTH Nsf and Ndf have real faces
+  set<int> active_sheets;
+  for (auto & kv : sheets_Nsf)
+    if (sheets_Ndf.count(kv.first) && !sheets_Ndf[kv.first].empty())
+      active_sheets.insert(kv.first);
+
+  // [sheets] diagnostic: first 10 collapses
+  {
+    static int sheet_log = 0;
+    if (sheet_log < 10) {
+      sheet_log++;
+      fprintf(stderr, "[sheets] collapse #%zu vi=%d vj=%d active_sheets=%zu\n",
+              decInfo.size(), vi, vj, active_sheets.size());
+      for (int sid : active_sheets)
+        fprintf(stderr, "  sheet=%d  Nsf=%zu  Ndf=%zu\n",
+                sid, sheets_Nsf[sid].size(), sheets_Ndf[sid].size());
+    }
+  }
+
+  // Walk face list builder: real faces of sheet si + adjacent infinity faces of vertex v
+  auto get_walk_faces = [&](
+      const vector<int> & all_faces,   // full Nsf or Ndf (real + infinity, from collect_onering)
+      const vector<int> & real_si,     // real faces of sheet si for this vertex
+      int center_v) -> vector<int>
+  {
+    vector<int> walk = real_si;
+    set<int> vtx_set;
+    for (int f : real_si)
+      for (int c = 0; c < 3; c++) vtx_set.insert(F(f,c));
+    // Attach adjacent infinity faces (boundary signal for fan_walk_local)
+    for (int f : all_faces) {
+      if (null_face(f) || f < numOrigFaces) continue;  // only infinity faces
+      for (int c = 0; c < 3; c++) {
+        int v = F(f,c);
+        if (v == center_v || v == infVtx) continue;
+        if (vtx_set.count(v)) { walk.push_back(f); break; }
+      }
+    }
+    return walk;
+  };
+
+  // ---- Per-sheet UV loop ----
+  bool    any_sheet_ok = false;
+  set<int> FIdx_combined;
+  data.sheets.clear();
+
+  for (int sid : active_sheets) {
+    const vector<int> & Nsf_si = sheets_Nsf[sid];
+    const vector<int> & Ndf_si = sheets_Ndf[sid];
+
+    vector<int> Nsf_walk = get_walk_faces(Nsf, Nsf_si, E(e,1));
+    vector<int> Ndf_walk = get_walk_faces(Ndf, Ndf_si, E(e,0));
+
+    // One-ring faces for this sheet (filters null + infinity faces)
+    VectorXi FIdx_pre_si, FIdx_post_si;
+    MatrixXi F_ring_pre_si, F_ring_post_si;
+    bool validEdge = get_collapse_onering_faces(
+        V, F, vi, vj, Nsf_si, Ndf_si,
+        FIdx_pre_si, FIdx_post_si, F_ring_pre_si, F_ring_post_si);
+    if (!validEdge) return false;
+
+    // Compact local mesh for this sheet
+    MatrixXd V_pre_si;
+    MatrixXi FUV_pre_si;
+    VectorXi subsetVIdx_si;
+    {
+      map<int,int> IM_tmp;
+      remove_unreferenced_lessF(V, F_ring_pre_si, V_pre_si, FUV_pre_si, IM_tmp, subsetVIdx_si);
+    }
+
+    if (FUV_pre_si.rows() <= 2) continue;  // too few faces for this sheet
+
+    // Find local indices of vi and vj (subsetVIdx is sorted ascending, so vi<vj globally → local vi<vj)
+    VectorXi b_si(2);
+    b_si.setConstant(-1);
+    for (int ii = 0; ii < subsetVIdx_si.size(); ii++) {
+      if      (subsetVIdx_si(ii) == vi) b_si(0) = ii;
+      else if (subsetVIdx_si(ii) == vj) b_si(1) = ii;
+    }
+
+    // [b_si FAIL] diagnostic
+    if (b_si(0) < 0 || b_si(1) < 0 || b_si(0) >= b_si(1)) {
+      static int b_fail = 0;
+      if (b_fail < 5) {
+        b_fail++;
+        int ndf_real=0, ndf_inf=0, nsf_real=0, nsf_inf=0;
+        for (int f : Ndf_si) (f>=numOrigFaces ? ndf_inf : ndf_real)++;
+        for (int f : Nsf_si) (f>=numOrigFaces ? nsf_inf : nsf_real)++;
+        fprintf(stderr,
+          "[b_si FAIL] sid=%d vi=%d vj=%d b=(%d,%d)  "
+          "Ndf: real=%d inf=%d  Nsf: real=%d inf=%d\n",
+          sid, vi, vj, b_si(0), b_si(1),
+          ndf_real, ndf_inf, nsf_real, nsf_inf);
+        if (ndf_real == 0)
+          fprintf(stderr, "  HYPOTHESIS: sheets_Ndf[sid] contains only infinity faces\n");
+        if (nsf_real == 0)
+          fprintf(stderr, "  HYPOTHESIS: sheets_Nsf[sid] contains only infinity faces\n");
+      }
+      continue;
+    }
+
+    // Build post-collapse local mesh
+    MatrixXd V_post_si = V_pre_si;
+    V_post_si.row(b_si(0)) = p;
+    MatrixXi FUV_post_si;
+    VectorXi FUV_pre_keep_si;
+    get_post_faces(FUV_pre_si, b_si(0), b_si(1), FUV_pre_keep_si, FUV_post_si);
+
+    // Winding-order neighbour lists for joint_lscm
+    // fan_walk_local(center, end_vtx, walk_faces, svIdx) → local indices, end_vtx last
+    vector<int> Nsv_local = fan_walk_local(E(e,1), E(e,0), Nsf_walk, subsetVIdx_si);
+    vector<int> Ndv_local = fan_walk_local(E(e,0), E(e,1), Ndf_walk, subsetVIdx_si);
+
+    // [fan_walk EMPTY] diagnostic
+    if (Nsv_local.empty() || Ndv_local.empty()) {
+      static int fw_empty = 0;
+      if (fw_empty < 5) {
+        fw_empty++;
+        fprintf(stderr,
+          "[fan_walk EMPTY] sid=%d vi=%d vj=%d  "
+          "Nsf_walk=%zu Ndf_walk=%zu  Nsv_local=%zu Ndv_local=%zu\n",
+          sid, vi, vj,
+          Nsf_walk.size(), Ndf_walk.size(),
+          Nsv_local.size(), Ndv_local.size());
+      }
+      assert(false && "fan_walk_local returned empty — upstream topology bug");
+      continue;
+    }
+
+    // [joint_lscm] diagnostic: first 10 calls
+    {
+      static int lscm_log = 0;
+      if (lscm_log < 10) {
+        lscm_log++;
+        fprintf(stderr,
+          "[joint_lscm #%d] sid=%d vi=%d(loc %d) vj=%d(loc %d)  pre=%d post=%d  Nsv=[",
+          lscm_log, sid, vi, b_si(0), vj, b_si(1),
+          (int)FUV_pre_si.rows(), (int)FUV_post_si.rows());
+        for (int x : Nsv_local) fprintf(stderr, "%d,", x);
+        fprintf(stderr, "]  Ndv=[");
+        for (int x : Ndv_local) fprintf(stderr, "%d,", x);
+        fprintf(stderr, "]\n");
       }
     }
 
-    // get local Ndv
-    Ndv_local = Ndv;
-    for (int ii=0; ii<Ndv_local.size(); ii++)
-    {
-      if (Ndv_local[ii] == infVIdx)
-        Ndv_local[ii] = -1;
-      else
-      {
-        for (int jj=0; jj<subsetVIdx.size(); jj++)
-        {
-          if (Ndv_local[ii] == subsetVIdx(jj))
-            Ndv_local[ii] = jj;
-        }
-      }
+    // joint_lscm (DO NOT MODIFY — uses infVtx=-1 sentinel and winding-order Nsv/Ndv)
+    MatrixXd UV_pre_si, UV_post_si;
+    bool isValid = joint_lscm(
+        V_pre_si, FUV_pre_si, V_post_si, FUV_post_si,
+        b_si(0), b_si(1), Nsv_local, Ndv_local,
+        UV_pre_si, UV_post_si);
+    if (!isValid) return false;
+
+    // Store SheetData
+    SheetData sd;
+    sd.global_sheet_id = sid;
+    sd.b          = b_si;
+    sd.subsetVIdx = subsetVIdx_si;
+    sd.UV_pre     = UV_pre_si;
+    sd.UV_post    = UV_post_si;
+    sd.FUV_pre    = FUV_pre_si;
+    sd.FUV_post   = FUV_post_si;
+    sd.FIdx_pre   = FIdx_pre_si;
+    sd.FIdx_post  = FIdx_post_si;
+    data.sheets.push_back(sd);
+
+    // First successful sheet → set top-level 3D data (for display and Nsv/Ndv compat)
+    if (!any_sheet_ok) {
+      data.V_pre  = V_pre_si;
+      data.V_post = V_post_si;
+      data.Nsv    = Nsv_local;
+      data.Ndv    = Ndv_local;
     }
+
+    for (int ii = 0; ii < FIdx_pre_si.size(); ii++)
+      FIdx_combined.insert(FIdx_pre_si(ii));
+
+    any_sheet_ok = true;
   }
 
-  // joint flattening
-  MatrixXd UV_pre, UV_post;
-  {
-    // PROFC_NODE("dec: joint lscm");
-    bool isValid = true;
-    isValid = joint_lscm(V_pre, FUV_pre, V_post, FUV_post, b(0), b(1), Nsv_local, Ndv_local, UV_pre, UV_post);
-    if (!isValid)
-      return false;
-  }
+  if (!any_sheet_ok) return false;
 
-  {
-    if (FUV_pre.rows() <= 2)
-    {
-      if (verbose)
-        cout << "too less faces" << endl;
-      return false;
-    }
-  }
-  // {
-  //   PROFC_NODE("check triangle quality");
-  //   // check UV_pre triangle quality
-  //   for (int ii=0; ii<FIdx_onering_post.size(); ii++)
-  //   {
-  //     int fIdx = FIdx_onering_post(ii);
-  //     int v0 = F(fIdx,0);
-  //     int v1 = F(fIdx,1);
-  //     int v2 = F(fIdx,2);
-  //     double l0 = (V.row(v0) - V.row(v1)).norm();
-  //     double l1 = (V.row(v1) - V.row(v2)).norm();
-  //     double l2 = (V.row(v2) - V.row(v0)).norm();
-  //     double x = (l0+l1+l2) / 2;
-  //     double delta = sqrt(x * (x-l0) * (x-l1) * (x-l2));
-  //     double triQ = 4 * sqrt(3) * delta / (l0*l0 + l1*l1 + l2*l2); 
-  //     if (triQ < triangleQualityThreshold || isnan(triQ)) 
-  //     {
-  //       if (verbose)
-  //         cout << "bad triangle quality" << endl;
-  //       return false;
-  //     }
-  //   }
-  // }
-  // // TODO: check 3D triangle normal flip
-  // if (collapsed == true)
-  // {
-  //   PROFC_NODE("check 3D face flip");
-  //   MatrixXd FN_pre, FN_post;
-  //   igl::per_face_normals(V_pre,FUV_pre,FN_pre);
-  //   igl::per_face_normals(V_post,FUV_post,FN_post);
+  // Build combined FIdx_onering_pre (sorted union of all sheets)
+  FIdx_onering_pre.resize((int)FIdx_combined.size());
+  { int fi = 0; for (int f : FIdx_combined) FIdx_onering_pre(fi++) = f; }
 
-  //   for (int ii=0; ii<FUV_pre_keep.size(); ii++)
-  //   {
-  //     double dotProd = FN_pre.row(FUV_pre_keep(ii)).dot(FN_post.row(ii));
-  //     // cout << "dot product: " << dotProd << endl;
-  //     if (dotProd < 0.7) 
-  //     {
-  //       // if (verbose)
-  //       // {
-  //         cout << "3D face flip" << endl;
-  //       // }
-  //       collapsed = false;
-  //       break;
-  //     }
-  //   }
-  // }
-  // if (verbose)
-    // cout << "finish collapse checks\n";
+  // ================================================================
+  // VF-based two-pass topology update
+  // (replaces EF/EI loop — EF/EI are left stale after this point)
+  // nV2Fd = all faces of the absorbed vertex d (real + infinity)
+  // ================================================================
+  const vector<int> & nV2Fd = (!eflip ? Nsf : Ndf);
 
-  // single_collapse_data data;
-  {
-    data.b.resize(b.size());
-    data.b = b;
-    data.subsetVIdx.resize(subsetVIdx.size());
-    data.subsetVIdx = subsetVIdx;
-    data.V_pre.resize(V_pre.rows(), V_pre.cols()); data.V_pre = V_pre; // could be deleted
-    data.V_post.resize(V_post.rows(), V_post.cols()); data.V_post = V_post; // could be deleted
-    data.Nsv = Nsv_local; // could be deleted
-    data.Ndv = Ndv_local; // could be deleted
-    data.UV_pre.resize(UV_pre.rows(), UV_pre.cols()); data.UV_pre = UV_pre;
-    data.UV_post.resize(UV_post.rows(), UV_post.cols()); data.UV_post = UV_post;
-    data.FUV_pre.resize(FUV_pre.rows(), FUV_pre.cols()); data.FUV_pre = FUV_pre;
-    data.FUV_post.resize(FUV_post.rows(), FUV_post.cols()); data.FUV_post = FUV_post;
-    data.FIdx_pre = FIdx_onering_pre;
-    data.FIdx_post = FIdx_onering_post;
-  }
-  // ===================
-  // Derek modifications end
-  // ===================
-
-  // OVERLOAD: caller may have just computed this
-  //
-  // Important to grab neighbors of d before monkeying with edges
-  const std::vector<int> & nV2Fd = (!eflip ? Nsf : Ndf);
-
-  // The following implementation strongly relies on s<d
-  assert(s<d && "s should be less than d");
-
-  // move source and destination to placement
   V.row(s) = p;
   V.row(d) = p;
 
-  // Helper function to replace edge and associate information with NULL
-  const auto & kill_edge = [&E,&EI,&EF](const int e)
-  {
-    E(e,0) = IGL_COLLAPSE_EDGE_NULL;
-    E(e,1) = IGL_COLLAPSE_EDGE_NULL;
-    EF(e,0) = IGL_COLLAPSE_EDGE_NULL;
-    EF(e,1) = IGL_COLLAPSE_EDGE_NULL;
-    EI(e,0) = IGL_COLLAPSE_EDGE_NULL;
-    EI(e,1) = IGL_COLLAPSE_EDGE_NULL;
+  const auto kill_edge = [&](const int ek) {
+    E(ek,0) = IGL_COLLAPSE_EDGE_NULL; E(ek,1) = IGL_COLLAPSE_EDGE_NULL;
+    EF(ek,0)= IGL_COLLAPSE_EDGE_NULL; EF(ek,1)= IGL_COLLAPSE_EDGE_NULL;
+    EI(ek,0)= IGL_COLLAPSE_EDGE_NULL; EI(ek,1)= IGL_COLLAPSE_EDGE_NULL;
   };
 
-  // update edge info
-  // for each flap
-  const int m = F.rows();
-  for(int side = 0;side<2;side++)
-  {
-    const int f = EF(e,side);
-    const int v = EI(e,side);
-    const int sign = (eflip==0?1:-1)*(1-2*side);
-    // next edge emanating from d
-    const int e1 = EMAP(f+m*((v+sign*1+3)%3));
-    // prev edge pointing to s
-    const int e2 = EMAP(f+m*((v+sign*2+3)%3));
-    assert(E(e1,0) == d || E(e1,1) == d);
-    assert(E(e2,0) == s || E(e2,1) == s);
-    // face adjacent to f on e1, also incident on d
-    const bool flip1 = EF(e1,1)==f;
-    const int f1 = flip1 ? EF(e1,0) : EF(e1,1);
-    assert(f1!=f);
-    assert(F(f1,0)==d || F(f1,1)==d || F(f1,2) == d);
-    // across from which vertex of f1 does e1 appear?
-    const int v1 = flip1 ? EI(e1,0) : EI(e1,1);
-    // Kill e1
-    kill_edge(e1);
-    // Kill f
+  a_e1 = -1; a_e2 = -1; a_f1 = -1; a_f2 = -1;
+  int flap_count = 0;
+
+  // Pass 1: find flap faces (contain both s and d), kill them and their edges
+  for (int f : nV2Fd) {
+    if (null_face(f)) continue;
+    int cs = -1, cd = -1;
+    for (int c = 0; c < 3; c++) {
+      if      (F(f,c) == s) cs = c;
+      else if (F(f,c) == d) cd = c;
+    }
+    if (cs < 0 || cd < 0) continue;  // not a flap
+
+    // edge opposite s-corner = edge(d, ca) → kill it
+    // edge opposite d-corner = edge(s, ca) → keep it
+    const int e_kill = EMAP(f + m*cs);
+    const int e_keep = EMAP(f + m*cd);
+
+    // Redirect EMAP in other faces of nV2Fd: e_kill → e_keep
+    for (int fa : nV2Fd) {
+      if (fa == f || null_face(fa)) continue;
+      for (int c = 0; c < 3; c++)
+        if (EMAP(fa + m*c) == e_kill) EMAP(fa + m*c) = e_keep;
+    }
+
+    kill_edge(e_kill);
+    EQ(e_kill) = -1;  // mark dead in priority queue
+
     F(f,0) = IGL_COLLAPSE_EDGE_NULL;
     F(f,1) = IGL_COLLAPSE_EDGE_NULL;
     F(f,2) = IGL_COLLAPSE_EDGE_NULL;
-    // map f1's edge on e1 to e2
-    assert(EMAP(f1+m*v1) == e1);
-    EMAP(f1+m*v1) = e2;
-    // side opposite f2, the face adjacent to f on e2, also incident on s
-    const int opp2 = (EF(e2,0)==f?0:1);
-    assert(EF(e2,opp2) == f);
-    EF(e2,opp2) = f1;
-    EI(e2,opp2) = v1;
-    // remap e2 from d to s
-    E(e2,0) = E(e2,0)==d ? s : E(e2,0);
-    E(e2,1) = E(e2,1)==d ? s : E(e2,1);
-    if(side==0)
-    {
-      a_e1 = e1;
-      a_f1 = f;
-    }else
-    {
-      a_e2 = e1;
-      a_f2 = f;
-    }
+
+    if (flap_count == 0) { a_e1 = e_kill; a_f1 = f; }
+    else if (flap_count == 1) { a_e2 = e_kill; a_f2 = f; }
+    flap_count++;
   }
 
-  // finally, reindex faces and edges incident on d. Do this last so asserts
-  // make sense.
-  //
-  // Could actually skip first and last, since those are always the two
-  // collpased faces. Nah, this is handled by (F(f,v) == d)
-  //
-  // Don't attempt to use Nde,Nse here because EMAP has changed
-  {
-    int p1 = -1;
-    for(auto f : nV2Fd)
-    {
-      for(int v = 0;v<3;v++)
-      {
-        if(F(f,v) == d)
-        {
-          const int e1 = EMAP(f+m*((v+1)%3));
-          const int flip1 = (EF(e1,0)==f)?1:0;
-          assert( E(e1,flip1) == d || E(e1,flip1) == s);
-          E(e1,flip1) = s;
-          const int e2 = EMAP(f+m*((v+2)%3));
-          // Skip if we just handled this edge (claim: this will be all except
-          // for the first non-trivial face)
-          if(e2 != p1)
-          {
-            const int flip2 = (EF(e2,0)==f)?0:1;
-            assert( E(e2,flip2) == d || E(e2,flip2) == s);
-            E(e2,flip2) = s;
-          }
+  data.numFlapFaces = flap_count;  // 2 = manifold interior, >2 = seam edge
 
-          F(f,v) = s;
-          p1 = e1;
-          break;
-        }
+  // Pass 2: remap d → s in all surviving faces of nV2Fd
+  for (int f : nV2Fd) {
+    if (null_face(f)) continue;
+    for (int c = 0; c < 3; c++) {
+      if (F(f,c) == d) {
+        const int e1 = EMAP(f + m*((c+1)%3));
+        const int e2 = EMAP(f + m*((c+2)%3));
+        if (E(e1,0) == d) E(e1,0) = s; else if (E(e1,1) == d) E(e1,1) = s;
+        if (E(e2,0) == d) E(e2,0) = s; else if (E(e2,1) == d) E(e2,1) = s;
+        F(f,c) = s;
+        break;
       }
     }
   }
-  // Finally, "remove" this edge and its information
-  kill_edge(e);
 
+  kill_edge(e);  // kill the collapsed edge itself
 
   return true;
 }
 
+
+// ============================================================
+// Outer overload
+// Pops from queue, collects VF-based one-ring, calls inner overload,
+// merges VF[d] → VF[s], re-enqueues surviving neighbor edges.
+// ============================================================
 bool SSP_collapse_edge(
   const decimate_cost_and_placement_func & cost_and_placement,
   const decimate_pre_collapse_func       & pre_collapse,
@@ -397,137 +458,153 @@ bool SSP_collapse_edge(
   int & f1,
   int & f2,
   std::vector<single_collapse_data> & decInfo,
-  std::vector<std::vector<int>> & decIM)
+  std::vector<std::vector<int>> & decIM,
+  std::vector<std::vector<int>> * VF,
+  const Eigen::VectorXi & faceSheetID)
 {
   using namespace Eigen;
   using namespace igl;
   using namespace std;
 
-  std::tuple<double,int,int> p;
-  while(true)
+  const int numOrigFaces = (int)faceSheetID.size();
+  const int m = F.rows();
+
+  // VF-based one-ring collector (replaces igl::circulation)
+  // Returns all non-null faces incident on v (real + infinity).
+  // verts = sorted set of all neighbor vertices (includes infVtx if boundary).
+  auto collect_onering = [&](const int v,
+                              vector<int> & faces,
+                              vector<int> & verts)
   {
-    // Check if Q is empty
-    if(Q.empty())
-    {
-      // no edges to collapse
-      return false;
+    faces.clear(); verts.clear();
+    set<int> vset;
+    int inf_count = 0;
+    for (const int f : (*VF)[v]) {
+      if (F(f,0) == IGL_COLLAPSE_EDGE_NULL &&
+          F(f,1) == IGL_COLLAPSE_EDGE_NULL &&
+          F(f,2) == IGL_COLLAPSE_EDGE_NULL) continue;
+      if (f >= numOrigFaces) inf_count++;
+      faces.push_back(f);
+      for (int c = 0; c < 3; c++)
+        if (F(f,c) != v) vset.insert(F(f,c));
     }
-    // pop from Q
+    verts.assign(vset.begin(), vset.end());
+
+    // [collect_onering] diagnostic
+    static int co_log = 0;
+    if (inf_count > 0 && co_log < 5) {
+      co_log++;
+      fprintf(stderr, "[collect_onering] v=%d  faces=%zu  inf=%d\n",
+              v, faces.size(), inf_count);
+    }
+  };
+
+  // Pop lowest-cost valid edge
+  tuple<double,int,int> p;
+  while (true) {
+    if (Q.empty()) return false;
     p = Q.top();
-    if(std::get<0>(p) == std::numeric_limits<double>::infinity())
-    {
-      // min cost edge is infinite cost
-      return false;
-    }
+    if (get<0>(p) == numeric_limits<double>::infinity()) return false;
     Q.pop();
-    e = std::get<1>(p);
-    // Check if matches timestamp
-    if(std::get<2>(p) == EQ(e))
-    {
+    e = get<1>(p);
+    if (get<2>(p) == EQ(e)) {
+      // Safety: skip edges killed by VF topology update but not yet dequeued
+      if (E(e,0) == IGL_COLLAPSE_EDGE_NULL) { EQ(e) = -1; continue; }
       break;
     }
-    // must be stale or dead.
-    assert(std::get<2>(p)  < EQ(e) || EQ(e) == -1);
-    // try again.
+    assert(get<2>(p) < EQ(e) || EQ(e) == -1);
   }
 
-  // Why is this computed up here?
-  // If we just need original face neighbors of edge, could we gather that more
-  // directly than gathering face neighbors of each vertex?
-  std::vector<int> /*Nse,*/Nsf,Nsv;
-  circulation(e, true,F,EMAP,EF,EI,/*Nse,*/Nsv,Nsf);
-  std::vector<int> /*Nde,*/Ndf,Ndv;
-  circulation(e, false,F,EMAP,EF,EI,/*Nde,*/Ndv,Ndf);
+  // Capture s/d before inner overload calls kill_edge(e)
+  const int sv = (E(e,0) < E(e,1)) ? E(e,0) : E(e,1);
+  const int dv = (E(e,0) < E(e,1)) ? E(e,1) : E(e,0);
+
+  // Collect one-rings via VF (real + infinity faces; order is unimportant here)
+  vector<int> Nsf, Nsv_verts;   // faces and neighbour vertices of E(e,1)
+  vector<int> Ndf, Ndv_verts;   // faces and neighbour vertices of E(e,0)
+  collect_onering(E(e,1), Nsf, Nsv_verts);
+  collect_onering(E(e,0), Ndf, Ndv_verts);
+
+  // [BOGUS ONE-RING] diagnostic
+  if ((int)Nsv_verts.size() < 2 || (int)Ndv_verts.size() < 2) {
+    static int bogus = 0;
+    if (bogus < 5) {
+      bogus++;
+      fprintf(stderr, "[BOGUS ONE-RING] e=%d E=(%d,%d)  Nsv=%zu  Ndv=%zu\n",
+              e, E(e,0), E(e,1), Nsv_verts.size(), Ndv_verts.size());
+    }
+    EQ(e)++;
+    Q.emplace(numeric_limits<double>::infinity(), e, EQ(e));
+    return false;
+  }
 
   bool collapsed = true;
   single_collapse_data data;
   VectorXi FIdx_onering_pre;
-  if(pre_collapse(V,F,E,EMAP,EF,EI,Q,EQ,C,e))
-  {
+
+  if (pre_collapse(V, F, E, EMAP, EF, EI, Q, EQ, C, e)) {
     collapsed = SSP_collapse_edge(
-      e,C.row(e),
-      Nsv,Nsf,Ndv,Ndf,
-      V,F,E,EMAP,EF,EI,e1,e2,f1,f2,decInfo,decIM,data,FIdx_onering_pre);
-  }else
-  {
+        e, C.row(e),
+        Nsv_verts, Nsf, Ndv_verts, Ndf,
+        V, F, E, EMAP, EF, EI,
+        e1, e2, f1, f2,
+        decInfo, decIM, data, FIdx_onering_pre,
+        faceSheetID, EQ);
+  } else {
     collapsed = false;
   }
-  
-  // cout << "start post collapse" << endl;
-  post_collapse(V,F,E,EMAP,EF,EI,Q,EQ,C,e,e1,e2,f1,f2,collapsed);
-  if(collapsed)
-  {
-    // ===================
-    // Derek modifications:
-    // ===================
+
+  post_collapse(V, F, E, EMAP, EF, EI, Q, EQ, C, e, e1, e2, f1, f2, collapsed);
+
+  if (collapsed) {
     decInfo.push_back(data);
 
-    // contruct index map for fast query
+    // Update decIM for all pre-collapse real faces
     for (int ii = 0; ii < FIdx_onering_pre.size(); ii++)
-      decIM[FIdx_onering_pre(ii)].push_back(decInfo.size() - 1);
-    // ===================
-    // Derek modifications end
-    // ===================
+      decIM[FIdx_onering_pre(ii)].push_back((int)decInfo.size() - 1);
 
-    // Erase the two, other collapsed edges by marking their timestamps as -1
-    EQ(e1) = -1;
-    EQ(e2) = -1;
-    // TODO: visits edges multiple times, ~150% more updates than should
-    //
-    // update local neighbors
-    // loop over original face neighbors
-    //
-    // Can't use previous computed Nse and Nde because those refer to EMAP
-    // before it was changed...
-    std::vector<int> Nf;
-    Nf.reserve( Nsf.size() + Ndf.size() ); // preallocate memory
-    Nf.insert( Nf.end(), Nsf.begin(), Nsf.end() );
-    Nf.insert( Nf.end(), Ndf.begin(), Ndf.end() );
-    // https://stackoverflow.com/a/1041939/148668
-    std::sort( Nf.begin(), Nf.end() );
-    Nf.erase( std::unique( Nf.begin(), Nf.end() ), Nf.end() );
-    // Collect all edges that must be updated
-    std::vector<int> Ne;
+    // Mark killed flap edges dead in queue (inner already set EQ(e_kill)=-1 directly;
+    // guard for the first two for backward-compat with post_collapse callbacks)
+    if (e1 >= 0) EQ(e1) = -1;
+    if (e2 >= 0) EQ(e2) = -1;
+
+    // Merge VF[dv] → VF[sv] (lazy: null faces filtered in collect_onering next call)
+    (*VF)[sv].insert((*VF)[sv].end(), (*VF)[dv].begin(), (*VF)[dv].end());
+    (*VF)[dv].clear();
+
+    // Re-enqueue edges of surviving neighbor faces
+    vector<int> Nf;
+    Nf.reserve(Nsf.size() + Ndf.size());
+    Nf.insert(Nf.end(), Nsf.begin(), Nsf.end());
+    Nf.insert(Nf.end(), Ndf.begin(), Ndf.end());
+    sort(Nf.begin(), Nf.end());
+    Nf.erase(unique(Nf.begin(), Nf.end()), Nf.end());
+
+    vector<int> Ne;
     Ne.reserve(3*Nf.size());
-    for(auto & n : Nf)
-    {
-      if(F(n,0) != IGL_COLLAPSE_EDGE_NULL ||
-          F(n,1) != IGL_COLLAPSE_EDGE_NULL ||
-          F(n,2) != IGL_COLLAPSE_EDGE_NULL)
-      {
-        for(int v = 0;v<3;v++)
-        {
-          // get edge id
-          const int ei = EMAP(v*F.rows()+n);
-          Ne.push_back(ei);
-        }
-      }
+    for (auto & n : Nf) {
+      if (F(n,0) == IGL_COLLAPSE_EDGE_NULL &&
+          F(n,1) == IGL_COLLAPSE_EDGE_NULL &&
+          F(n,2) == IGL_COLLAPSE_EDGE_NULL) continue;
+      for (int v = 0; v < 3; v++)
+        Ne.push_back(EMAP(v*m + n));
     }
-    // Only process edge once
-    std::sort( Ne.begin(), Ne.end() );
-    Ne.erase( std::unique( Ne.begin(), Ne.end() ), Ne.end() );
-    for(auto & ei : Ne)
-    {
-       // compute cost and potential placement
-       double cost;
-       RowVectorXd place;
-       cost_and_placement(ei,V,F,E,EMAP,EF,EI,cost,place);
-       // Increment timestamp
-       EQ(ei)++;
-       // Replace in queue
-       Q.emplace(cost,ei,EQ(ei));
-       C.row(ei) = place;
+    sort(Ne.begin(), Ne.end());
+    Ne.erase(unique(Ne.begin(), Ne.end()), Ne.end());
+
+    for (auto & ei : Ne) {
+      if (E(ei,0) == IGL_COLLAPSE_EDGE_NULL) continue;  // skip killed edges
+      double cost;
+      RowVectorXd place;
+      cost_and_placement(ei, V, F, E, EMAP, EF, EI, cost, place);
+      EQ(ei)++;
+      Q.emplace(cost, ei, EQ(ei));
+      C.row(ei) = place;
     }
-    // cout << "end of a collapse" << endl;
-  }else
-  {
-    // cout << "remove from queue" << endl;
-    // reinsert with infinite weight (the provided cost function must **not**
-    // have given this un-collapsable edge inf cost already)
-    // Increment timestamp
+  } else {
     EQ(e)++;
-    // Replace in queue
-    Q.emplace(std::numeric_limits<double>::infinity(),e,EQ(e));
+    Q.emplace(numeric_limits<double>::infinity(), e, EQ(e));
   }
+
   return collapsed;
 }

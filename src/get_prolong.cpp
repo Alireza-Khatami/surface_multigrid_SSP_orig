@@ -1,4 +1,5 @@
 #include "get_prolong.h"
+#include <partition_into_sheets.h>
 
 void get_prolong(
 	const Eigen::MatrixXd & VO,
@@ -38,8 +39,13 @@ void get_prolong(
 		}
 	}
 
+  // Partition original mesh into sheets for query routing
+  Eigen::VectorXi faceSheetID_p;
+  int numSheets_p = 1;
+  partition_into_sheets(FO, faceSheetID_p, numSheets_p);
+
   // query fine vertices to the coarse
-  query_fine_to_coarse(decInfo, IM, decIM, FIM, BC, BF, FIdx);
+  query_fine_to_coarse(decInfo, IM, decIM, FIM, faceSheetID_p, BC, BF, FIdx);
 
   // assemble P
   vector<Triplet<double>> IJV;
@@ -94,8 +100,13 @@ void get_prolong_block(
 		}
 	}
 
+  // Partition original mesh into sheets for query routings
+  Eigen::VectorXi faceSheetID_pb;
+  int numSheets_pb = 1;
+  partition_into_sheets(FO, faceSheetID_pb, numSheets_pb);
+
   // query fine vertices to the coarse
-  query_fine_to_coarse(decInfo, IM, decIM, FIM, BC, BF, FIdx);
+  query_fine_to_coarse(decInfo, IM, decIM, FIM, faceSheetID_pb, BC, BF, FIdx);
 
 	// assemble P
   vector<Triplet<double>> IJV;

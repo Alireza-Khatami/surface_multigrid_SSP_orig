@@ -5,6 +5,7 @@ void query_coarse_to_fine(
   const Eigen::VectorXi & IM,
   const std::vector<std::vector<int>> & decIM,
   const Eigen::VectorXi & IMF,
+  const Eigen::VectorXi & faceSheetID,
   Eigen::MatrixXd & BC,
   Eigen::MatrixXi & BF,
   Eigen::VectorXi & FIdx)
@@ -38,7 +39,7 @@ void query_coarse_to_fine(
   // for (int qIdx=0; qIdx<numQuery; qIdx++)
   igl::parallel_for(
     numQuery,
-    [&verbose, &FIdx, &BC, &BF, &decIM, &decInfo, &queryCounts](const int qIdx)
+    [&verbose, &FIdx, &BC, &BF, &decIM, &decInfo, &queryCounts, &faceSheetID](const int qIdx)
   {
     // // print progress
     // if (qIdx % 1 == 0 && verbose) 
@@ -73,20 +74,31 @@ void query_coarse_to_fine(
       if (verbose)
         cout << "qIdx: " << qIdx << ", dIdx: " << dIdx << endl; 
 
+      // Route to the correct sheet for this face
+      const SheetData * sd_ptr = nullptr;
+      {
+        int sid = (FIdx(qIdx) < faceSheetID.size()) ? faceSheetID(FIdx(qIdx)) : 0;
+        for (auto & sd : decInfo[dIdx].sheets)
+          if (sd.global_sheet_id == sid) { sd_ptr = &sd; break; }
+        if (!sd_ptr && !decInfo[dIdx].sheets.empty())
+          sd_ptr = &decInfo[dIdx].sheets[0];  // fallback for manifold meshes
+      }
+      if (!sd_ptr) continue;
+      const SheetData & sd = *sd_ptr;
+
       // get vi and vj
-      int vi = decInfo[dIdx].subsetVIdx(decInfo[dIdx].b(0));
-      int vj = decInfo[dIdx].subsetVIdx(decInfo[dIdx].b(1));
+      int vi = sd.subsetVIdx(sd.b(0));
+      int vj = sd.subsetVIdx(sd.b(1));
 
       VectorXi f = BF.row(qIdx);
 
       // find f in subsetVIdx
       int v0, v1, v2; // such that subsetVIdx(v0) == f(0)
       {
-        // PROFC_NODE("query: find local vIdx");
         VectorXi v0_vec, v1_vec, v2_vec;
-        igl::find((decInfo[dIdx].subsetVIdx.array() == f(0)).eval(), v0_vec);
-        igl::find((decInfo[dIdx].subsetVIdx.array() == f(1)).eval(), v1_vec);
-        igl::find((decInfo[dIdx].subsetVIdx.array() == f(2)).eval(), v2_vec);
+        igl::find((sd.subsetVIdx.array() == f(0)).eval(), v0_vec);
+        igl::find((sd.subsetVIdx.array() == f(1)).eval(), v1_vec);
+        igl::find((sd.subsetVIdx.array() == f(2)).eval(), v2_vec);
 
         assert(v0_vec.size() == 1);
         assert(v1_vec.size() == 1);
@@ -97,18 +109,17 @@ void query_coarse_to_fine(
         v2 = v2_vec(0);
       }
 
-      // get query UV
-      VectorXd queryUV = 
-          BC(qIdx,0) * decInfo[dIdx].UV_post.row(v0)  
-        + BC(qIdx,1) * decInfo[dIdx].UV_post.row(v1)
-        + BC(qIdx,2) * decInfo[dIdx].UV_post.row(v2);
+      // get query UV (coarse → fine: uses UV_post as input space, UV_pre as output)
+      VectorXd queryUV =
+          BC(qIdx,0) * sd.UV_post.row(v0)
+        + BC(qIdx,1) * sd.UV_post.row(v1)
+        + BC(qIdx,2) * sd.UV_post.row(v2);
 
       Eigen::MatrixXd B;
       {
-        // PROFC_NODE("query: compute barycentric");
-        compute_barycentric(queryUV, decInfo[dIdx].UV_pre, decInfo[dIdx].FUV_pre,B);
+        compute_barycentric(queryUV, sd.UV_pre, sd.FUV_pre, B);
         if (verbose)
-          cout << "B: \n" << B << endl; 
+          cout << "B: \n" << B << endl;
       }
 
       // snap to the closest one
@@ -116,7 +127,7 @@ void query_coarse_to_fine(
       double minD = 1.0;
       int idxToFUV;
       for (int bb=0;bb<distToValid.size(); bb++)
-      { 
+      {
         if (distToValid(bb) < minD)
         {
           minD = distToValid(bb);
@@ -132,10 +143,10 @@ void query_coarse_to_fine(
 
       BC.row(qIdx) = B.row(idxToFUV);
 
-      BF(qIdx, 0) = decInfo[dIdx].subsetVIdx(decInfo[dIdx].FUV_pre(idxToFUV,0));
-      BF(qIdx, 1) = decInfo[dIdx].subsetVIdx(decInfo[dIdx].FUV_pre(idxToFUV,1));
-      BF(qIdx, 2) = decInfo[dIdx].subsetVIdx(decInfo[dIdx].FUV_pre(idxToFUV,2));
-      FIdx(qIdx) = decInfo[dIdx].FIdx_pre(idxToFUV);
+      BF(qIdx, 0) = sd.subsetVIdx(sd.FUV_pre(idxToFUV,0));
+      BF(qIdx, 1) = sd.subsetVIdx(sd.FUV_pre(idxToFUV,1));
+      BF(qIdx, 2) = sd.subsetVIdx(sd.FUV_pre(idxToFUV,2));
+      FIdx(qIdx) = sd.FIdx_pre(idxToFUV);
     }
   // };
   },1000);

@@ -1,4 +1,6 @@
 #include "SSP_midpoint.h"
+#include "partition_into_sheets.h"
+#include <igl/vertex_triangle_adjacency.h>
 
 using namespace igl;
 
@@ -32,17 +34,6 @@ bool SSP_midpoint(
   Eigen::VectorXi EMAP;
   Eigen::MatrixXi E,EF,EI;
   edge_flaps(FO,E,EMAP,EF,EI);
-  // decimate will not work correctly on non-edge-manifold meshes. By extension
-  // this includes meshes with non-manifold vertices on the boundary since these
-  // will create a non-manifold edge when connected to infinity.
-  {
-    Eigen::Array<bool,Eigen::Dynamic,Eigen::Dynamic> BF;
-    Eigen::Array<bool,Eigen::Dynamic,1> BE;
-    if(!is_edge_manifold(FO,E.rows(),EMAP,BF,BE))
-    {
-      return false;
-    }
-  }
   decimate_pre_collapse_func always_try;
   decimate_post_collapse_func never_care;
   always_try_never_care(always_try,never_care);
@@ -145,14 +136,25 @@ bool SSP_midpoint(
   VectorXi EMAP;
   MatrixXi E,EF,EI;
   edge_flaps(F,E,EMAP,EF,EI);
-  {
-    Eigen::Array<bool,Eigen::Dynamic,Eigen::Dynamic> BF;
-    Eigen::Array<bool,Eigen::Dynamic,1> BE;
-    if(!is_edge_manifold(F,E.rows(),EMAP,BF,BE))
-    {
-      return false;
-    }
-  }
+
+  // Partition original faces into manifold sheets (before infinity extension).
+  // Infinity faces are appended at the end by connect_boundary_to_infinity, so
+  // OF.topRows(numOrigFaces) gives the original faces.
+  const int infVtx_sspm = (int)OV.rows() - 1;
+  int numOrigFaces = 0;
+  while (numOrigFaces < OF.rows() &&
+         OF(numOrigFaces,0) != infVtx_sspm &&
+         OF(numOrigFaces,1) != infVtx_sspm &&
+         OF(numOrigFaces,2) != infVtx_sspm)
+    numOrigFaces++;
+
+  Eigen::VectorXi faceSheetID;
+  int numSheets = 1;
+  partition_into_sheets(OF.topRows(numOrigFaces), faceSheetID, numSheets);
+
+  // VF adjacency for VF-based one-ring collection
+  std::vector<std::vector<int>> VF_sspm, VFi_sspm;
+  igl::vertex_triangle_adjacency((int)V.rows(), F, VF_sspm, VFi_sspm);
 
   igl::min_heap<std::tuple<double,int,int> > Q;
   // Could reserve with https://stackoverflow.com/a/29236236/148668
@@ -199,7 +201,8 @@ bool SSP_midpoint(
     int e,e1,e2,f1,f2;
     if(SSP_collapse_edge(
       cost_and_placement, pre_collapse, post_collapse,
-      V,F,E,EMAP,EF,EI,Q,EQ,C,e,e1,e2,f1,f2,decInfo,decIM))
+      V,F,E,EMAP,EF,EI,Q,EQ,C,e,e1,e2,f1,f2,decInfo,decIM,
+      &VF_sspm, faceSheetID))
     {
       if(stopping_condition(V,F,E,EMAP,EF,EI,Q,EQ,C,e,e1,e2,f1,f2))
       {

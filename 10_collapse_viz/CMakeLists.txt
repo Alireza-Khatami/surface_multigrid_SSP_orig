@@ -22,8 +22,16 @@ find_package(LIBIGL REQUIRED)
 
 include_directories("../src/")
 
-file(GLOB SRCFILES *.cpp ../src/*.cpp)
-add_executable(${PROJECT_NAME}_bin ${SRCFILES})
+# App sources — list explicitly so new files are visible at a glance
+set(APP_SRCS
+    main.cpp
+    visualizer.cpp
+)
+
+# SSP library sources — glob is fine here; all files belong to the shared library
+file(GLOB SSP_SRCS ../src/*.cpp)
+
+add_executable(${PROJECT_NAME}_bin ${APP_SRCS} ${SSP_SRCS})
 
 target_link_libraries(${PROJECT_NAME}_bin igl::core polyscope)
 

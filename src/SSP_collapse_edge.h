@@ -99,7 +99,9 @@ bool SSP_collapse_edge(
     std::vector<single_collapse_data> & decInfo,
     std::vector<std::vector<int>> & decIM,
     single_collapse_data & data,
-    Eigen::VectorXi & FIdx_onering_pre);
+    Eigen::VectorXi & FIdx_onering_pre,
+    const Eigen::VectorXi & faceSheetID,
+    Eigen::VectorXi & EQ);
 // bool SSP_collapse_edge(
 //     const int e,
 //     const Eigen::RowVectorXd & p,
@@ -173,7 +175,9 @@ bool SSP_collapse_edge(
     int & f1,
     int & f2,
     std::vector<single_collapse_data> & decInfo,
-    std::vector<std::vector<int>> & decIM);
+    std::vector<std::vector<int>> & decIM,
+    std::vector<std::vector<int>> * VF,
+    const Eigen::VectorXi & faceSheetID);
 // }
 
 #endif
