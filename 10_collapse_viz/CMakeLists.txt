@@ -26,6 +26,7 @@ include_directories("../src/")
 set(APP_SRCS
     main.cpp
     visualizer.cpp
+    orient_faces_consistently.cpp
 )
 
 # SSP library sources — glob is fine here; all files belong to the shared library

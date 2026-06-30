@@ -3,6 +3,7 @@
 #include <polyscope/polyscope.h>
 #include <polyscope/surface_mesh.h>
 #include <polyscope/curve_network.h>
+#include <polyscope/point_cloud.h>
 
 #include <igl/remove_unreferenced.h>
 #include <igl/collapse_edge.h>  // IGL_COLLAPSE_EDGE_NULL
@@ -10,6 +11,7 @@
 #include <single_collapse_data.h>
 
 #include <Eigen/Dense>
+#include <Eigen/Geometry>
 #include <vector>
 #include <limits>
 #include <cmath>
@@ -28,19 +30,27 @@ extern std::vector<single_collapse_data> gDecInfo;
 bool do_next_step();  // defined in main.cpp
 
 // ---- display-only state ----
-static float gUVOffset        = 1.5f;
-static float gRingScale       = 1.0f;
-static float gStepDelayMs     = 100.0f;   // milliseconds to sleep after each step
-static bool  gRunning         = false;
-static bool  gRunToSeam       = false;    // skip delay until next seam-edge collapse
-static bool  gShowRingPre     = true;
-static bool  gShowRingPost    = true;
-static bool  gShowUVPre       = true;
-static bool  gShowUVPost      = true;
-static bool  gShowArrowPre    = true;
-static bool  gShowArrowPost   = true;
+static float gUVOffset          = 1.5f;
+static float gRingScale         = 1.0f;
+static float gStepDelayMs       = 100.0f;
+static bool  gRunning           = false;
+static bool  gRunToSeam         = false;
+static bool  gCanonicalView     = false;
+static bool  gShowRingPre       = true;
+static bool  gShowRingPost      = true;
+static bool  gShowUVPre         = true;
+static bool  gShowUVPost        = true;
+static bool  gShowArrowPre      = true;
+static bool  gShowArrowPost     = true;
 static bool  gShowCollapsedEdge = true;
-static float edge_radius      = 0.00006f;
+static bool  gShowMeshPre       = false;
+static float edge_radius        = 0.00006f;
+static float pts_radius         = 0.00008f;
+
+// Pre-collapse mesh snapshot (compacted, taken just before each step)
+static MatrixXd gPreV;
+static MatrixXi gPreF;
+static bool     gHasPreMesh = false;
 
 struct DisplaySnap {
     bool valid = false;
@@ -78,7 +88,15 @@ static MatrixXd safe_V()
     return V;
 }
 
-// Populate gSnap from the most recent collapse record.
+static void snapshot_pre_mesh()
+{
+    MatrixXi Fl = live_faces();
+    MatrixXd Vs = safe_V();
+    VectorXi I1, I2;
+    igl::remove_unreferenced(Vs, Fl, gPreV, gPreF, I1, I2);
+    gHasPreMesh = true;
+}
+
 static void refresh_snap()
 {
     if (gDecInfo.empty()) return;
@@ -97,34 +115,36 @@ static void refresh_snap()
     }
 }
 
-// ---- update polyscope display ----
-void update_display()
+// ---- shared geometry ----
+
+struct DisplayGeometry {
+    MatrixXd V_ring;       // one-ring vertices in 3D (scaled)
+    MatrixXd uv_pre_3d;    // UV pre panel lifted into 3D
+    MatrixXd uv_post_3d;   // UV post panel lifted into 3D
+    MatrixXd arrows_pre;   // ring → UV pre vectors
+    MatrixXd arrows_post;  // ring → UV post vectors
+    Vector3d avg_normal;   // one-ring average face normal
+    Vector3d centroid;     // one-ring centroid
+    double   ring_span;
+};
+
+static DisplayGeometry compute_ring_geometry()
 {
-    // Main mesh
-    {
-        MatrixXi Flive = live_faces();
-        MatrixXd Vd, Vc; MatrixXi Fc; VectorXi I1, I2;
-        Vd = safe_V();
-        igl::remove_unreferenced(Vd, Flive, Vc, Fc, I1, I2);
-        auto * m = polyscope::registerSurfaceMesh("mesh", Vc, Fc);
-        m->setSurfaceColor({0.75f, 0.75f, 0.75f});
-        m->setEdgeWidth(0.5);
-    }
+    DisplayGeometry g;
 
-    if (!gSnap.valid) return;
-
-    // ---- centroid and ring_span (finite vertices only) ----
-    Vector3d centroid = Vector3d::Zero();
-    double ring_span = 0.0;
+    // centroid and ring_span
+    g.centroid   = Vector3d::Zero();
+    g.ring_span  = 0.0;
+    g.avg_normal = Vector3d::Zero();
     {
         int cnt = 0;
         for (int v = 0; v < gSnap.V_pre.rows(); v++) {
             if (std::isfinite(gSnap.V_pre(v,0))) {
-                centroid += gSnap.V_pre.row(v).transpose();
+                g.centroid += gSnap.V_pre.row(v).transpose();
                 cnt++;
             }
         }
-        if (cnt > 0) centroid /= cnt;
+        if (cnt > 0) g.centroid /= cnt;
         for (int ax = 0; ax < 3; ax++) {
             double lo =  std::numeric_limits<double>::infinity();
             double hi = -std::numeric_limits<double>::infinity();
@@ -132,47 +152,47 @@ void update_display()
                 double val = gSnap.V_pre(v, ax);
                 if (std::isfinite(val)) { lo = std::min(lo, val); hi = std::max(hi, val); }
             }
-            if (hi > lo) ring_span = std::max(ring_span, hi - lo);
+            if (hi > lo) g.ring_span = std::max(g.ring_span, hi - lo);
         }
-        if (ring_span < 1e-10) ring_span = 1.0;
+        if (g.ring_span < 1e-10) g.ring_span = 1.0;
     }
 
-    // ---- one-ring vertices scaled around centroid ----
-    MatrixXd V_scaled(gSnap.V_pre.rows(), 3);
+    // one-ring scaled around centroid
+    g.V_ring.resize(gSnap.V_pre.rows(), 3);
     for (int v = 0; v < gSnap.V_pre.rows(); v++) {
         if (std::isfinite(gSnap.V_pre(v,0)))
-            V_scaled.row(v) = centroid.transpose() +
-                              (gSnap.V_pre.row(v) - centroid.transpose()) * (double)gRingScale;
+            g.V_ring.row(v) = g.centroid.transpose() +
+                              (gSnap.V_pre.row(v) - g.centroid.transpose()) * (double)gRingScale;
         else
-            V_scaled.row(v) = gSnap.V_pre.row(v);
+            g.V_ring.row(v) = gSnap.V_pre.row(v);
     }
 
-    // ---- UV panel normal and tangent frame ----
-    Vector3d avg_normal = Vector3d::Zero();
+    // average face normal
     for (int f = 0; f < gSnap.FUV_pre.rows(); f++) {
         Vector3d p0 = gSnap.V_pre.row(gSnap.FUV_pre(f,0)).transpose();
         Vector3d p1 = gSnap.V_pre.row(gSnap.FUV_pre(f,1)).transpose();
         Vector3d p2 = gSnap.V_pre.row(gSnap.FUV_pre(f,2)).transpose();
         if (!p0.allFinite() || !p1.allFinite() || !p2.allFinite()) continue;
-        avg_normal += (p1 - p0).cross(p2 - p0);
+        g.avg_normal += (p1 - p0).cross(p2 - p0);
     }
-    if (avg_normal.squaredNorm() < 1e-20) avg_normal = Vector3d::UnitZ();
-    else avg_normal.normalize();
+    if (g.avg_normal.squaredNorm() < 1e-20) g.avg_normal = Vector3d::UnitZ();
+    else g.avg_normal.normalize();
 
-    Vector3d arb = (std::abs(avg_normal.dot(Vector3d::UnitX())) < 0.9)
+    // tangent frame for UV panel
+    Vector3d arb = (std::abs(g.avg_normal.dot(Vector3d::UnitX())) < 0.9)
                    ? Vector3d::UnitX() : Vector3d::UnitY();
-    Vector3d t1 = (arb - avg_normal * avg_normal.dot(arb)).normalized();
-    Vector3d t2 = avg_normal.cross(t1).normalized();
+    Vector3d t1 = (arb - g.avg_normal * g.avg_normal.dot(arb)).normalized();
+    Vector3d t2 = g.avg_normal.cross(t1).normalized();
 
     double uv_span_u = gSnap.UV_pre.col(0).maxCoeff() - gSnap.UV_pre.col(0).minCoeff();
     double uv_span_v = gSnap.UV_pre.col(1).maxCoeff() - gSnap.UV_pre.col(1).minCoeff();
     double uv_span   = std::max(uv_span_u, uv_span_v);
-    double uv_scale  = (uv_span > 1e-10) ? ring_span / uv_span : 1.0;
+    double uv_scale  = (uv_span > 1e-10) ? g.ring_span / uv_span : 1.0;
     uv_scale *= (double)gRingScale;
 
-    double u_center = (gSnap.UV_pre.col(0).maxCoeff() + gSnap.UV_pre.col(0).minCoeff()) * 0.5;
-    double v_center = (gSnap.UV_pre.col(1).maxCoeff() + gSnap.UV_pre.col(1).minCoeff()) * 0.5;
-    Vector3d panel_center = centroid + avg_normal * (double)gUVOffset * ring_span;
+    double u_center    = (gSnap.UV_pre.col(0).maxCoeff() + gSnap.UV_pre.col(0).minCoeff()) * 0.5;
+    double v_center    = (gSnap.UV_pre.col(1).maxCoeff() + gSnap.UV_pre.col(1).minCoeff()) * 0.5;
+    Vector3d panel_center = g.centroid + g.avg_normal * (double)gUVOffset * g.ring_span;
 
     auto make3d = [&](const MatrixXd & UV) {
         MatrixXd P(UV.rows(), 3);
@@ -184,62 +204,77 @@ void update_display()
         return P;
     };
 
-    MatrixXd uv_pre_3d  = make3d(gSnap.UV_pre);
-    MatrixXd uv_post_3d = make3d(gSnap.UV_post);
+    g.uv_pre_3d  = make3d(gSnap.UV_pre);
+    g.uv_post_3d = make3d(gSnap.UV_post);
 
-    // ---- arrow vectors: one-ring → UV ----
+    // arrow vectors
     int nV = gSnap.V_pre.rows();
-    MatrixXd arrows_pre(nV, 3), arrows_post(nV, 3);
+    g.arrows_pre.resize(nV, 3);  g.arrows_pre.setZero();
+    g.arrows_post.resize(nV, 3); g.arrows_post.setZero();
     for (int i = 0; i < nV; i++) {
-        if (std::isfinite(V_scaled(i,0))) {
-            arrows_pre.row(i)  = uv_pre_3d.row(i)  - V_scaled.row(i);
-            arrows_post.row(i) = uv_post_3d.row(i) - V_scaled.row(i);
-        } else {
-            arrows_pre.row(i).setZero();
-            arrows_post.row(i).setZero();
+        if (std::isfinite(g.V_ring(i,0))) {
+            g.arrows_pre.row(i)  = g.uv_pre_3d.row(i)  - g.V_ring.row(i);
+            g.arrows_post.row(i) = g.uv_post_3d.row(i) - g.V_ring.row(i);
         }
     }
 
-    // ---- one-ring 3-D meshes ----
+    return g;
+}
+
+static void register_ring_geometry(const DisplayGeometry & g)
+{
+    // one-ring meshes + matching point clouds
     {
-        auto * rp = polyscope::registerSurfaceMesh("one_ring_pre", V_scaled, gSnap.FUV_pre);
+        auto * rp = polyscope::registerSurfaceMesh("one_ring_pre", g.V_ring, gSnap.FUV_pre);
         rp->setSurfaceColor({0.3f, 0.55f, 1.0f})->setEdgeWidth(1.5)->setSmoothShade(false);
         rp->setEnabled(gShowRingPre);
-        rp->addVertexVectorQuantity("to_uv_pre", arrows_pre, polyscope::VectorType::AMBIENT)->setEnabled(gShowArrowPre);
+        rp->addVertexVectorQuantity("to_uv_pre", g.arrows_pre, polyscope::VectorType::AMBIENT)->setEnabled(gShowArrowPre);
 
-        auto * ro = polyscope::registerSurfaceMesh("one_ring_post", V_scaled, gSnap.FUV_post);
-        ro->setSurfaceColor({1.0f, 0.5f, 0.15f})->setEdgeWidth(1.5)->setSmoothShade(false)->setTransparency(0.4f);
+        polyscope::registerPointCloud("ring_pre_pts", g.V_ring)
+            ->setPointColor({0.3f, 0.55f, 1.0f})->setPointRadius(pts_radius, true)->setEnabled(gShowRingPre);
+
+        auto * ro = polyscope::registerSurfaceMesh("one_ring_post", g.V_ring, gSnap.FUV_post);
+        ro->setSurfaceColor({1.0f, 0.5f, 0.15f})->setEdgeWidth(1.5)->setSmoothShade(false)->setTransparency(1.0f);
         ro->setEnabled(gShowRingPost);
-        ro->addVertexVectorQuantity("to_uv_post", arrows_post, polyscope::VectorType::AMBIENT)->setEnabled(gShowArrowPost);
+        ro->addVertexVectorQuantity("to_uv_post", g.arrows_post, polyscope::VectorType::AMBIENT)->setEnabled(gShowArrowPost);
+
+        polyscope::registerPointCloud("ring_post_pts", g.V_ring)
+            ->setPointColor({1.0f, 0.5f, 0.15f})->setPointRadius(pts_radius, true)->setEnabled(gShowRingPost);
     }
 
-    // ---- collapsed edge in 3-D ----
+    // collapsed edge in 3-D
     {
         MatrixXd eV(2, 3);
-        eV.row(0) = V_scaled.row(gSnap.b(0));
-        eV.row(1) = V_scaled.row(gSnap.b(1));
+        eV.row(0) = g.V_ring.row(gSnap.b(0));
+        eV.row(1) = g.V_ring.row(gSnap.b(1));
         MatrixXi eE(1, 2); eE << 0, 1;
         polyscope::registerCurveNetwork("collapsed_edge", eV, eE)
             ->setRadius(edge_radius)->setColor({1.0f, 0.05f, 0.05f})
             ->setEnabled(gShowCollapsedEdge);
     }
 
-    // ---- UV meshes ----
+    // UV meshes + matching point clouds
     {
-        auto * up = polyscope::registerSurfaceMesh("uv_pre", uv_pre_3d, gSnap.FUV_pre);
+        auto * up = polyscope::registerSurfaceMesh("uv_pre", g.uv_pre_3d, gSnap.FUV_pre);
         up->setSurfaceColor({0.3f, 0.55f, 1.0f})->setEdgeWidth(1.5)->setSmoothShade(false);
         up->setEnabled(gShowUVPre);
 
-        auto * uo = polyscope::registerSurfaceMesh("uv_post", uv_post_3d, gSnap.FUV_post);
-        uo->setSurfaceColor({1.0f, 0.5f, 0.15f})->setEdgeWidth(1.5)->setSmoothShade(false)->setTransparency(0.4f);
+        polyscope::registerPointCloud("uv_pre_pts", g.uv_pre_3d)
+            ->setPointColor({0.3f, 0.55f, 1.0f})->setPointRadius(pts_radius, true)->setEnabled(gShowUVPre);
+
+        auto * uo = polyscope::registerSurfaceMesh("uv_post", g.uv_post_3d, gSnap.FUV_post);
+        uo->setSurfaceColor({1.0f, 0.5f, 0.15f})->setEdgeWidth(1.5)->setSmoothShade(false)->setTransparency(1.0f);
         uo->setEnabled(gShowUVPost);
+
+        polyscope::registerPointCloud("uv_post_pts", g.uv_post_3d)
+            ->setPointColor({1.0f, 0.5f, 0.15f})->setPointRadius(pts_radius, true)->setEnabled(gShowUVPost);
     }
 
-    // ---- collapsed edge in UV space ----
+    // collapsed edge in UV space
     {
         MatrixXd euV(2, 3);
-        euV.row(0) = uv_pre_3d.row(gSnap.b(0));
-        euV.row(1) = uv_pre_3d.row(gSnap.b(1));
+        euV.row(0) = g.uv_pre_3d.row(gSnap.b(0));
+        euV.row(1) = g.uv_pre_3d.row(gSnap.b(1));
         MatrixXi euE(1, 2); euE << 0, 1;
         polyscope::registerCurveNetwork("uv_collapsed_edge", euV, euE)
             ->setRadius(edge_radius)->setColor({1.0f, 0.05f, 0.05f})
@@ -247,29 +282,112 @@ void update_display()
     }
 }
 
+// ---- canonical view ----
+// Clears all structures and re-registers the one-ring/UV geometry rotated so that
+// avg_normal aligns with world Y-up: one-ring lies flat on the XZ floor, UV panels
+// float directly above. The main decimated mesh is hidden in this mode.
+static void show_canonical_view()
+{
+    if (!gSnap.valid) return;
+
+    DisplayGeometry g = compute_ring_geometry();
+
+    // Rotation: avg_normal → world Y-up (0,1,0)
+    Vector3d world_up(0.0, 1.0, 0.0);
+    Matrix3d R;
+    Vector3d axis = g.avg_normal.cross(world_up);
+    double   sinA = axis.norm();
+    double   cosA = g.avg_normal.dot(world_up);
+    if (sinA < 1e-6)
+        R = (cosA > 0.0) ? Matrix3d::Identity()
+                         : (Matrix3d() << -1,0,0, 0,-1,0, 0,0,1).finished();
+    else
+        R = AngleAxisd(std::atan2(sinA, cosA), axis / sinA).toRotationMatrix();
+
+    // Apply rotation + centering to every vertex buffer
+    auto rot = [&](const MatrixXd & P) -> MatrixXd {
+        MatrixXd out(P.rows(), 3);
+        for (int i = 0; i < P.rows(); i++) {
+            if (!std::isfinite(P(i,0))) { out.row(i).setZero(); continue; }
+            out.row(i) = (R * (P.row(i).transpose() - g.centroid)).transpose();
+        }
+        return out;
+    };
+
+    DisplayGeometry gc;
+    gc.V_ring     = rot(g.V_ring);
+    gc.uv_pre_3d  = rot(g.uv_pre_3d);
+    gc.uv_post_3d = rot(g.uv_post_3d);
+
+    int nV = gc.V_ring.rows();
+    gc.arrows_pre.resize(nV, 3);  gc.arrows_pre.setZero();
+    gc.arrows_post.resize(nV, 3); gc.arrows_post.setZero();
+    for (int i = 0; i < nV; i++) {
+        if (std::isfinite(g.V_ring(i,0))) {
+            gc.arrows_pre.row(i)  = gc.uv_pre_3d.row(i)  - gc.V_ring.row(i);
+            gc.arrows_post.row(i) = gc.uv_post_3d.row(i) - gc.V_ring.row(i);
+        }
+    }
+
+    polyscope::removeAllStructures();
+    register_ring_geometry(gc);
+    polyscope::view::resetCameraToHomeView();
+}
+
+// ---- update polyscope display ----
+void update_display()
+{
+    // Main mesh (only in normal view)
+    if (!gCanonicalView) {
+        MatrixXi Flive = live_faces();
+        MatrixXd Vd, Vc; MatrixXi Fc; VectorXi I1, I2;
+        Vd = safe_V();
+        igl::remove_unreferenced(Vd, Flive, Vc, Fc, I1, I2);
+        auto * m = polyscope::registerSurfaceMesh("mesh", Vc, Fc);
+        m->setSurfaceColor({0.75f, 0.75f, 0.75f});
+        m->setEdgeWidth(0.5);
+
+        // Pre-collapse ghost mesh
+        if (gHasPreMesh) {
+            auto * mp = polyscope::registerSurfaceMesh("mesh_pre", gPreV, gPreF);
+            mp->setSurfaceColor({0.4f, 0.9f, 0.4f})->setEdgeWidth(0.5)
+              ->setTransparency(0.5f)->setEnabled(gShowMeshPre);
+        }
+    }
+
+    if (!gSnap.valid) return;
+
+    if (gCanonicalView) {
+        show_canonical_view();
+    } else {
+        DisplayGeometry g = compute_ring_geometry();
+        register_ring_geometry(g);
+    }
+}
+
 // ---- ImGui callback ----
 void ui_callback()
 {
-    // Drive continuous decimation — sleep between steps so each frame is visible
+    // Drive continuous decimation
     if (gRunning && !gFinished) {
+        snapshot_pre_mesh();
         if (do_next_step()) {
             refresh_snap();
             update_display();
 
             bool hitSeam = !gDecInfo.empty() && gDecInfo.back().numFlapFaces > 2;
             if (gRunToSeam && hitSeam)
-                gRunToSeam = false;  // stop at the seam edge, resume normal delay
+                gRunToSeam = false;
 
-            if (!gRunToSeam) {
+            if (!gRunToSeam)
                 std::this_thread::sleep_for(
                     std::chrono::milliseconds(static_cast<int>(gStepDelayMs)));
-            }
         }
         if (gFinished)
             gRunning = false;
     }
 
-    ImGui::SetNextWindowSize({320, 360}, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize({340, 420}, ImGuiCond_FirstUseEver);
     ImGui::Begin("SSP Collapse Visualizer");
 
     ImGui::Text("Collapses: %d", gCollapseCount);
@@ -291,16 +409,31 @@ void ui_callback()
         if (ImGui::Button("Next  [Space]") ||
             ImGui::IsKeyPressed(ImGuiKey_Space, /*repeat=*/false))
         {
+            snapshot_pre_mesh();
             if (do_next_step()) { refresh_snap(); update_display(); }
         }
         ImGui::SameLine();
-        if (ImGui::Button("Run")) {
-            gRunning = true;
-        }
+        if (ImGui::Button("Run"))       { gRunning = true; }
         ImGui::SameLine();
-        if (ImGui::Button("Next seam")) {
-            gRunToSeam = true;
-            gRunning   = true;
+        if (ImGui::Button("Next seam")) { gRunToSeam = true; gRunning = true; }
+    }
+
+    // Canonical / normal view toggle
+    if (gSnap.valid) {
+        ImGui::Separator();
+        if (!gCanonicalView) {
+            if (ImGui::Button("Canonical View")) {
+                gCanonicalView = true;
+                show_canonical_view();
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("(one-ring on floor, UV above)");
+        } else {
+            if (ImGui::Button("Back to Main View")) {
+                gCanonicalView = false;
+                polyscope::removeAllStructures();
+                update_display();
+            }
         }
     }
 
@@ -331,6 +464,8 @@ void ui_callback()
     vis |= ImGui::Checkbox("Arrows pre",      &gShowArrowPre);  ImGui::SameLine();
     vis |= ImGui::Checkbox("Arrows post",     &gShowArrowPost);
     vis |= ImGui::Checkbox("Collapsed edges", &gShowCollapsedEdge);
+    if (gHasPreMesh)
+        vis |= ImGui::Checkbox("Mesh before collapse", &gShowMeshPre);
     if (vis && gSnap.valid) update_display();
 
     ImGui::End();

@@ -107,6 +107,23 @@ bool SSP_collapse_edge(
     for (auto & kv : nb_count)
       if (kv.second == 1 && kv.first != end_vtx) { start_vtx = kv.first; break; }
 
+    // [fan_walk DEBUG] fire whenever infVtx appears in the face list (= open fan).
+    // No static cap — we need to see every occurrence to catch the pattern.
+    if (nb_count.count(infVtx)) {
+      const char * method = (start_vtx != -1) ? "count-1" : "closed-fallback";
+      fprintf(stderr,
+        "[fan_walk OPEN] center=%d end=%d  infVtx_count=%d  "
+        "start_method=%s  start=%d%s\n",
+        center, end_vtx, nb_count.at(infVtx), method, start_vtx,
+        (start_vtx == infVtx) ? " *** INF-AS-START ***" : "");
+      // Show the full count-1 set so we can see which real boundary vtx (if any) was masked
+      fprintf(stderr, "  nb count-1 (excl end=%d): [", end_vtx);
+      for (auto & kv : nb_count)
+        if (kv.second == 1 && kv.first != end_vtx)
+          fprintf(stderr, "%d%s ", kv.first, kv.first == infVtx ? "(INF)" : "");
+      fprintf(stderr, "]\n");
+    }
+
     if (start_vtx == -1) {
       // Closed fan: pick third vertex of any face containing (center, end_vtx)
       for (int f : faces) {
@@ -157,6 +174,18 @@ bool SSP_collapse_edge(
     vector<int> result;
     result.reserve(walk.size());
     for (int gv : walk) result.push_back(to_local(gv));
+
+    // [fan_walk DEBUG] print final walk for every open fan so we can see
+    // whether -1 lands at position 0 (open end found), middle, or near end.
+    if (nb_count.count(infVtx)) {
+      fprintf(stderr, "  walk result (local): [");
+      for (int v : result) fprintf(stderr, "%d,", v);
+      int inf_pos = -1;
+      for (int i = 0; i < (int)result.size(); i++)
+        if (result[i] == -1) { inf_pos = i; break; }
+      fprintf(stderr, "]  -1 at pos %d / %d\n", inf_pos, (int)result.size());
+    }
+
     return result;
   };
   // ---- end fan_walk_local ----

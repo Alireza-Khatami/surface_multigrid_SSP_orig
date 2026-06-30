@@ -1,4 +1,5 @@
 #include "visualizer.h"
+#include "orient_faces_consistently.h"
 
 #include <igl/read_triangle_mesh.h>
 #include <igl/connect_boundary_to_infinity.h>
@@ -51,6 +52,14 @@ static void init_ssp(const std::string & mesh_path, int tarF)
     std::cout << "Loaded: |V|=" << VO.rows() << "  |F|=" << FO.rows() << "\n";
 
     gTargetFaces = tarF;
+
+    {
+        MatrixXi FF; VectorXi C;
+        int n_flipped = orient_faces_consistently(VO, FO, FF, C);
+        FO = FF;
+        std::cout << "orient_faces_consistently: " << n_flipped
+                  << " / " << FO.rows() << " faces re-wound\n";
+    }
 
     partition_into_sheets(FO, gFaceSheetID, gNumSheets);
     std::cout << "Sheets: " << gNumSheets << "\n";
