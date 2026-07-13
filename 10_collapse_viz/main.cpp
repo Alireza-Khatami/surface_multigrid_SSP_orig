@@ -19,6 +19,9 @@
 
 #include <Eigen/Dense>
 #include <iostream>
+#include <map>
+#include <set>
+#include <utility>
 #include <vector>
 #include <tuple>
 #include <limits>
@@ -29,7 +32,9 @@ using namespace Eigen;
 
 // ---- SSP loop state (extern'd by visualizer.cpp) ----
 MatrixXd gV;
+MatrixXd gVO;           // original mesh vertices (before connect_boundary_to_infinity)
 MatrixXi gF, gE;
+MatrixXi gFO;           // original mesh faces
 VectorXi gEMAP;
 MatrixXi gEF, gEI;
 igl::min_heap<std::tuple<double,int,int>> gQ;
@@ -40,6 +45,7 @@ std::vector<std::vector<int>> gDecIM;
 VectorXi gFaceSheetID;
 int gNumSheets    = 1;
 std::vector<std::vector<int>> gVF;
+std::vector<std::pair<int,int>> gSeamEdgeList;  // vertex pairs of seam (non-manifold) edges
 int gTargetFaces  = 100;
 int gCollapseCount = 0;
 bool gFinished    = false;
@@ -64,12 +70,34 @@ static void init_ssp(const std::string & mesh_path, int tarF)
     partition_into_sheets(FO, gFaceSheetID, gNumSheets);
     std::cout << "Sheets: " << gNumSheets << "\n";
 
+    gVO = VO;   // save original mesh before boundary extension
+    gFO = FO;
+
     igl::connect_boundary_to_infinity(VO, FO, gV, gF);
     igl::edge_flaps(gF, gE, gEMAP, gEF, gEI);
 
     {
         std::vector<std::vector<int>> VFi_unused;
         igl::vertex_triangle_adjacency((int)gV.rows(), gF, gVF, VFi_unused);
+    }
+
+    // Seam edges: edges where incident real faces span >1 sheet, or 3+ faces share the edge.
+    // Only considers original faces (f < gFaceSheetID.size()); infinity faces are excluded.
+    {
+        const int nFO = (int)gFaceSheetID.size();
+        std::map<std::pair<int,int>, std::vector<int>> edgeFaces;
+        for (int f = 0; f < nFO; f++)
+            for (int c = 0; c < 3; c++) {
+                int u = gF(f,c), v = gF(f,(c+1)%3);
+                edgeFaces[{std::min(u,v), std::max(u,v)}].push_back(f);
+            }
+        gSeamEdgeList.clear();
+        for (auto & kv : edgeFaces) {
+            const auto & fv = kv.second;
+            if (fv.size() > 2)  // 3+ faces → non-manifold seam edge
+                gSeamEdgeList.push_back(kv.first);
+        }
+        std::cout << "Seam edges: " << gSeamEdgeList.size() << "\n";
     }
 
     gEQ = VectorXi::Zero(gE.rows());

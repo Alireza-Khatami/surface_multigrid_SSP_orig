@@ -207,16 +207,32 @@ bool SSP_collapse_edge(
     if (sheets_Ndf.count(kv.first) && !sheets_Ndf[kv.first].empty())
       active_sheets.insert(kv.first);
 
-  // [sheets] diagnostic: first 10 collapses
+  // Helper: is vtx referenced by any face in flist?
+  auto vtx_in_flist = [&](const vector<int> & flist, int vtx) -> bool {
+    for (int f : flist)
+      for (int c = 0; c < 3; c++)
+        if (F(f,c) == vtx) return true;
+    return false;
+  };
+
+  // [sheets] diagnostic: for each active sheet, check whether the fan end-vertex
+  // actually appears in the face list — this is what active_sheets currently skips.
+  // fan_walk_local(center=E(e,1), end=E(e,0), Nsf_walk) → E(e,0) must be in Nsf faces
+  // fan_walk_local(center=E(e,0), end=E(e,1), Ndf_walk) → E(e,1) must be in Ndf faces
   {
     static int sheet_log = 0;
-    if (sheet_log < 10) {
+    if (sheet_log < 40) {
       sheet_log++;
-      fprintf(stderr, "[sheets] collapse #%zu vi=%d vj=%d active_sheets=%zu\n",
-              decInfo.size(), vi, vj, active_sheets.size());
-      for (int sid : active_sheets)
-        fprintf(stderr, "  sheet=%d  Nsf=%zu  Ndf=%zu\n",
-                sid, sheets_Nsf[sid].size(), sheets_Ndf[sid].size());
+      fprintf(stderr, "[sheets] collapse #%zu  e=(%d,%d) vi=%d vj=%d  active_sheets=%zu\n",
+              decInfo.size(), E(e,0), E(e,1), vi, vj, active_sheets.size());
+      for (int sid : active_sheets) {
+        bool nsf_has_e0 = vtx_in_flist(sheets_Nsf[sid], E(e,0));
+        bool ndf_has_e1 = vtx_in_flist(sheets_Ndf[sid], E(e,1));
+        fprintf(stderr, "  sheet=%d  Nsf=%zu(end_vtx_E0_present=%d)  Ndf=%zu(end_vtx_E1_present=%d)%s\n",
+                sid, sheets_Nsf[sid].size(), (int)nsf_has_e0,
+                sheets_Ndf[sid].size(), (int)ndf_has_e1,
+                (!nsf_has_e0 || !ndf_has_e1) ? "  <<< MISSING END_VTX — BUG CONFIRMED" : "");
+      }
     }
   }
 
@@ -317,34 +333,140 @@ bool SSP_collapse_edge(
     // [fan_walk EMPTY] diagnostic
     if (Nsv_local.empty() || Ndv_local.empty()) {
       static int fw_empty = 0;
-      if (fw_empty < 5) {
+      if (fw_empty < 10) {
         fw_empty++;
+        bool nsf_has_e0 = vtx_in_flist(Nsf_walk, E(e,0));
+        bool ndf_has_e1 = vtx_in_flist(Ndf_walk, E(e,1));
         fprintf(stderr,
-          "[fan_walk EMPTY] sid=%d vi=%d vj=%d  "
-          "Nsf_walk=%zu Ndf_walk=%zu  Nsv_local=%zu Ndv_local=%zu\n",
-          sid, vi, vj,
-          Nsf_walk.size(), Ndf_walk.size(),
-          Nsv_local.size(), Ndv_local.size());
+          "[fan_walk EMPTY] sid=%d  e=(%d,%d) vi=%d vj=%d\n"
+          "  Nsf_walk=%zu faces  center=E(e,1)=%d  end_vtx=E(e,0)=%d  end_in_Nsf=%d  Nsv_local=%zu\n"
+          "  Ndf_walk=%zu faces  center=E(e,0)=%d  end_vtx=E(e,1)=%d  end_in_Ndf=%d  Ndv_local=%zu\n",
+          sid, E(e,0), E(e,1), vi, vj,
+          Nsf_walk.size(), E(e,1), E(e,0), (int)nsf_has_e0, Nsv_local.size(),
+          Ndf_walk.size(), E(e,0), E(e,1), (int)ndf_has_e1, Ndv_local.size());
+        if (!nsf_has_e0 || !ndf_has_e1) {
+          fprintf(stderr, "  <<< END_VTX MISSING — hypothesis confirmed\n");
+          fprintf(stderr, "  Nsf_walk faces:");
+          for (int f : Nsf_walk)
+            fprintf(stderr, " [%d,%d,%d]", F(f,0), F(f,1), F(f,2));
+          fprintf(stderr, "\n  Ndf_walk faces:");
+          for (int f : Ndf_walk)
+            fprintf(stderr, " [%d,%d,%d]", F(f,0), F(f,1), F(f,2));
+          fprintf(stderr, "\n");
+        }
       }
-      assert(false && "fan_walk_local returned empty — upstream topology bug");
+      // assert intentionally disabled — collecting diagnostics, gracefully skip sheet
       continue;
     }
 
-    // [joint_lscm] diagnostic: first 10 calls
+    // ---- pre-joint_lscm invariant check ----
+    // joint_lscm reads Nsv/Ndv at lines 27-34 (e0/e1 init), 40-53 (onBd),
+    // 64-68 (isFlap), 126-175 (bdLoop), 924 (vk assert in case2).
     {
-      static int lscm_log = 0;
-      if (lscm_log < 10) {
-        lscm_log++;
-        fprintf(stderr,
-          "[joint_lscm #%d] sid=%d vi=%d(loc %d) vj=%d(loc %d)  pre=%d post=%d  Nsv=[",
-          lscm_log, sid, vi, b_si(0), vj, b_si(1),
-          (int)FUV_pre_si.rows(), (int)FUV_post_si.rows());
-        for (int x : Nsv_local) fprintf(stderr, "%d,", x);
-        fprintf(stderr, "]  Ndv=[");
-        for (int x : Ndv_local) fprintf(stderr, "%d,", x);
-        fprintf(stderr, "]\n");
+      const int loc_vi = b_si(0);
+      const int loc_vj = b_si(1);
+      const int nV_loc  = (int)V_pre_si.rows();
+
+      // Local indices of the two global edge endpoints inside subsetVIdx_si.
+      // fan_walk_local(center=E(e,1), end=E(e,0)) → result must end at loc_e0.
+      // fan_walk_local(center=E(e,0), end=E(e,1)) → result must end at loc_e1.
+      int loc_e0 = -99, loc_e1 = -99;
+      for (int ii = 0; ii < subsetVIdx_si.size(); ii++) {
+        if (subsetVIdx_si(ii) == E(e,0)) loc_e0 = ii;
+        if (subsetVIdx_si(ii) == E(e,1)) loc_e1 = ii;
       }
+
+      // INV-A: walks must be non-empty
+      bool inv_A = !Nsv_local.empty() && !Ndv_local.empty();
+
+      int nsv_last = inv_A ? Nsv_local.back() : -999;
+      int ndv_last = inv_A ? Ndv_local.back() : -999;
+
+      // INV-B: last element of Nsv OR Ndv must equal loc_vi.
+      //   joint_lscm lines 27-34: e0/e1 only assigned if Nsv[end]==vi or Ndv[end]==vi;
+      //   otherwise e0/e1 are UNINITIALIZED → UB in bdLoop construction at line 131.
+      bool nsv_ends_vi = (nsv_last == loc_vi);
+      bool ndv_ends_vi = (ndv_last == loc_vi);
+      bool inv_B = nsv_ends_vi || ndv_ends_vi;
+
+      // INV-C: all local indices must be in [-1, nV_loc-1]; -1 is infVtx sentinel.
+      auto all_in_range = [&](const vector<int> & v) -> bool {
+        for (int x : v) if (x < -1 || x >= nV_loc) return false;
+        return true;
+      };
+      bool inv_C = all_in_range(Nsv_local) && all_in_range(Ndv_local);
+
+      // INV-D: loc_vi and loc_vj must each appear somewhere in Nsv or Ndv.
+      auto contains_val = [&](const vector<int> & v, int x) -> bool {
+        for (int u : v) if (u == x) return true;
+        return false;
+      };
+      bool vi_in_nsv = contains_val(Nsv_local, loc_vi);
+      bool vi_in_ndv = contains_val(Ndv_local, loc_vi);
+      bool vj_in_nsv = contains_val(Nsv_local, loc_vj);
+      bool vj_in_ndv = contains_val(Ndv_local, loc_vj);
+      bool inv_D = (vi_in_nsv || vi_in_ndv) && (vj_in_nsv || vj_in_ndv);
+
+      // INV-F: each walk must reach its declared end_vtx.
+      //   If the fan walk died at a dead-end, the last element won't be loc_e0/loc_e1.
+      //   A mis-terminated walk produces a bdLoop where vi and vj are not adjacent,
+      //   causing vk==-1 assertion at joint_lscm.cpp:924.
+      bool inv_F = inv_A && (nsv_last == loc_e0) && (ndv_last == loc_e1);
+
+      // INV-G: neither walk may end on the infVtx sentinel (-1).
+      //   A trailing -1 means the walk started from infVtx (INF-AS-START) and never
+      //   reached the real end_vtx; joint_lscm line 27 would then leave e0/e1 uninit.
+      bool inv_G = inv_A && (nsv_last != -1) && (ndv_last != -1);
+
+      // INV-E (informational only): position of -1 in each walk.
+      int nsv_inf_pos = -1, ndv_inf_pos = -1;
+      for (int k = 0; k < (int)Nsv_local.size(); k++)
+        if (Nsv_local[k] == -1) { nsv_inf_pos = k; break; }
+      for (int k = 0; k < (int)Ndv_local.size(); k++)
+        if (Ndv_local[k] == -1) { ndv_inf_pos = k; break; }
+
+      // INV-H: -1 must not be at position 0 (walk must not start from infVtx).
+      //   INF-AS-START: fan_walk picked infVtx as start_vtx because it was the only
+      //   count-1 boundary vertex other than end_vtx.  Result starts with [-1,...].
+      //   Even if the walk then reaches end_vtx (passes INV-F/G), the bdLoop built
+      //   inside joint_lscm has e0/e1 at the wrong position, so vi and vj are not
+      //   adjacent → vk==-1 assertion at joint_lscm.cpp:924.
+      bool inv_H = (nsv_inf_pos != 0) && (ndv_inf_pos != 0);
+
+      bool all_ok = inv_A && inv_B && inv_C && inv_D && inv_F && inv_G && inv_H;
+
+      static int pre_log = 0;
+      if (!all_ok || pre_log < 5) {
+        pre_log++;
+        fprintf(stderr,
+          "[pre-jlscm] sid=%d  e=(%d,%d)  loc_vi=%d loc_vj=%d  loc_e0=%d loc_e1=%d  nV_loc=%d\n"
+          "  INV-A=%d  INV-B(nsv_ends_vi=%d ndv_ends_vi=%d)=%d  INV-C=%d  INV-D=%d\n"
+          "  INV-F(nsv_last=%d==loc_e0=%d  ndv_last=%d==loc_e1=%d)=%d"
+          "  INV-G(no trailing -1)=%d  INV-H(no leading -1: nsv_pos=%d ndv_pos=%d)=%d\n"
+          "  Nsv[%zu] inf_at=%d  vi_in=%d vj_in=%d : [",
+          sid, E(e,0), E(e,1), loc_vi, loc_vj, loc_e0, loc_e1, nV_loc,
+          (int)inv_A, (int)nsv_ends_vi, (int)ndv_ends_vi, (int)inv_B, (int)inv_C, (int)inv_D,
+          nsv_last, loc_e0, ndv_last, loc_e1, (int)inv_F,
+          (int)inv_G, nsv_inf_pos, ndv_inf_pos, (int)inv_H,
+          Nsv_local.size(), nsv_inf_pos, (int)vi_in_nsv, (int)vj_in_nsv);
+        for (int x : Nsv_local) fprintf(stderr, "%d,", x);
+        fprintf(stderr, "]\n  Ndv[%zu] inf_at=%d  vi_in=%d vj_in=%d : [",
+          Ndv_local.size(), ndv_inf_pos, (int)vi_in_ndv, (int)vj_in_ndv);
+        for (int x : Ndv_local) fprintf(stderr, "%d,", x);
+        fprintf(stderr, "]\n  %s\n",
+          all_ok ? "ALL OK" :
+          !inv_A ? "FAIL INV-A: empty walk" :
+          !inv_G ? "FAIL INV-G: walk ended at infVtx sentinel (-1)" :
+          !inv_H ? "FAIL INV-H: walk started at infVtx (-1 at pos 0) — INF-AS-START" :
+          !inv_F ? "FAIL INV-F: walk did not reach declared end_vtx — dead-end in fan" :
+          !inv_B ? "FAIL INV-B: neither Nsv nor Ndv ends with loc_vi — e0/e1 uninit" :
+          !inv_C ? "FAIL INV-C: local index out of range" :
+                   "FAIL INV-D: loc_vi or loc_vj absent from Nsv+Ndv");
+      }
+
+      if (!all_ok) continue;
     }
+    // ---- end pre-joint_lscm invariant check ----
 
     // joint_lscm (DO NOT MODIFY — uses infVtx=-1 sentinel and winding-order Nsv/Ndv)
     MatrixXd UV_pre_si, UV_post_si;

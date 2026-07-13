@@ -1,4 +1,6 @@
 #include "visualizer.h"
+#include "sheet_seam_viz.h"
+#include "coarse_fine_viz.h"
 
 #include <polyscope/polyscope.h>
 #include <polyscope/surface_mesh.h>
@@ -7,6 +9,7 @@
 
 #include <igl/remove_unreferenced.h>
 #include <igl/collapse_edge.h>  // IGL_COLLAPSE_EDGE_NULL
+#include <igl/writeOBJ.h>
 
 #include <single_collapse_data.h>
 
@@ -17,6 +20,7 @@
 #include <cmath>
 #include <thread>
 #include <chrono>
+#include <string>
 
 using namespace Eigen;
 
@@ -51,6 +55,9 @@ static float pts_radius         = 0.00008f;
 static MatrixXd gPreV;
 static MatrixXi gPreF;
 static bool     gHasPreMesh = false;
+
+// Export directory: editable via the UI, written as snapshot_at_<N>.obj
+static char gExportDir[512] = ".";
 
 struct DisplaySnap {
     bool valid = false;
@@ -88,6 +95,23 @@ static MatrixXd safe_V()
     return V;
 }
 
+// Export the current live mesh to <gExportDir>/latest_snapshot.obj,
+// overwriting the previous file each time.  Called automatically before
+// every collapse so the file always holds the last good state — if the
+// program crashes, reload latest_snapshot.obj to resume from there.
+static void export_current_mesh()
+{
+    MatrixXi Fl = live_faces();
+    MatrixXd Vs = safe_V();
+    MatrixXd Vc; MatrixXi Fc; VectorXi I1, I2;
+    igl::remove_unreferenced(Vs, Fl, Vc, Fc, I1, I2);
+
+    std::string path = std::string(gExportDir) + "/latest_snapshot.obj";
+    bool ok = igl::writeOBJ(path, Vc, Fc);
+    if (!ok)
+        fprintf(stderr, "[export] FAILED to write %s\n", path.c_str());
+}
+
 static void snapshot_pre_mesh()
 {
     MatrixXi Fl = live_faces();
@@ -95,6 +119,7 @@ static void snapshot_pre_mesh()
     VectorXi I1, I2;
     igl::remove_unreferenced(Vs, Fl, gPreV, gPreF, I1, I2);
     gHasPreMesh = true;
+    export_current_mesh();   // always overwrite latest_snapshot.obj
 }
 
 static void refresh_snap()
@@ -178,7 +203,7 @@ static DisplayGeometry compute_ring_geometry()
     if (g.avg_normal.squaredNorm() < 1e-20) g.avg_normal = Vector3d::UnitZ();
     else g.avg_normal.normalize();
 
-    // tangent frame for UV panel
+    // tangent frame for UV panel — initial arbitrary choice, corrected below
     Vector3d arb = (std::abs(g.avg_normal.dot(Vector3d::UnitX())) < 0.9)
                    ? Vector3d::UnitX() : Vector3d::UnitY();
     Vector3d t1 = (arb - g.avg_normal * g.avg_normal.dot(arb)).normalized();
@@ -190,15 +215,38 @@ static DisplayGeometry compute_ring_geometry()
     double uv_scale  = (uv_span > 1e-10) ? g.ring_span / uv_span : 1.0;
     uv_scale *= (double)gRingScale;
 
-    double u_center    = (gSnap.UV_pre.col(0).maxCoeff() + gSnap.UV_pre.col(0).minCoeff()) * 0.5;
-    double v_center    = (gSnap.UV_pre.col(1).maxCoeff() + gSnap.UV_pre.col(1).minCoeff()) * 0.5;
+    double u_center = (gSnap.UV_pre.col(0).maxCoeff() + gSnap.UV_pre.col(0).minCoeff()) * 0.5;
+    double v_center = (gSnap.UV_pre.col(1).maxCoeff() + gSnap.UV_pre.col(1).minCoeff()) * 0.5;
     Vector3d panel_center = g.centroid + g.avg_normal * (double)gUVOffset * g.ring_span;
+
+    // Rotate (t1, t2) by β so the UV panel's in-plane orientation matches the
+    // one-ring's tangent-plane projection (2D Procrustes):
+    //   β = atan2( Σ(y·u − x·v),  Σ(x·u + y·v) )
+    // where (x,y) = V_pre vertex projected onto (t1,t2),  (u,v) = centered UV_pre vertex.
+    {
+        double A = 0.0, B = 0.0;
+        for (int i = 0; i < gSnap.V_pre.rows(); i++) {
+            if (!std::isfinite(gSnap.V_pre(i, 0))) continue;
+            Vector3d p = gSnap.V_pre.row(i).transpose() - g.centroid;
+            double x = t1.dot(p), y = t2.dot(p);
+            double u = gSnap.UV_pre(i, 0) - u_center;
+            double v = gSnap.UV_pre(i, 1) - v_center;
+            A += x * u + y * v;
+            B += y * u - x * v;
+        }
+        double beta = std::atan2(B, A);
+        double cb = std::cos(beta), sb = std::sin(beta);
+        Vector3d t1_new =  cb * t1 + sb * t2;
+        Vector3d t2_new = -sb * t1 + cb * t2;
+        t1 = t1_new;
+        t2 = t2_new;
+    }
 
     auto make3d = [&](const MatrixXd & UV) {
         MatrixXd P(UV.rows(), 3);
         for (int i = 0; i < UV.rows(); i++) {
-            double u = (UV(i,0) - u_center) * uv_scale * -1.0;
-            double v = (UV(i,1) - v_center) * uv_scale * -1.0;
+            double u = (UV(i,0) - u_center) * uv_scale ;
+            double v = (UV(i,1) - v_center) * uv_scale ;
             P.row(i) = (panel_center + t1*u + t2*v).transpose();
         }
         return P;
@@ -293,7 +341,7 @@ static void show_canonical_view()
     DisplayGeometry g = compute_ring_geometry();
 
     // Rotation: avg_normal → world Y-up (0,1,0)
-    Vector3d world_up(0.0, 1.0, 0.0);
+    Vector3d world_up(0.0, -1.0, 0.0);
     Matrix3d R;
     Vector3d axis = g.avg_normal.cross(world_up);
     double   sinA = axis.norm();
@@ -330,8 +378,8 @@ static void show_canonical_view()
     }
 
     polyscope::removeAllStructures();
+    clear_seam_onering();  // structures are gone; keep name list consistent
     register_ring_geometry(gc);
-    polyscope::view::resetCameraToHomeView();
 }
 
 // ---- update polyscope display ----
@@ -353,6 +401,9 @@ void update_display()
             mp->setSurfaceColor({0.4f, 0.9f, 0.4f})->setEdgeWidth(0.5)
               ->setTransparency(0.5f)->setEnabled(gShowMeshPre);
         }
+
+        update_sheet_display();
+        update_seam_onering_display();
     }
 
     if (!gSnap.valid) return;
@@ -368,6 +419,8 @@ void update_display()
 // ---- ImGui callback ----
 void ui_callback()
 {
+    sheet_seam_pick_check();
+
     // Drive continuous decimation
     if (gRunning && !gFinished) {
         snapshot_pre_mesh();
@@ -375,7 +428,7 @@ void ui_callback()
             refresh_snap();
             update_display();
 
-            bool hitSeam = !gDecInfo.empty() && gDecInfo.back().numFlapFaces > 2;
+            bool hitSeam = !gDecInfo.empty() && gDecInfo.back().sheets.size() > 1;
             if (gRunToSeam && hitSeam)
                 gRunToSeam = false;
 
@@ -425,6 +478,7 @@ void ui_callback()
             if (ImGui::Button("Canonical View")) {
                 gCanonicalView = true;
                 show_canonical_view();
+                polyscope::view::resetCameraToHomeView();
             }
             ImGui::SameLine();
             ImGui::TextDisabled("(one-ring on floor, UV above)");
@@ -467,6 +521,20 @@ void ui_callback()
     if (gHasPreMesh)
         vis |= ImGui::Checkbox("Mesh before collapse", &gShowMeshPre);
     if (vis && gSnap.valid) update_display();
+
+    ImGui::Separator();
+    sheet_seam_imgui_section();
+
+    ImGui::Separator();
+    coarse_fine_imgui_section();
+
+    ImGui::Separator();
+    ImGui::Text("Export (latest_snapshot.obj):");
+    ImGui::SetNextItemWidth(220);
+    ImGui::InputText("##exportdir", gExportDir, sizeof(gExportDir));
+    ImGui::SameLine();
+    if (ImGui::Button("Save now")) export_current_mesh();
+    ImGui::TextDisabled("Auto-saved before every collapse.");
 
     ImGui::End();
 }

@@ -26,6 +26,8 @@ include_directories("../src/")
 set(APP_SRCS
     main.cpp
     visualizer.cpp
+    sheet_seam_viz.cpp
+    coarse_fine_viz.cpp
     orient_faces_consistently.cpp
 )
 

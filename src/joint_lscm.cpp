@@ -920,7 +920,7 @@ void case2_constraint3_snap1(
 				}
 			}
 			if(verbose)
-				cout << "vk: " << vk << endl;
+				fprintf(stderr, "vk: %d\n", vk);
 			assert(vk != -1);
 		}
 
