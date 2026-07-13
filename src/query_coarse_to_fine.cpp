@@ -93,30 +93,28 @@ void query_coarse_to_fine(
 
       VectorXi f = BF.row(qIdx);
 
-      // find f in subsetVIdx
-      int v0, v1, v2; // such that subsetVIdx(v0) == f(0)
+      // Find local indices for BF columns via FIdx_pre column alignment.
+      // Non-active-sheet collapses rewrite d→s in gF (Pass 2) without updating decIM,
+      // so BF can carry stale global vertex indices in two ways:
+      //   Type A: BF[k] absent from subsetVIdx entirely (size==0)
+      //   Type B: BF[k] found in subsetVIdx but is a neighbor, not the face's actual vertex
+      // Both are fixed by looking up queryFIdx in FIdx_pre: non-active remaps only change
+      // the stored vertex value, never the column order, so FUV_pre(pre_row, k) is always
+      // the correct local index for BF column k.
+      int v0, v1, v2;
       {
-        VectorXi v0_vec, v1_vec, v2_vec;
-        igl::find((sd.subsetVIdx.array() == f(0)).eval(), v0_vec);
-        igl::find((sd.subsetVIdx.array() == f(1)).eval(), v1_vec);
-        igl::find((sd.subsetVIdx.array() == f(2)).eval(), v2_vec);
+        int pre_row = -1;
+        for (int r = 0; r < (int)sd.FIdx_pre.size(); r++)
+          if (sd.FIdx_pre(r) == queryFIdx) { pre_row = r; break; }
 
-        // TODO: these asserts fire in the non-manifold SSP case.
-        // Root cause (hypothesis): non-active-sheet collapses remap vertex d→s in
-        // Pass 2 for faces whose sheet is not active, without updating decIM for those
-        // faces. Subsequent backward steps then carry stale global vertex indices in BF
-        // (post-rename value S) while subsetVIdx still has the pre-rename value X.
-        // Fix candidate: when lookup fails, recover local indices from FIdx_pre using
-        // column-alignment (non-active remaps preserve face column order, only change
-        // the stored vertex index). Uncomment once confirmed and fixed.
-        // assert(v0_vec.size() == 1);
-        // assert(v1_vec.size() == 1);
-        // assert(v2_vec.size() == 1);
+        // queryFIdx must be in FIdx_pre: decIM[queryFIdx] contains dIdx, meaning
+        // queryFIdx was in the one-ring of collapse dIdx, which is exactly what FIdx_pre
+        // records. pre_row < 0 means upstream data is inconsistent.
+        assert(pre_row >= 0);
 
-        if (v0_vec.size() != 1 || v1_vec.size() != 1 || v2_vec.size() != 1) break;
-        v0 = v0_vec(0);
-        v1 = v1_vec(0);
-        v2 = v2_vec(0);
+        v0 = sd.FUV_pre(pre_row, 0);
+        v1 = sd.FUV_pre(pre_row, 1);
+        v2 = sd.FUV_pre(pre_row, 2);
       }
 
       // get query UV (coarse → fine: uses UV_post as input space, UV_pre as output)
