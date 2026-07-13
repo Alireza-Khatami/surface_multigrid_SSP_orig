@@ -468,6 +468,19 @@ bool SSP_collapse_edge(
     }
     // ---- end pre-joint_lscm invariant check ----
 
+    // Seam edge: the collapsed edge borders multiple sheets.  The faces from other
+    // sheets are excluded from this sheet's local patch, so each endpoint's fan is
+    // naturally open at the seam.  Inject -1 (infVtx sentinel) at position 0 of
+    // each walk so joint_lscm treats both vi and vj as boundary vertices
+    // (onBd.sum()==2 → Case 2).  Injection is after the invariant check so INV-H
+    // (which rejects -1 at position 0 as an INF-AS-START bug) does not fire.
+    if (active_sheets.size() > 1) {
+      if (std::find(Nsv_local.begin(), Nsv_local.end(), -1) == Nsv_local.end())
+        Nsv_local.insert(Nsv_local.begin(), -1);
+      if (std::find(Ndv_local.begin(), Ndv_local.end(), -1) == Ndv_local.end())
+        Ndv_local.insert(Ndv_local.begin(), -1);
+    }
+
     // joint_lscm (DO NOT MODIFY — uses infVtx=-1 sentinel and winding-order Nsv/Ndv)
     MatrixXd UV_pre_si, UV_post_si;
     bool isValid = joint_lscm(
