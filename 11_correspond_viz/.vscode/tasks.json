@@ -1,0 +1,39 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "cmake: configure debug",
+      "type": "shell",
+      "command": "& 'C:/Program Files/CMake/bin/cmake.exe' --preset windows-debug",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "cmake: configure release",
+      "type": "shell",
+      "command": "& 'C:/Program Files/CMake/bin/cmake.exe' --preset windows-release",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "cmake: build debug",
+      "type": "shell",
+      "command": "& 'C:/Program Files/CMake/bin/cmake.exe' --build build/debug --config Debug -j8",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "dependsOn": "cmake: configure debug",
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "cmake: build release",
+      "type": "shell",
+      "command": "& 'C:/Program Files/CMake/bin/cmake.exe' --build build/release --config Release -j8",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": { "kind": "build", "isDefault": true },
+      "dependsOn": "cmake: configure release",
+      "problemMatcher": "$msCompile"
+    }
+  ]
+}

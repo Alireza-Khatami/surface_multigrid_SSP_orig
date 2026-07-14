@@ -17,6 +17,15 @@ void coarse_fine_clear();
 // corrPath = existing coarse_to_fine.txt, bundlePath = output .c2f file.
 void coarse_fine_save_bundle(const std::string & corrPath, const std::string & bundlePath);
 
-// ImGui collapsing section: Save / Load+Show buttons.
+// ImGui collapsing section: Save / Load+Show buttons + vertex picker.
 // Call inside ImGui::Begin / ImGui::End.
 void coarse_fine_imgui_section();
+
+// Check polyscope pick selection each frame; fires the single-vertex query when a
+// coarse vertex point cloud ("c2f_pick_verts") is clicked. Call from ui_callback().
+void coarse_fine_pick_check();
+
+// Run immediately after each collapse: traces ring_post vertices back to the fine
+// mesh, logs any group that lands on the same fine position, and registers
+// polyscope structures (diag_ring_post, diag_fine_corr, diag_c2f_arrows).
+void ring_post_c2f_diagnostic();

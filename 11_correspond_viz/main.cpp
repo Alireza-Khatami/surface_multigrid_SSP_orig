@@ -1,5 +1,7 @@
 #include <polyscope/polyscope.h>
 #include <polyscope/surface_mesh.h>
+#include <polyscope/point_cloud.h>
+#include <polyscope/pick.h>
 #include <polyscope/structure.h>
 
 #include <Eigen/Dense>
@@ -93,7 +95,69 @@ static bool load_bundle(const std::string & path, Bundle & b)
 
 // ---- global viz state ----
 static Bundle  gBundle;
-static float   gZOffset = 0.0f;
+static float   gZOffset        = 0.0f;
+static int     gSampleStep     = 1;     // visualize every gSampleStep-th coarse vertex
+static bool    gShowArrows     = true;  // checkbox: show/hide correspondence arrows
+static int     gSelectedSample = -1;   // sample-local index of the clicked point (-1 = none)
+
+// ---- helpers to compute coarse/fine positions for a single coarse index ----
+static void coarse_fine_pts(int coarseIdx,
+                             RowVector3d & cPt, RowVector3d & fPt, RowVector3d & arrow)
+{
+    cPt   = gBundle.coarseV.row(coarseIdx);
+    cPt(2) += (double)gZOffset;
+    fPt   = gBundle.coarseV.row(coarseIdx) + gBundle.corrVec.row(coarseIdx);
+    arrow = gBundle.corrVec.row(coarseIdx);
+    arrow(2) -= (double)gZOffset;
+}
+
+// -----------------------------------------------------------------------
+// Selection viz: a single highlighted coarse point + its arrow + fine dest.
+// Uses a static flag to track whether the structures exist so we can remove
+// them cleanly when the selection is cleared.
+// -----------------------------------------------------------------------
+static bool gSelRegistered = false;
+
+static void rebuild_selection_viz()
+{
+    if (gSelRegistered) {
+        polyscope::removeStructure("sel_coarse");
+        polyscope::removeStructure("sel_fine");
+        gSelRegistered = false;
+    }
+
+    if (gSelectedSample < 0) return;
+
+    int step      = std::max(1, gSampleStep);
+    int coarseIdx = gSelectedSample * step;
+    int NC        = (int)gBundle.coarseV.rows();
+    if (coarseIdx >= NC) return;
+
+    RowVector3d cPt, fPt, arrow;
+    coarse_fine_pts(coarseIdx, cPt, fPt, arrow);
+
+    MatrixXd cM(1,3), fM(1,3), aM(1,3);
+    cM.row(0) = cPt; fM.row(0) = fPt; aM.row(0) = arrow;
+
+    // Selected coarse point — red, larger
+    auto* sc = polyscope::registerPointCloud("sel_coarse", cM);
+    sc->setPointColor({1.0f, 0.15f, 0.15f});
+    sc->setPointRadius(0.012, true);
+
+    auto* vq = sc->addVectorQuantity("to_fine", aM, polyscope::VectorType::AMBIENT);
+    vq->setEnabled(true);   // always show the selected-pair arrow regardless of checkbox
+    vq->setVectorColor({1.0f, 0.0f, 0.0f});
+    vq->setVectorLengthScale(1.0, false);
+
+    // Selected fine destination — red, larger
+    auto* sf = polyscope::registerPointCloud("sel_fine", fM);
+    sf->setPointColor({1.0f, 0.15f, 0.15f});
+    sf->setPointRadius(0.012, true);
+
+    gSelRegistered = true;
+}
+
+// -----------------------------------------------------------------------
 
 static void rebuild_coarse_viz()
 {
@@ -104,17 +168,55 @@ static void rebuild_coarse_viz()
     ps->setSurfaceColor({0.25f, 0.52f, 0.95f});
     ps->setEdgeWidth(0.5f);
     ps->setSmoothShade(false);
+    // Correspondence arrows live on the sampled point cloud, not the full mesh.
+}
 
-    // Adjust vectors: coarse moved in Z, so subtract offset from Z component
-    // so tips remain on the stationary fine mesh.
-    MatrixXd corrAdj = gBundle.corrVec;
-    corrAdj.col(2).array() -= (double)gZOffset;
+static void rebuild_sample_viz()
+{
+    int NC   = (int)gBundle.coarseV.rows();
+    int step = std::max(1, gSampleStep);
 
-    auto * vq = ps->addVertexVectorQuantity("correspondence", corrAdj,
-                                             polyscope::VectorType::AMBIENT);
-    vq->setEnabled(true);
+    std::vector<int> idx;
+    idx.reserve((NC + step - 1) / step);
+    for (int i = 0; i < NC; i += step)
+        idx.push_back(i);
+
+    int NS = (int)idx.size();
+    MatrixXd coarsePts(NS, 3), finePts(NS, 3), arrowVecs(NS, 3);
+
+    for (int j = 0; j < NS; j++) {
+        int i = idx[j];
+
+        coarsePts.row(j)  = gBundle.coarseV.row(i);
+        coarsePts(j, 2)  += (double)gZOffset;
+
+        finePts.row(j) = gBundle.coarseV.row(i) + gBundle.corrVec.row(i);
+
+        arrowVecs.row(j)  = gBundle.corrVec.row(i);
+        arrowVecs(j, 2)  -= (double)gZOffset;
+    }
+
+    // Sampled coarse points (yellow)
+    auto* cp = polyscope::registerPointCloud("sample_coarse", coarsePts);
+    cp->setPointColor({1.0f, 0.85f, 0.0f});
+    cp->setPointRadius(0.006, true);
+
+    auto* vq = cp->addVectorQuantity("to_fine", arrowVecs, polyscope::VectorType::AMBIENT);
+    vq->setEnabled(gShowArrows);
     vq->setVectorColor({1.0f, 0.35f, 0.05f});
     vq->setVectorLengthScale(1.0, false);
+
+    // Correspondence destinations on fine mesh (green)
+    auto* fp = polyscope::registerPointCloud("sample_fine", finePts);
+    fp->setPointColor({0.15f, 0.85f, 0.40f});
+    fp->setPointRadius(0.006, true);
+}
+
+static void rebuild_all()
+{
+    rebuild_coarse_viz();
+    rebuild_sample_viz();
+    rebuild_selection_viz();
 }
 
 int main(int argc, char ** argv)
@@ -134,15 +236,59 @@ int main(int argc, char ** argv)
         ->setSmoothShade(false)
         ->setTransparency(0.6f);
 
-    rebuild_coarse_viz();
+    rebuild_all();
 
-    polyscope::state::userCallback = []() {
-        ImGui::SetNextWindowSize({320, 100}, ImGuiCond_FirstUseEver);
+    int NC = (int)gBundle.coarseV.rows();
+
+    polyscope::state::userCallback = [NC]() {
+
+        // ---- pick detection (runs every frame, cheap) ----
+        {
+            int newSel = -1;
+            if (polyscope::pick::haveSelection()) {
+                auto sel = polyscope::pick::getSelection();
+                polyscope::Structure* structure = sel.first;
+                size_t localInd = sel.second;
+                if (structure && structure->name == "sample_coarse")
+                    newSel = (int)localInd;
+            }
+            if (newSel != gSelectedSample) {
+                gSelectedSample = newSel;
+                rebuild_selection_viz();
+            }
+        }
+
+        // ---- UI window ----
+        ImGui::SetNextWindowSize({340, 155}, ImGuiCond_FirstUseEver);
         ImGui::Begin("Correspondence");
+
+        bool changed = false;
 
         ImGui::SetNextItemWidth(220);
         if (ImGui::SliderFloat("Z offset (coarse)", &gZOffset, -2.0f, 2.0f))
-            rebuild_coarse_viz();
+            changed = true;
+
+        ImGui::SetNextItemWidth(220);
+        if (ImGui::SliderInt("Sample every X pts", &gSampleStep, 1, 40)) {
+            gSelectedSample = -1;  // sample indices changed — clear stale selection
+            changed = true;
+        }
+
+        if (ImGui::Checkbox("Show arrows", &gShowArrows))
+            changed = true;
+
+        int shown = (NC + std::max(1, gSampleStep) - 1) / std::max(1, gSampleStep);
+        ImGui::Text("Showing %d / %d coarse vertices", shown, NC);
+        if (gSelectedSample >= 0) {
+            int ci = gSelectedSample * std::max(1, gSampleStep);
+            ImGui::Text("Selected: sample[%d] -> coarse[%d]", gSelectedSample, ci);
+            if (ImGui::Button("Clear selection")) {
+                gSelectedSample = -1;
+                rebuild_selection_viz();
+            }
+        }
+
+        if (changed) rebuild_all();
 
         ImGui::End();
     };

@@ -2,12 +2,16 @@
 
 #include <polyscope/polyscope.h>
 #include <polyscope/surface_mesh.h>
+#include <polyscope/curve_network.h>
+#include <polyscope/point_cloud.h>
 #include <polyscope/structure.h>
+#include <polyscope/pick.h>
 
 #include <igl/collapse_edge.h>       // IGL_COLLAPSE_EDGE_NULL
 
 #include <query_coarse_to_fine.h>
 #include <single_collapse_data.h>
+#include <compute_barycentric.h>
 
 #include <Eigen/Dense>
 #include <fstream>
@@ -41,6 +45,358 @@ static MatrixXd gCorrVectors;  // per-vertex (fine_pos - coarse_pos), zero if no
 
 // Names of structures that were enabled before c2f load, so Hide can restore them.
 static std::vector<std::pair<std::string,std::string>> gPrevEnabled; // (type, name)
+
+// ---- vertex-pick c2f state ----
+static bool    gPickModeEnabled  = false;
+static bool    gPickResultValid  = false;
+static int     gPickedGlobalVtx  = -1;
+static float   gPickFineZOff     = 0.5f;
+static Vector3d gPickFinePos     = Vector3d::Zero(); // cached fine-mesh world position
+
+// Compact list of live coarse vertices registered as the pick point cloud
+static std::vector<int> gPickCompactToGlobal;
+
+// Track last polyscope selection so we only react on changes
+static std::pair<polyscope::Structure*, size_t> gPickLastSel = {nullptr, (size_t)-1};
+
+// ---- vertex-pick helpers ----
+
+static void build_pick_pts()
+{
+    const int nFO = (int)gFaceSheetID.size();
+    gPickCompactToGlobal.clear();
+    for (int v = 0; v < (int)gV.rows(); v++) {
+        if (std::isinf(gV(v, 0))) continue;
+        for (int f : gVF[v]) {
+            if (f >= nFO) continue;
+            if (gF(f, 0) == IGL_COLLAPSE_EDGE_NULL) continue;
+            if (std::isinf(gV(gF(f, 0), 0))) continue;
+            gPickCompactToGlobal.push_back(v);
+            break;
+        }
+    }
+    if (gPickCompactToGlobal.empty()) return;
+
+    MatrixXd pts((int)gPickCompactToGlobal.size(), 3);
+    for (int i = 0; i < (int)gPickCompactToGlobal.size(); i++)
+        pts.row(i) = gV.row(gPickCompactToGlobal[i]).leftCols(3);
+
+    polyscope::registerPointCloud("c2f_pick_verts", pts)
+        ->setPointColor({1.0f, 0.9f, 0.1f})
+        ->setPointRadius(0.005, true)   // relative to bounding box
+        ->setEnabled(true);
+}
+
+// Rebuild only the polyscope structures from the cached pick result (for Z-slider updates).
+static void rebuild_pick_viz()
+{
+    if (!gPickResultValid || gPickedGlobalVtx < 0) return;
+
+    Vector3d coarse_pos = gV.row(gPickedGlobalVtx).head(3);
+    Vector3d fine_off   = gPickFinePos; fine_off(2) += (double)gPickFineZOff;
+
+    // Offset fine mesh
+    MatrixXd fineV = gVO;
+    fineV.col(2).array() += (double)gPickFineZOff;
+    polyscope::registerSurfaceMesh("c2f_pick_fine_mesh", fineV, gFO)
+        ->setSurfaceColor({0.5f, 0.85f, 0.5f})
+        ->setEdgeWidth(0.3f)
+        ->setSmoothShade(false)
+        ->setTransparency(0.4f);
+
+    // Highlight picked coarse vertex
+    MatrixXd coarsePt(1, 3); coarsePt.row(0) = coarse_pos.transpose();
+    polyscope::registerPointCloud("c2f_pick_coarse_pt", coarsePt)
+        ->setPointColor({1.0f, 0.3f, 0.1f})
+        ->setPointRadius(0.0008, true);
+
+    // Correspondence point on offset fine mesh
+    MatrixXd finePt(1, 3); finePt.row(0) = fine_off.transpose();
+    polyscope::registerPointCloud("c2f_pick_fine_pt", finePt)
+        ->setPointColor({0.1f, 1.0f, 0.3f})
+        ->setPointRadius(0.0008, true);
+
+    // Arrow: coarse vertex → correspondence point on offset fine mesh
+    MatrixXd arrowV(2, 3);
+    arrowV.row(0) = coarse_pos.transpose();
+    arrowV.row(1) = fine_off.transpose();
+    MatrixXi arrowE(1, 2); arrowE << 0, 1;
+    polyscope::registerCurveNetwork("c2f_pick_arrow", arrowV, arrowE)
+        ->setColor({1.0f, 0.85f, 0.05f})
+        ->setRadius(0.0002, true);
+}
+
+static void clear_pick_viz()
+{
+    polyscope::removeStructure("c2f_pick_fine_mesh", false);
+    polyscope::removeStructure("c2f_pick_fine_pt",   false);
+    polyscope::removeStructure("c2f_pick_coarse_pt", false);
+    polyscope::removeStructure("c2f_pick_arrow",     false);
+    gPickResultValid  = false;
+    gPickedGlobalVtx  = -1;
+    gPickLastSel      = {nullptr, (size_t)-1};
+    polyscope::pick::resetSelection();
+}
+
+// ---- ring_post diagnostic structs ----
+
+struct WalkStep {
+    int dIdx;
+    int FIdx_in;
+    int sheet_id;
+    Eigen::RowVector3d BC_in;
+    Eigen::RowVector3i BF_in;
+    Eigen::RowVector3d BC_out;
+    Eigen::RowVector3i BF_out;
+    int FIdx_out;
+};
+
+struct VertexWalkResult {
+    int global_vtx;
+    Eigen::RowVector3i final_BF;
+    Eigen::RowVector3d final_BC;
+    std::vector<WalkStep> chain;
+    bool init_ok = false;
+};
+
+// Same initialization logic as coarse_fine_compute_and_save, but runs the walk
+// step-by-step and records the full chain of (dIdx, FIdx, BC, BF) at each step.
+static VertexWalkResult traced_walk(int vi)
+{
+    VertexWalkResult res;
+    res.global_vtx = vi;
+
+    const int nFO  = (int)gFaceSheetID.size();
+    const int nDec = (int)gDecInfo.size();
+
+    // Find a live face touching vi
+    int fi = -1;
+    for (int f : gVF[vi]) {
+        if (f >= nFO) continue;
+        if (gF(f, 0) == IGL_COLLAPSE_EDGE_NULL) continue;
+        if (std::isinf(gV(gF(f, 0), 0))) continue;
+        fi = f; break;
+    }
+    if (fi < 0) {
+        fprintf(stderr, "[TRACED-WALK] vtx=%d: no live face found\n", vi);
+        return res;
+    }
+
+    // Initialize BF/BC/FIdx (mirrors coarse_fine_compute_and_save)
+    Eigen::RowVector3i BF_cur;
+    Eigen::RowVector3d BC_cur;
+    int FIdx_cur;
+
+    int dIdx_init = -1;
+    if (fi < (int)gDecIM.size()) {
+        const auto & dList = gDecIM[fi];
+        for (int ii = (int)dList.size()-1; ii >= 0; ii--)
+            if (dList[ii] < nDec) { dIdx_init = dList[ii]; break; }
+    }
+
+    bool initOk = false;
+    if (dIdx_init >= 0) {
+        const int sid = (fi < nFO) ? (int)gFaceSheetID(fi) : 0;
+        const SheetData * sd_ptr = nullptr;
+        for (auto & sd : gDecInfo[dIdx_init].sheets)
+            if (sd.global_sheet_id == sid) { sd_ptr = &sd; break; }
+        if (!sd_ptr && !gDecInfo[dIdx_init].sheets.empty())
+            sd_ptr = &gDecInfo[dIdx_init].sheets[0];
+        if (sd_ptr) {
+            const SheetData & sd = *sd_ptr;
+            int pre_row = -1;
+            for (int r = 0; r < (int)sd.FIdx_pre.size(); r++)
+                if (sd.FIdx_pre(r) == fi) { pre_row = r; break; }
+            if (pre_row >= 0) {
+                int gv0 = sd.subsetVIdx(sd.FUV_pre(pre_row, 0));
+                int gv1 = sd.subsetVIdx(sd.FUV_pre(pre_row, 1));
+                int gv2 = sd.subsetVIdx(sd.FUV_pre(pre_row, 2));
+                int col = (gv0==vi)?0 : (gv1==vi)?1 : (gv2==vi)?2 : -1;
+                if (col >= 0) {
+                    BF_cur = {gv0, gv1, gv2};
+                    BC_cur = {(col==0)?1.0:0.0, (col==1)?1.0:0.0, (col==2)?1.0:0.0};
+                    FIdx_cur = fi;
+                    initOk = true;
+                }
+            }
+        }
+    }
+    if (!initOk) {
+        int col = 0;
+        for (int c = 0; c < 3; c++) if (gF(fi, c) == vi) { col = c; break; }
+        BF_cur   = {gF(fi, col), gF(fi, (col+1)%3), gF(fi, (col+2)%3)};
+        BC_cur   = {1.0, 0.0, 0.0};
+        FIdx_cur = fi;
+    }
+    res.init_ok = true;
+
+    // Backward walk — record every step
+    int dIdx = nDec;
+    while (true) {
+        if (FIdx_cur < 0 || FIdx_cur >= (int)gDecIM.size()) break;
+        const std::vector<int> & dList = gDecIM[FIdx_cur];
+        int next_dIdx = -1;
+        for (int ii = (int)dList.size()-1; ii >= 0; ii--) {
+            if (dIdx > dList[ii]) { next_dIdx = dList[ii]; break; }
+        }
+        if (next_dIdx < 0) break;
+        dIdx = next_dIdx;
+
+        const int sid = (FIdx_cur < nFO) ? (int)gFaceSheetID(FIdx_cur) : 0;
+        const SheetData * sd_ptr = nullptr;
+        for (auto & sd : gDecInfo[dIdx].sheets)
+            if (sd.global_sheet_id == sid) { sd_ptr = &sd; break; }
+        if (!sd_ptr && !gDecInfo[dIdx].sheets.empty())
+            sd_ptr = &gDecInfo[dIdx].sheets[0];
+        if (!sd_ptr) continue;
+        const SheetData & sd = *sd_ptr;
+
+        int pre_row = -1;
+        for (int r = 0; r < (int)sd.FIdx_pre.size(); r++)
+            if (sd.FIdx_pre(r) == FIdx_cur) { pre_row = r; break; }
+        if (pre_row < 0) continue;
+
+        int v0 = sd.FUV_pre(pre_row, 0);
+        int v1 = sd.FUV_pre(pre_row, 1);
+        int v2 = sd.FUV_pre(pre_row, 2);
+
+        Eigen::Vector2d queryUV =
+            BC_cur(0) * sd.UV_post.row(v0).transpose()
+          + BC_cur(1) * sd.UV_post.row(v1).transpose()
+          + BC_cur(2) * sd.UV_post.row(v2).transpose();
+
+        Eigen::MatrixXd B;
+        compute_barycentric(queryUV, sd.UV_pre, sd.FUV_pre, B);
+
+        Eigen::VectorXd distToValid = -B.rowwise().minCoeff();
+        double minD = 1.0; int best = 0;
+        for (int bb = 0; bb < (int)distToValid.size(); bb++)
+            if (distToValid(bb) < minD) { minD = distToValid(bb); best = bb; }
+
+        B(best,0) = std::max(0.0, B(best,0));
+        B(best,1) = std::max(0.0, B(best,1));
+        B(best,2) = std::max(0.0, B(best,2));
+        double s = B.row(best).sum(); if (s > 0) B.row(best) /= s;
+
+        int nv0 = sd.subsetVIdx(sd.FUV_pre(best, 0));
+        int nv1 = sd.subsetVIdx(sd.FUV_pre(best, 1));
+        int nv2 = sd.subsetVIdx(sd.FUV_pre(best, 2));
+        int new_FIdx = sd.FIdx_pre(best);
+
+        WalkStep step;
+        step.dIdx     = dIdx;
+        step.FIdx_in  = FIdx_cur;
+        step.sheet_id = sid;
+        step.BC_in    = BC_cur;
+        step.BF_in    = BF_cur;
+        step.BC_out   = B.row(best);
+        step.BF_out   = {nv0, nv1, nv2};
+        step.FIdx_out = new_FIdx;
+        res.chain.push_back(step);
+
+        BC_cur   = B.row(best);
+        BF_cur   = {nv0, nv1, nv2};
+        FIdx_cur = new_FIdx;
+    }
+
+    res.final_BF = BF_cur;
+    res.final_BC = BC_cur;
+    return res;
+}
+
+// Run the full backward walk for one coarse vertex, then display results.
+static void run_single_vertex_c2f(int vi)
+{
+    const int nFO  = (int)gFaceSheetID.size();
+    const int nDec = (int)gDecInfo.size();
+
+    // Pick any live face touching vi
+    int fi = -1;
+    for (int f : gVF[vi]) {
+        if (f >= nFO) continue;
+        if (gF(f, 0) == IGL_COLLAPSE_EDGE_NULL) continue;
+        if (std::isinf(gV(gF(f, 0), 0))) continue;
+        fi = f; break;
+    }
+    if (fi < 0) {
+        fprintf(stderr, "[c2f-pick] vtx=%d: no live face found\n", vi);
+        return;
+    }
+
+    MatrixXd BC(1, 3);
+    MatrixXi BF(1, 3);
+    VectorXi FIdx(1);
+
+    // Identical initialization to coarse_fine_compute_and_save
+    int dIdx = -1;
+    if (fi < (int)gDecIM.size()) {
+        const auto & dList = gDecIM[fi];
+        for (int ii = (int)dList.size()-1; ii >= 0; ii--)
+            if (dList[ii] < nDec) { dIdx = dList[ii]; break; }
+    }
+
+    auto useCurrentGF = [&]() {
+        int col = 0;
+        for (int c = 0; c < 3; c++) if (gF(fi, c) == vi) { col = c; break; }
+        BF(0, 0) = gF(fi,  col);
+        BF(0, 1) = gF(fi, (col + 1) % 3);
+        BF(0, 2) = gF(fi, (col + 2) % 3);
+        BC(0, 0) = 1.0; BC(0, 1) = 0.0; BC(0, 2) = 0.0;
+        FIdx(0)  = fi;
+    };
+
+    bool initOk = false;
+    if (dIdx >= 0) {
+        const int sid = (fi < nFO) ? (int)gFaceSheetID(fi) : 0;
+        const SheetData * sd_ptr = nullptr;
+        for (auto & sd : gDecInfo[dIdx].sheets)
+            if (sd.global_sheet_id == sid) { sd_ptr = &sd; break; }
+        if (!sd_ptr && !gDecInfo[dIdx].sheets.empty())
+            sd_ptr = &gDecInfo[dIdx].sheets[0];
+        if (sd_ptr) {
+            const SheetData & sd = *sd_ptr;
+            int pre_row = -1;
+            for (int r = 0; r < (int)sd.FIdx_pre.size(); r++)
+                if (sd.FIdx_pre(r) == fi) { pre_row = r; break; }
+            if (pre_row >= 0) {
+                int gv0 = sd.subsetVIdx(sd.FUV_pre(pre_row, 0));
+                int gv1 = sd.subsetVIdx(sd.FUV_pre(pre_row, 1));
+                int gv2 = sd.subsetVIdx(sd.FUV_pre(pre_row, 2));
+                int col = (gv0==vi)?0 : (gv1==vi)?1 : (gv2==vi)?2 : -1;
+                if (col >= 0) {
+                    BF(0, 0) = gv0;
+                    BF(0, 1) = gv1;
+                    BF(0, 2) = gv2;
+                    BC(0, 0) = (col==0) ? 1.0 : 0.0;
+                    BC(0, 1) = (col==1) ? 1.0 : 0.0;
+                    BC(0, 2) = (col==2) ? 1.0 : 0.0;
+                    FIdx(0)  = fi;
+                    initOk = true;
+                }
+            }
+        }
+    }
+    if (!initOk) useCurrentGF();
+
+    VectorXi IM  = VectorXi::LinSpaced((int)gV.rows(), 0, (int)gV.rows() - 1);
+    VectorXi IMF = VectorXi::LinSpaced((int)gF.rows(), 0, (int)gF.rows() - 1);
+    query_coarse_to_fine(gDecInfo, IM, gDecIM, IMF, gFaceSheetID, BC, BF, FIdx);
+
+    // Cache the result
+    gPickFinePos = BC(0,0)*gVO.row(BF(0,0)).transpose()
+                 + BC(0,1)*gVO.row(BF(0,1)).transpose()
+                 + BC(0,2)*gVO.row(BF(0,2)).transpose();
+    gPickedGlobalVtx = vi;
+    gPickResultValid = true;
+
+    fprintf(stderr, "[c2f-pick] vtx=%d → fine_pos=(%.4f,%.4f,%.4f)  BC=(%.3f,%.3f,%.3f)  BF=(%d,%d,%d)\n",
+        vi, gPickFinePos(0), gPickFinePos(1), gPickFinePos(2),
+        BC(0,0), BC(0,1), BC(0,2), BF(0,0), BF(0,1), BF(0,2));
+
+    rebuild_pick_viz();
+}
+
+// ---- end vertex-pick helpers ----
 
 static void rebuild_coarse_mesh_viz()
 {
@@ -143,38 +499,38 @@ void coarse_fine_compute_and_save(const std::string & path)
 
         if (!sd_ptr) { useCurrentGF(); continue; }
 
-        // Find fi in FIdx_post to get the vertex state AT the time of that collapse.
-        // Using current gF is wrong: non-active-sheet collapses after dIdx may have
-        // remapped vertices in fi (d→s in Pass 2) without updating decIM[fi].
-        // FIdx_post captures the post-collapse state of fi at dIdx, which is what
-        // subsetVIdx at that collapse actually contains.
-        int post_row = -1;
-        for (int r = 0; r < (int)sd_ptr->FIdx_post.size(); r++)
-            if (sd_ptr->FIdx_post(r) == fi) { post_row = r; break; }
-
-        if (post_row < 0) { useCurrentGF(); continue; }
-
+        // Find fi in FIdx_pre and align BC with FUV_pre column ordering.
+        // BC[j] must correspond to FUV_pre column j because query_coarse_to_fine's
+        // first step computes queryUV = BC(0)*UV_post[FUV_pre(row,0)] + ...
+        // Using FUV_post ordering for BC was wrong: FUV_pre and FUV_post can list
+        // the same face's vertices in different column orders.
         const SheetData & sd = *sd_ptr;
-        const int gv0 = sd.subsetVIdx(sd.FUV_post(post_row, 0));
-        const int gv1 = sd.subsetVIdx(sd.FUV_post(post_row, 1));
-        const int gv2 = sd.subsetVIdx(sd.FUV_post(post_row, 2));
+        int pre_row = -1;
+        for (int r = 0; r < (int)sd.FIdx_pre.size(); r++)
+            if (sd.FIdx_pre(r) == fi) { pre_row = r; break; }
 
-        // Rotate so vi is first.
+        if (pre_row < 0) { useCurrentGF(); continue; }
+
+        const int gv0 = sd.subsetVIdx(sd.FUV_pre(pre_row, 0));
+        const int gv1 = sd.subsetVIdx(sd.FUV_pre(pre_row, 1));
+        const int gv2 = sd.subsetVIdx(sd.FUV_pre(pre_row, 2));
+
         int col = -1;
         if (gv0 == vi) col = 0;
         else if (gv1 == vi) col = 1;
         else if (gv2 == vi) col = 2;
 
         if (col < 0) {
-            // vi not in post-collapse vertices (vi introduced by non-active collapse after dIdx).
+            // vi not present in FUV_pre (introduced by a later non-active-sheet collapse).
             useCurrentGF(); continue;
         }
 
-        const int vs[3] = {gv0, gv1, gv2};
-        BF(i, 0) = vs[col];
-        BF(i, 1) = vs[(col + 1) % 3];
-        BF(i, 2) = vs[(col + 2) % 3];
-        BC(i, 0) = 1.0; BC(i, 1) = 0.0; BC(i, 2) = 0.0;
+        BF(i, 0) = gv0;
+        BF(i, 1) = gv1;
+        BF(i, 2) = gv2;
+        BC(i, 0) = (col == 0) ? 1.0 : 0.0;
+        BC(i, 1) = (col == 1) ? 1.0 : 0.0;
+        BC(i, 2) = (col == 2) ? 1.0 : 0.0;
         FIdx(i)  = fi;
     }
 
@@ -431,12 +787,64 @@ void coarse_fine_load_and_show(const std::string & path)
     std::cerr << "[c2f] Loaded " << loaded << " correspondences from " << path << "\n";
 }
 
+void coarse_fine_pick_check()
+{
+    if (!gPickModeEnabled || gPickCompactToGlobal.empty()) return;
+    if (!polyscope::pick::haveSelection()) return;
+
+    auto sel = polyscope::pick::getSelection();
+    if (sel == gPickLastSel) return;
+    gPickLastSel = sel;
+
+    polyscope::Structure * structure = sel.first;
+    size_t localIdx = sel.second;
+    if (!structure || structure->name != "c2f_pick_verts") return;
+    if ((int)localIdx >= (int)gPickCompactToGlobal.size()) return;
+
+    run_single_vertex_c2f(gPickCompactToGlobal[(int)localIdx]);
+}
+
 void coarse_fine_imgui_section()
 {
     if (!ImGui::CollapsingHeader("Coarse → Fine Correspondence")) return;
 
+    // ---- vertex picker — always available ----
+    ImGui::TextUnformatted("Vertex Picker (single coarse→fine query):");
+
+    bool pickToggle = ImGui::Checkbox("Pick mode##c2fpick", &gPickModeEnabled);
+    if (pickToggle) {
+        if (gPickModeEnabled) {
+            build_pick_pts();
+        } else {
+            polyscope::removeStructure("c2f_pick_verts", false);
+            clear_pick_viz();
+        }
+    }
+
+    if (gPickModeEnabled) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(click a yellow vertex)");
+
+        if (gPickResultValid && gPickedGlobalVtx >= 0) {
+            ImGui::Text("Picked vtx: %d", gPickedGlobalVtx);
+            ImGui::Text("Fine pos: (%.3f, %.3f, %.3f)",
+                gPickFinePos(0), gPickFinePos(1), gPickFinePos(2));
+
+            ImGui::SetNextItemWidth(220);
+            if (ImGui::SliderFloat("Fine mesh Z##pick", &gPickFineZOff, -3.0f, 3.0f))
+                rebuild_pick_viz();
+
+            if (ImGui::Button("Clear##c2fpick"))
+                clear_pick_viz();
+        } else {
+            ImGui::TextDisabled("No vertex picked yet.");
+        }
+    }
+
+    // ---- batch save / load (requires gFinished) ----
+    ImGui::Separator();
     if (!gFinished) {
-        ImGui::TextDisabled("Decimate to target first.");
+        ImGui::TextDisabled("Decimate to target to enable Save/Load.");
         return;
     }
 
@@ -467,4 +875,146 @@ void coarse_fine_imgui_section()
         if (ImGui::SliderFloat("Z offset##c2f", &gC2FzOffset, -2.0f, 2.0f))
             rebuild_coarse_mesh_viz();
     }
+}
+
+// ---------------------------------------------------------------------------
+// ring_post_c2f_diagnostic
+//
+// After each collapse, collect all ring_post vertices (those in FUV_post of
+// the latest SheetData), run the full traced backward walk for each, then:
+//  - log any group that lands on the same fine-mesh position (within 1e-8)
+//  - show per-step chain info for every member of each duplicate group
+//  - register polyscope structures for visual inspection
+// ---------------------------------------------------------------------------
+void ring_post_c2f_diagnostic()
+{
+    if (gDecInfo.empty()) return;
+    const int collapse_idx = (int)gDecInfo.size() - 1;
+    const single_collapse_data & d = gDecInfo.back();
+
+    // Collect unique ring_post global vertex indices across all sheets
+    std::vector<int> ring_post_verts;
+    for (auto & sd : d.sheets) {
+        for (int r = 0; r < sd.FUV_post.rows(); r++) {
+            for (int c = 0; c < 3; c++) {
+                int gv = sd.subsetVIdx(sd.FUV_post(r, c));
+                if (std::find(ring_post_verts.begin(), ring_post_verts.end(), gv)
+                        == ring_post_verts.end())
+                    ring_post_verts.push_back(gv);
+            }
+        }
+    }
+    if (ring_post_verts.empty()) return;
+
+    // Run traced walk for each ring_post vertex
+    std::vector<VertexWalkResult> results;
+    results.reserve(ring_post_verts.size());
+    for (int gv : ring_post_verts)
+        results.push_back(traced_walk(gv));
+
+    // Compute final 3D fine-mesh positions
+    std::vector<Eigen::Vector3d> fine_pos(results.size());
+    for (int i = 0; i < (int)results.size(); i++) {
+        const auto & r = results[i];
+        fine_pos[i] = r.final_BC(0) * gVO.row(r.final_BF(0)).transpose()
+                    + r.final_BC(1) * gVO.row(r.final_BF(1)).transpose()
+                    + r.final_BC(2) * gVO.row(r.final_BF(2)).transpose();
+    }
+
+    // Find duplicate groups (same fine-mesh position within tolerance)
+    const double tol = 1e-8;
+    std::vector<bool> grouped(results.size(), false);
+    bool any_dup = false;
+
+    for (int i = 0; i < (int)results.size(); i++) {
+        if (grouped[i]) continue;
+        std::vector<int> grp = {i};
+        for (int j = i+1; j < (int)results.size(); j++) {
+            if (!grouped[j] && (fine_pos[i] - fine_pos[j]).norm() < tol)
+                grp.push_back(j);
+        }
+        if ((int)grp.size() < 2) continue;
+
+        any_dup = true;
+        for (int idx : grp) grouped[idx] = true;
+
+        fprintf(stderr,
+            "\n[RING-POST-DUP] collapse=%d  %zu coarse verts → same fine pos"
+            " (%.8f, %.8f, %.8f)\n",
+            collapse_idx, grp.size(),
+            fine_pos[i](0), fine_pos[i](1), fine_pos[i](2));
+
+        for (int idx : grp) {
+            const VertexWalkResult & r = results[idx];
+            fprintf(stderr,
+                "  coarse_vtx=%d  init_ok=%d  chain_len=%zu\n"
+                "  final_BF=(%d,%d,%d)  final_BC=(%.8f,%.8f,%.8f)\n",
+                r.global_vtx, (int)r.init_ok, r.chain.size(),
+                r.final_BF(0), r.final_BF(1), r.final_BF(2),
+                r.final_BC(0), r.final_BC(1), r.final_BC(2));
+            for (int s = 0; s < (int)r.chain.size(); s++) {
+                const WalkStep & st = r.chain[s];
+                fprintf(stderr,
+                    "    step[%d] dIdx=%d sheet=%d\n"
+                    "      FIdx_in=%d  BC_in=(%.6f,%.6f,%.6f)"
+                    "  BF_in=(%d,%d,%d)\n"
+                    "      FIdx_out=%d  BC_out=(%.6f,%.6f,%.6f)"
+                    "  BF_out=(%d,%d,%d)\n",
+                    s, st.dIdx, st.sheet_id,
+                    st.FIdx_in,
+                    st.BC_in(0), st.BC_in(1), st.BC_in(2),
+                    st.BF_in(0), st.BF_in(1), st.BF_in(2),
+                    st.FIdx_out,
+                    st.BC_out(0), st.BC_out(1), st.BC_out(2),
+                    st.BF_out(0), st.BF_out(1), st.BF_out(2));
+            }
+        }
+    }
+
+    if (!any_dup) {
+        fprintf(stderr,
+            "[RING-POST-DUP] collapse=%d  no duplicates among %zu ring_post verts\n",
+            collapse_idx, ring_post_verts.size());
+    }
+
+    // ---- Polyscope visualization ----
+
+    // Ring_post coarse positions (current gV)
+    MatrixXd rp_pts((int)ring_post_verts.size(), 3);
+    for (int i = 0; i < (int)ring_post_verts.size(); i++)
+        rp_pts.row(i) = gV.row(ring_post_verts[i]).leftCols(3);
+
+    // Fine correspondence positions
+    MatrixXd fp_pts((int)results.size(), 3);
+    for (int i = 0; i < (int)results.size(); i++)
+        fp_pts.row(i) = fine_pos[i].transpose();
+
+    // Per-point duplicate flag (1 = duplicate, 0 = unique)
+    MatrixXd dup_flag((int)results.size(), 1);
+    for (int i = 0; i < (int)results.size(); i++)
+        dup_flag(i, 0) = grouped[i] ? 1.0 : 0.0;
+
+    auto * rp_cloud = polyscope::registerPointCloud("diag_ring_post", rp_pts);
+    rp_cloud->setPointColor({1.0f, 0.85f, 0.1f});
+    rp_cloud->setPointRadius(0.0006, true);
+    rp_cloud->setEnabled(true);
+
+    auto * fp_cloud = polyscope::registerPointCloud("diag_fine_corr", fp_pts);
+    fp_cloud->setPointRadius(0.0006, true);
+    fp_cloud->addScalarQuantity("is_duplicate", dup_flag.col(0))
+        ->setEnabled(true);
+    fp_cloud->setEnabled(true);
+
+    // Arrows: each ring_post coarse vertex → its fine correspondence point
+    MatrixXd arrowV(2 * (int)results.size(), 3);
+    MatrixXi arrowE((int)results.size(), 2);
+    for (int i = 0; i < (int)results.size(); i++) {
+        arrowV.row(2*i)   = rp_pts.row(i);
+        arrowV.row(2*i+1) = fp_pts.row(i);
+        arrowE.row(i) << 2*i, 2*i+1;
+    }
+    polyscope::registerCurveNetwork("diag_c2f_arrows", arrowV, arrowE)
+        ->setColor({0.5f, 0.5f, 1.0f})
+        ->setRadius(0.00015, true)
+        ->setEnabled(true);
 }

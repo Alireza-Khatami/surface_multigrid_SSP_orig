@@ -1,0 +1,283 @@
+Great question. The key idea is that **after you expand the squared error, all the terms involving the rotation angle (\beta) collapse into one cosine term and one sine term**. Let's derive it step by step.
+
+---
+
+## Step 1. The optimization problem
+
+We have corresponding points
+
+[
+p_i=
+\begin{bmatrix}
+x_i\
+y_i
+\end{bmatrix},
+\qquad
+q_i=
+\begin{bmatrix}
+u_i\
+v_i
+\end{bmatrix}.
+]
+
+We want to rotate the UV points so they align with the projected 3D points.
+
+The rotation matrix is
+
+[
+R(\beta)=
+\begin{bmatrix}
+\cos\beta & -\sin\beta\
+\sin\beta & \cos\beta
+\end{bmatrix}.
+]
+
+The objective is
+
+[
+E(\beta)
+========
+
+\sum_i
+\left|
+R(\beta)q_i-p_i
+\right|^2.
+]
+
+---
+
+## Step 2. Expand the squared norm
+
+Recall
+
+[
+|a-b|^2
+=======
+
+a^Ta+b^Tb-2a^Tb.
+]
+
+Therefore
+
+[
+E(\beta)
+========
+
+\sum_i
+\Big(
+|R q_i|^2
++
+|p_i|^2
+-------
+
+2p_i^TRq_i
+\Big).
+]
+
+Now comes the important observation.
+
+A rotation **does not change length**, so
+
+[
+|Rq_i|=|q_i|.
+]
+
+Therefore
+
+[
+E(\beta)
+========
+
+\underbrace{\sum_i |q_i|^2}*{\text{constant}}
++
+\underbrace{\sum_i |p_i|^2}*{\text{constant}}
+---------------------------------------------
+
+2\sum_i p_i^TRq_i.
+]
+
+The first two sums don't depend on (\beta).
+
+So minimizing the error is exactly the same as maximizing
+
+[
+\sum_i p_i^TRq_i.
+]
+
+This is the alignment term.
+
+---
+
+## Step 3. Compute the dot product
+
+Let's expand one term.
+
+First rotate (q_i):
+
+[
+Rq_i
+====
+
+\begin{bmatrix}
+u\cos\beta-v\sin\beta\
+u\sin\beta+v\cos\beta
+\end{bmatrix}.
+]
+
+Now dot it with
+
+[
+p_i=
+\begin{bmatrix}
+x\
+y
+\end{bmatrix}.
+]
+
+We get
+
+[
+p_i^TRq_i
+=========
+
+x(u\cos\beta-v\sin\beta)
++
+y(u\sin\beta+v\cos\beta).
+]
+
+Expand:
+
+# [
+
+## xu\cos\beta
+
+xv\sin\beta
++
+yu\sin\beta
++
+yv\cos\beta.
+]
+
+Now group the cosine and sine terms:
+
+# [
+
+(xu+yv)\cos\beta
++
+(yu-xv)\sin\beta.
+]
+
+This is the key step.
+
+---
+
+## Step 4. Sum over all points
+
+Now sum over every vertex:
+
+[
+\sum_i p_i^TRq_i
+================
+
+\sum_i(x_iu_i+y_iv_i)\cos\beta
++
+\sum_i(y_iu_i-x_iv_i)\sin\beta.
+]
+
+Factor out the cosine and sine:
+
+# [
+
+\left(
+\sum_i(x_iu_i+y_iv_i)
+\right)\cos\beta
++
+\left(
+\sum_i(y_iu_i-x_iv_i)
+\right)\sin\beta.
+]
+
+Define
+
+[
+A
+=
+
+\sum_i(x_iu_i+y_iv_i),
+]
+
+and
+
+[
+B
+=
+
+\sum_i(y_iu_i-x_iv_i).
+]
+
+So the alignment score becomes
+
+[
+A\cos\beta+B\sin\beta.
+]
+
+That's exactly what the code computes:
+
+```cpp
+A += x*u + y*v;
+B += y*u - x*v;
+```
+
+---
+
+## Step 5. Why does maximizing this give the answer?
+
+Now the optimization has become
+
+[
+\max_\beta
+A\cos\beta+B\sin\beta.
+]
+
+This may look mysterious, but it's actually just a shifted cosine.
+
+Using a standard trigonometric identity,
+
+[
+A\cos\beta+B\sin\beta
+=====================
+
+\sqrt{A^2+B^2}
+\cos(\beta-\phi),
+]
+
+where
+
+[
+\phi=\operatorname{atan2}(B,A).
+]
+
+Since cosine is maximized when its argument is zero,
+
+the maximum occurs when
+
+[
+\boxed{\beta=\phi=\operatorname{atan2}(B,A).}
+]
+
+---
+
+### Intuition
+
+Notice what (A) and (B) measure:
+
+* **(A=\sum(xu+yv))** is the sum of **dot products**. It is largest when corresponding vectors point in the same direction.
+* **(B=\sum(yu-xv))** is (up to sign) the sum of **2D cross products**. It measures how much the UV vectors are rotated relative to the projected 3D vectors.
+
+Together, ((A,B)) form a 2D vector whose angle is precisely the average rotation between the two point sets. That's why taking
+
+[
+\beta=\operatorname{atan2}(B,A)
+]
+
+recovers the optimal in-plane rotation without any iterative optimization. This is the closed-form solution to the 2D orthogonal Procrustes problem.

@@ -1,5 +1,7 @@
 #include "query_coarse_to_fine.h"
 #include <iostream>
+#include <atomic>
+#include <sstream>
 
 void query_coarse_to_fine(
   const std::vector<single_collapse_data> & decInfo,
@@ -21,40 +23,49 @@ void query_coarse_to_fine(
   VectorXi queryCounts(BC.rows());
   queryCounts.setZero();
 
-  // convert vertex indices from V to VO
+  std::atomic<int> cnt_early_exit{0};
+  std::atomic<int> cnt_sheet_fallback{0};
+  std::atomic<int> cnt_pre_row_miss{0};
+
+  fprintf(stderr,
+    "[query_coarse_to_fine START]  queries=%d  decInfo.size=%zu\n",
+    numQuery, decInfo.size());
+
+  // convert BF vertex indices from V to VO (fine mesh indices)
   {
-    // change BF to be on fine mesh indices
-    for (int r=0; r<BF.rows(); r++){
-      for (int c=0; c<BF.cols(); c++){
+    for (int r=0; r<BF.rows(); r++)
+      for (int c=0; c<BF.cols(); c++)
         BF(r,c) = IM(BF(r,c));
-      }
-    }
   }
 
-  // convert vertex indices from V to VO
+  // convert FIdx face indices from V to VO
   {
     for (int ii=0; ii<FIdx.size(); ii++)
       FIdx(ii) = IMF(FIdx(ii));
   }
 
-  // for (int qIdx=0; qIdx<numQuery; qIdx++)
   igl::parallel_for(
     numQuery,
-    [&verbose, &FIdx, &BC, &BF, &decIM, &decInfo, &queryCounts, &faceSheetID](const int qIdx)
+    [&verbose, &FIdx, &BC, &BF, &decIM, &decInfo, &queryCounts, &faceSheetID,
+     &cnt_early_exit, &cnt_sheet_fallback, &cnt_pre_row_miss](const int qIdx)
   {
-    // // print progress
-    // if (qIdx % 1 == 0 && verbose)
-    //   cout << "coarse to fine : " << qIdx << "/" << BF.rows() << endl;
+    // Per-query log buffer — flushed atomically so parallel output doesn't interleave.
+    std::ostringstream log;
 
-    // go through the decInfo
     int dIdx = decInfo.size();
+    int walk_steps = 0;
+    int initial_FIdx = FIdx(qIdx);
+
+    log << "[WALK-START] qIdx=" << qIdx
+        << "  initial_FIdx=" << initial_FIdx
+        << "  initial_BF=(" << BF(qIdx,0) << "," << BF(qIdx,1) << "," << BF(qIdx,2) << ")"
+        << "  initial_BC=(" << BC(qIdx,0) << "," << BC(qIdx,1) << "," << BC(qIdx,2) << ")\n";
 
     while (true)
     {
-      // get query FIdx
       int queryFIdx = FIdx(qIdx);
 
-      // find the dIdx
+      // find the next collapse index to process (newest one older than dIdx)
       vector<int> dIdxList = decIM[queryFIdx];
       bool if_find_dIdx = false;
       for (int ii=dIdxList.size()-1; ii>-1; ii--)
@@ -67,57 +78,67 @@ void query_coarse_to_fine(
         }
       }
 
-      // if not dIdx left, break
       if (!if_find_dIdx)
+      {
+        ++cnt_early_exit;
+        log << "[WALK-EXIT] qIdx=" << qIdx
+            << "  steps=" << walk_steps
+            << "  exit_FIdx=" << (int)FIdx(qIdx)
+            << "  dIdx_at_exit=" << dIdx
+            << "  final_BF=(" << BF(qIdx,0) << "," << BF(qIdx,1) << "," << BF(qIdx,2) << ")"
+            << "  final_BC=(" << BC(qIdx,0) << "," << BC(qIdx,1) << "," << BC(qIdx,2) << ")"
+            << "  decIM=[";
+        for (int e : decIM[(int)FIdx(qIdx)]) log << e << " ";
+        log << "]\n";
         break;
+      }
 
-      ///////// start query /////////
       if (verbose)
-        cout << "qIdx: " << qIdx << ", dIdx: " << dIdx << endl; 
+        cout << "qIdx: " << qIdx << ", dIdx: " << dIdx << endl;
 
       // Route to the correct sheet for this face
       const SheetData * sd_ptr = nullptr;
+      int sid = (FIdx(qIdx) < faceSheetID.size()) ? faceSheetID(FIdx(qIdx)) : 0;
       {
-        int sid = (FIdx(qIdx) < faceSheetID.size()) ? faceSheetID(FIdx(qIdx)) : 0;
         for (auto & sd : decInfo[dIdx].sheets)
           if (sd.global_sheet_id == sid) { sd_ptr = &sd; break; }
-        if (!sd_ptr && !decInfo[dIdx].sheets.empty())
-          sd_ptr = &decInfo[dIdx].sheets[0];  // fallback for manifold meshes
+        if (!sd_ptr && !decInfo[dIdx].sheets.empty()) {
+          ++cnt_sheet_fallback;
+          log << "[SHEET-FALLBACK] qIdx=" << qIdx
+              << "  FIdx=" << (int)FIdx(qIdx)
+              << "  face_sheet=" << sid
+              << "  dIdx=" << dIdx
+              << "  available_sheets=[";
+          for (auto & s : decInfo[dIdx].sheets) log << s.global_sheet_id << " ";
+          log << "]\n";
+          sd_ptr = &decInfo[dIdx].sheets[0];
+        }
       }
       if (!sd_ptr) continue;
       const SheetData & sd = *sd_ptr;
 
-      // get vi and vj
-      int vi = sd.subsetVIdx(sd.b(0));
-      int vj = sd.subsetVIdx(sd.b(1));
-
-      VectorXi f = BF.row(qIdx);
-
-      // Find local indices for BF columns via FIdx_pre column alignment.
-      // Non-active-sheet collapses rewrite d→s in gF (Pass 2) without updating decIM,
-      // so BF can carry stale global vertex indices in two ways:
-      //   Type A: BF[k] absent from subsetVIdx entirely (size==0)
-      //   Type B: BF[k] found in subsetVIdx but is a neighbor, not the face's actual vertex
-      // Both are fixed by looking up queryFIdx in FIdx_pre: non-active remaps only change
-      // the stored vertex value, never the column order, so FUV_pre(pre_row, k) is always
-      // the correct local index for BF column k.
-      int v0, v1, v2;
+      // Find the row in FIdx_pre that matches the current face
+      int pre_row = -1;
       {
-        int pre_row = -1;
         for (int r = 0; r < (int)sd.FIdx_pre.size(); r++)
           if (sd.FIdx_pre(r) == queryFIdx) { pre_row = r; break; }
-
-        // queryFIdx must be in FIdx_pre: decIM[queryFIdx] contains dIdx, meaning
-        // queryFIdx was in the one-ring of collapse dIdx, which is exactly what FIdx_pre
-        // records. pre_row < 0 means upstream data is inconsistent.
-        assert(pre_row >= 0);
-
-        v0 = sd.FUV_pre(pre_row, 0);
-        v1 = sd.FUV_pre(pre_row, 1);
-        v2 = sd.FUV_pre(pre_row, 2);
+        if (pre_row < 0) {
+          ++cnt_pre_row_miss;
+          log << "[PRE-ROW-MISS] qIdx=" << qIdx
+              << "  FIdx=" << (int)FIdx(qIdx)
+              << "  dIdx=" << dIdx
+              << "  sd.sheet=" << sd.global_sheet_id
+              << "  FIdx_pre.size=" << (int)sd.FIdx_pre.size()
+              << "\n";
+          continue;
+        }
       }
 
-      // get query UV (coarse → fine: uses UV_post as input space, UV_pre as output)
+      int v0 = sd.FUV_pre(pre_row, 0);
+      int v1 = sd.FUV_pre(pre_row, 1);
+      int v2 = sd.FUV_pre(pre_row, 2);
+
+      // Project current BC into UV_post to get the query point
       VectorXd queryUV =
           BC(qIdx,0) * sd.UV_post.row(v0)
         + BC(qIdx,1) * sd.UV_post.row(v1)
@@ -130,11 +151,11 @@ void query_coarse_to_fine(
           cout << "B: \n" << B << endl;
       }
 
-      // snap to the closest one
+      // Pick the face in UV_pre whose barycentric coords are most "inside"
       VectorXd distToValid = -B.rowwise().minCoeff();
       double minD = 1.0;
-      int idxToFUV;
-      for (int bb=0;bb<distToValid.size(); bb++)
+      int idxToFUV = 0;
+      for (int bb=0; bb<distToValid.size(); bb++)
       {
         if (distToValid(bb) < minD)
         {
@@ -143,23 +164,47 @@ void query_coarse_to_fine(
         }
       }
 
-      // avoid numerical error of barycentric coordinate
+      // Clamp small negatives from numerical error
       B(idxToFUV, 0) = max(0.0, B(idxToFUV, 0));
       B(idxToFUV, 1) = max(0.0, B(idxToFUV, 1));
       B(idxToFUV, 2) = max(0.0, B(idxToFUV, 2));
       B.row(idxToFUV) = B.row(idxToFUV).array() / B.row(idxToFUV).sum();
 
-      BC.row(qIdx) = B.row(idxToFUV);
+      int new_FIdx = sd.FIdx_pre(idxToFUV);
+      int new_v0   = sd.subsetVIdx(sd.FUV_pre(idxToFUV,0));
+      int new_v1   = sd.subsetVIdx(sd.FUV_pre(idxToFUV,1));
+      int new_v2   = sd.subsetVIdx(sd.FUV_pre(idxToFUV,2));
 
-      BF(qIdx, 0) = sd.subsetVIdx(sd.FUV_pre(idxToFUV,0));
-      BF(qIdx, 1) = sd.subsetVIdx(sd.FUV_pre(idxToFUV,1));
-      BF(qIdx, 2) = sd.subsetVIdx(sd.FUV_pre(idxToFUV,2));
-      FIdx(qIdx) = sd.FIdx_pre(idxToFUV);
+      log << "[WALK-STEP] qIdx=" << qIdx
+          << "  step=" << walk_steps
+          << "  from_FIdx=" << queryFIdx
+          << "  dIdx=" << dIdx
+          << "  sheet=" << sd.global_sheet_id
+          << "  uv_post_corner=(" << sd.UV_post.row(v0) << " | " << sd.UV_post.row(v1) << " | " << sd.UV_post.row(v2) << ")"
+          << "  queryUV=(" << queryUV(0) << "," << queryUV(1) << ")"
+          << "  best_row=" << idxToFUV
+          << "  new_FIdx=" << new_FIdx
+          << "  new_BF=(" << new_v0 << "," << new_v1 << "," << new_v2 << ")"
+          << "  new_BC=(" << B(idxToFUV,0) << "," << B(idxToFUV,1) << "," << B(idxToFUV,2) << ")"
+          << "\n";
+
+      walk_steps++;
+      BC.row(qIdx)  = B.row(idxToFUV);
+      BF(qIdx, 0)   = new_v0;
+      BF(qIdx, 1)   = new_v1;
+      BF(qIdx, 2)   = new_v2;
+      FIdx(qIdx)    = new_FIdx;
     }
-  // };
-  },1000);
+
+    // Flush the entire per-query trace atomically
+    fprintf(stderr, "%s", log.str().c_str());
+  }, 1000);
+
+  fprintf(stderr,
+    "[query_coarse_to_fine SUMMARY]  queries=%d  early_exits=%d  "
+    "sheet_fallbacks=%d  pre_row_misses=%d\n",
+    numQuery, cnt_early_exit.load(), cnt_sheet_fallback.load(), cnt_pre_row_miss.load());
 
   if (verbose)
     cout << "finish query points\n";
-
 }

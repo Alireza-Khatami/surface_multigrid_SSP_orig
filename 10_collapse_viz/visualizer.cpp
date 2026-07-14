@@ -12,6 +12,7 @@
 #include <igl/writeOBJ.h>
 
 #include <single_collapse_data.h>
+#include <compute_barycentric.h>
 
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
@@ -46,6 +47,8 @@ static bool  gShowUVPre         = true;
 static bool  gShowUVPost        = true;
 static bool  gShowArrowPre      = true;
 static bool  gShowArrowPost     = true;
+static bool  gShowCorrArrows    = true;
+static float gPostHeight        = 1.0f;   // elevation of ring_post above ring_pre (× ring_span, along avg_normal)
 static bool  gShowCollapsedEdge = true;
 static bool  gShowMeshPre       = false;
 static float edge_radius        = 0.00006f;
@@ -63,6 +66,7 @@ struct DisplaySnap {
     bool valid = false;
     int vi = -1, vj = -1;
     MatrixXd V_pre;
+    MatrixXd V_post;   // post-collapse 3D geometry (s moved to p, flap faces gone)
     MatrixXi FUV_pre, FUV_post;
     MatrixXd UV_pre,  UV_post;
     VectorXi b;
@@ -126,7 +130,8 @@ static void refresh_snap()
 {
     if (gDecInfo.empty()) return;
     const single_collapse_data & d = gDecInfo.back();
-    gSnap.V_pre = d.V_pre;
+    gSnap.V_pre  = d.V_pre;
+    gSnap.V_post = d.V_post;
     if (!d.sheets.empty()) {
         const SheetData & sd = d.sheets[0];
         gSnap.valid    = true;
@@ -143,11 +148,13 @@ static void refresh_snap()
 // ---- shared geometry ----
 
 struct DisplayGeometry {
-    MatrixXd V_ring;       // one-ring vertices in 3D (scaled)
+    MatrixXd V_ring;       // one-ring vertices in 3D (scaled, from V_pre)
+    MatrixXd V_ring_post;  // post one-ring vertices in 3D (scaled, from V_post)
     MatrixXd uv_pre_3d;    // UV pre panel lifted into 3D
     MatrixXd uv_post_3d;   // UV post panel lifted into 3D
     MatrixXd arrows_pre;   // ring → UV pre vectors
     MatrixXd arrows_post;  // ring → UV post vectors
+    MatrixXd corr_arrows;  // post vertex → computed pre position (query_coarse_to_fine logic)
     Vector3d avg_normal;   // one-ring average face normal
     Vector3d centroid;     // one-ring centroid
     double   ring_span;
@@ -182,7 +189,7 @@ static DisplayGeometry compute_ring_geometry()
         if (g.ring_span < 1e-10) g.ring_span = 1.0;
     }
 
-    // one-ring scaled around centroid
+    // pre one-ring scaled around centroid
     g.V_ring.resize(gSnap.V_pre.rows(), 3);
     for (int v = 0; v < gSnap.V_pre.rows(); v++) {
         if (std::isfinite(gSnap.V_pre(v,0)))
@@ -190,6 +197,67 @@ static DisplayGeometry compute_ring_geometry()
                               (gSnap.V_pre.row(v) - g.centroid.transpose()) * (double)gRingScale;
         else
             g.V_ring.row(v) = gSnap.V_pre.row(v);
+    }
+
+    // post one-ring at V_post positions (same centering/scale as V_ring),
+    // then elevated above ring_pre along the average face normal.
+    g.V_ring_post.resize(gSnap.V_post.rows(), 3);
+    for (int v = 0; v < gSnap.V_post.rows(); v++) {
+        if (std::isfinite(gSnap.V_post(v,0)))
+            g.V_ring_post.row(v) = g.centroid.transpose() +
+                                   (gSnap.V_post.row(v) - g.centroid.transpose()) * (double)gRingScale;
+        else
+            g.V_ring_post.row(v).setZero();
+    }
+    {
+        // Elevate every valid post vertex along avg_normal (computed below; precompute here
+        // by using a temporary pass so we can apply it before building corr_arrows).
+        // avg_normal is filled in the loop further down, so compute a quick version now.
+        Vector3d tmp_normal = Vector3d::Zero();
+        for (int f = 0; f < gSnap.FUV_pre.rows(); f++) {
+            Vector3d p0 = gSnap.V_pre.row(gSnap.FUV_pre(f,0)).transpose();
+            Vector3d p1 = gSnap.V_pre.row(gSnap.FUV_pre(f,1)).transpose();
+            Vector3d p2 = gSnap.V_pre.row(gSnap.FUV_pre(f,2)).transpose();
+            if (p0.allFinite() && p1.allFinite() && p2.allFinite())
+                tmp_normal += (p1 - p0).cross(p2 - p0);
+        }
+        if (tmp_normal.squaredNorm() < 1e-20) tmp_normal = Vector3d::UnitY();
+        else tmp_normal.normalize();
+        Vector3d elev = tmp_normal * (double)gPostHeight * g.ring_span;
+        for (int v = 0; v < g.V_ring_post.rows(); v++)
+            if (std::isfinite(g.V_ring_post(v, 0)))
+                g.V_ring_post.row(v) += elev.transpose();
+    }
+
+    // Pre → Post correspondence: for each pre vertex i, project UV_pre.row(i) into
+    // UV_post/FUV_post using the exact same compute_barycentric + face-selection logic
+    // as each single step of query_coarse_to_fine. Arrow = post_pos − pre_pos.
+    {
+        int nV = (int)gSnap.UV_pre.rows();
+        g.corr_arrows.resize(nV, 3);
+        g.corr_arrows.setZero();
+        for (int i = 0; i < nV; i++) {
+            if (!std::isfinite(g.V_ring(i, 0))) continue;
+            VectorXd queryUV = gSnap.UV_pre.row(i).transpose();
+            MatrixXd B;
+            compute_barycentric(queryUV, gSnap.UV_post, gSnap.FUV_post, B);
+            // Same face-selection as query_coarse_to_fine
+            VectorXd distToValid = -B.rowwise().minCoeff();
+            double minD = 1.0;
+            int idxToFUV = 0;
+            for (int bb = 0; bb < (int)distToValid.size(); bb++)
+                if (distToValid(bb) < minD) { minD = distToValid(bb); idxToFUV = bb; }
+            for (int c = 0; c < 3; c++) B(idxToFUV, c) = std::max(0.0, B(idxToFUV, c));
+            double bsum = B.row(idxToFUV).sum();
+            if (bsum > 1e-12) B.row(idxToFUV) /= bsum;
+            // 3D position on elevated post one-ring
+            Vector3d post_pos =
+                B(idxToFUV, 0) * g.V_ring_post.row(gSnap.FUV_post(idxToFUV, 0)).transpose() +
+                B(idxToFUV, 1) * g.V_ring_post.row(gSnap.FUV_post(idxToFUV, 1)).transpose() +
+                B(idxToFUV, 2) * g.V_ring_post.row(gSnap.FUV_post(idxToFUV, 2)).transpose();
+            // Arrow from pre_pos → post_pos
+            g.corr_arrows.row(i) = (post_pos - g.V_ring.row(i).transpose()).transpose();
+        }
     }
 
     // average face normal
@@ -260,10 +328,10 @@ static DisplayGeometry compute_ring_geometry()
     g.arrows_pre.resize(nV, 3);  g.arrows_pre.setZero();
     g.arrows_post.resize(nV, 3); g.arrows_post.setZero();
     for (int i = 0; i < nV; i++) {
-        if (std::isfinite(g.V_ring(i,0))) {
+        if (std::isfinite(g.V_ring(i,0)))
             g.arrows_pre.row(i)  = g.uv_pre_3d.row(i)  - g.V_ring.row(i);
-            g.arrows_post.row(i) = g.uv_post_3d.row(i) - g.V_ring.row(i);
-        }
+        if (std::isfinite(g.V_ring_post(i,0)))
+            g.arrows_post.row(i) = g.uv_post_3d.row(i) - g.V_ring_post.row(i);
     }
 
     return g;
@@ -277,20 +345,26 @@ static void register_ring_geometry(const DisplayGeometry & g)
         rp->setSurfaceColor({0.3f, 0.55f, 1.0f})->setEdgeWidth(1.5)->setSmoothShade(false);
         rp->setEnabled(gShowRingPre);
         rp->addVertexVectorQuantity("to_uv_pre", g.arrows_pre, polyscope::VectorType::AMBIENT)->setEnabled(gShowArrowPre);
+        {
+            auto * cq = rp->addVertexVectorQuantity("pre_to_post_corr", g.corr_arrows,
+                                                    polyscope::VectorType::AMBIENT);
+            cq->setEnabled(gShowCorrArrows);
+            cq->setVectorColor({0.1f, 0.9f, 0.3f});
+        }
 
         polyscope::registerPointCloud("ring_pre_pts", g.V_ring)
             ->setPointColor({0.3f, 0.55f, 1.0f})->setPointRadius(pts_radius, true)->setEnabled(gShowRingPre);
 
-        auto * ro = polyscope::registerSurfaceMesh("one_ring_post", g.V_ring, gSnap.FUV_post);
+        auto * ro = polyscope::registerSurfaceMesh("one_ring_post", g.V_ring_post, gSnap.FUV_post);
         ro->setSurfaceColor({1.0f, 0.5f, 0.15f})->setEdgeWidth(1.5)->setSmoothShade(false)->setTransparency(1.0f);
         ro->setEnabled(gShowRingPost);
         ro->addVertexVectorQuantity("to_uv_post", g.arrows_post, polyscope::VectorType::AMBIENT)->setEnabled(gShowArrowPost);
 
-        polyscope::registerPointCloud("ring_post_pts", g.V_ring)
+        polyscope::registerPointCloud("ring_post_pts", g.V_ring_post)
             ->setPointColor({1.0f, 0.5f, 0.15f})->setPointRadius(pts_radius, true)->setEnabled(gShowRingPost);
     }
 
-    // collapsed edge in 3-D
+    // collapsed edge in 3-D: s at pre position → d at pre position
     {
         MatrixXd eV(2, 3);
         eV.row(0) = g.V_ring.row(gSnap.b(0));
@@ -363,18 +437,22 @@ static void show_canonical_view()
     };
 
     DisplayGeometry gc;
-    gc.V_ring     = rot(g.V_ring);
-    gc.uv_pre_3d  = rot(g.uv_pre_3d);
-    gc.uv_post_3d = rot(g.uv_post_3d);
+    gc.V_ring      = rot(g.V_ring);
+    gc.V_ring_post = rot(g.V_ring_post);
+    gc.uv_pre_3d   = rot(g.uv_pre_3d);
+    gc.uv_post_3d  = rot(g.uv_post_3d);
 
     int nV = gc.V_ring.rows();
     gc.arrows_pre.resize(nV, 3);  gc.arrows_pre.setZero();
     gc.arrows_post.resize(nV, 3); gc.arrows_post.setZero();
+    gc.corr_arrows.resize(nV, 3); gc.corr_arrows.setZero();
     for (int i = 0; i < nV; i++) {
         if (std::isfinite(g.V_ring(i,0))) {
             gc.arrows_pre.row(i)  = gc.uv_pre_3d.row(i)  - gc.V_ring.row(i);
-            gc.arrows_post.row(i) = gc.uv_post_3d.row(i) - gc.V_ring.row(i);
+            gc.arrows_post.row(i) = gc.uv_post_3d.row(i) - gc.V_ring_post.row(i);
         }
+        if (g.corr_arrows.row(i).squaredNorm() > 0)
+            gc.corr_arrows.row(i) = (R * g.corr_arrows.row(i).transpose()).transpose();
     }
 
     polyscope::removeAllStructures();
@@ -420,6 +498,7 @@ void update_display()
 void ui_callback()
 {
     sheet_seam_pick_check();
+    coarse_fine_pick_check();
 
     // Drive continuous decimation
     if (gRunning && !gFinished) {
@@ -427,6 +506,7 @@ void ui_callback()
         if (do_next_step()) {
             refresh_snap();
             update_display();
+            ring_post_c2f_diagnostic();
 
             bool hitSeam = !gDecInfo.empty() && gDecInfo.back().sheets.size() > 1;
             if (gRunToSeam && hitSeam)
@@ -463,7 +543,7 @@ void ui_callback()
             ImGui::IsKeyPressed(ImGuiKey_Space, /*repeat=*/false))
         {
             snapshot_pre_mesh();
-            if (do_next_step()) { refresh_snap(); update_display(); }
+            if (do_next_step()) { refresh_snap(); update_display(); ring_post_c2f_diagnostic(); }
         }
         ImGui::SameLine();
         if (ImGui::Button("Run"))       { gRunning = true; }
@@ -504,6 +584,8 @@ void ui_callback()
     bool redraw = false;
     ImGui::Text("UV offset (x ring size):");
     redraw |= ImGui::SliderFloat("##uvoffset", &gUVOffset, -2.0f, 2.0f);
+    ImGui::Text("Post ring height (x ring size):");
+    redraw |= ImGui::SliderFloat("##postheight", &gPostHeight, 0.0f, 3.0f);
     ImGui::Text("Scale:");
     redraw |= ImGui::SliderFloat("##scale", &gRingScale, 0.1f, 5.0f);
     if (redraw && gSnap.valid) update_display();
@@ -517,6 +599,7 @@ void ui_callback()
     vis |= ImGui::Checkbox("UV post",         &gShowUVPost);
     vis |= ImGui::Checkbox("Arrows pre",      &gShowArrowPre);  ImGui::SameLine();
     vis |= ImGui::Checkbox("Arrows post",     &gShowArrowPost);
+    vis |= ImGui::Checkbox("Pre→Post corr",   &gShowCorrArrows);
     vis |= ImGui::Checkbox("Collapsed edges", &gShowCollapsedEdge);
     if (gHasPreMesh)
         vis |= ImGui::Checkbox("Mesh before collapse", &gShowMeshPre);

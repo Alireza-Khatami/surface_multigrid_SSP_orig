@@ -516,11 +516,66 @@ bool SSP_collapse_edge(
     any_sheet_ok = true;
   }
 
-  if (!any_sheet_ok) return false;
+  if (!any_sheet_ok) {
+    // Log which real faces of d were in this rejected collapse's one-ring.
+    // If these faces overlap with the backward walk's exit faces (e.g. 21, 64, 72),
+    // it means those faces are "missing" a decIM entry they should have had —
+    // causing the walk to exit earlier than correct.
+    // If they DON'T overlap, early walk exits are correct feature-face behavior.
+    static int saf_count = 0;
+    static int saf_total = 0;
+    saf_total++;
+    if (saf_count < 40) {
+      saf_count++;
+      const vector<int> & dfaces = (!eflip ? Nsf : Ndf);
+      fprintf(stderr,
+        "[SHEET-ALL-FAILED] reject#%d(total=%d)  seq=%zu  e=(%d,%d) s=%d d=%d  "
+        "active_sheets=%zu  real_faces_of_d=[",
+        saf_count, saf_total, decInfo.size(),
+        E(e,0), E(e,1), s, d, active_sheets.size());
+      for (int f : dfaces)
+        if (!null_face(f) && f < numOrigFaces) fprintf(stderr, "%d ", f);
+      fprintf(stderr, "]\n");
+    }
+    return false;
+  }
 
   // Build combined FIdx_onering_pre (sorted union of all sheets)
   FIdx_onering_pre.resize((int)FIdx_combined.size());
   { int fi = 0; for (int f : FIdx_combined) FIdx_onering_pre(fi++) = f; }
+
+  // [NON-ACTIVE-SHEET] Log real faces of d that Pass 2 will remap (d→s in gF)
+  // but that are NOT in any active sheet's one-ring → no decIM entry will be written.
+  // These faces will have stale gF entries when the backward walk queries them.
+  {
+    static int nas_log = 0;
+    const vector<int> & nV2Fd_check = (!eflip ? Nsf : Ndf);
+    int nas_count = 0;
+    for (int f : nV2Fd_check) {
+      if (null_face(f) || f >= numOrigFaces) continue;
+      if (FIdx_combined.find(f) == FIdx_combined.end()) {
+        nas_count++;
+        if (nas_log < 30) {
+          nas_log++;
+          fprintf(stderr,
+            "[NON-ACTIVE-SHEET-FACE] collapse=%zu  face=%d  sheet=%d  "
+            "d=%d s=%d  active_sheets=[",
+            decInfo.size(), f, (int)faceSheetID(f), d, s);
+          for (int sid : active_sheets) fprintf(stderr, "%d ", sid);
+          fprintf(stderr, "]  → gF will get d→s remap but NO decIM entry\n");
+        }
+      }
+    }
+    if (nas_count > 0) {
+      static int nas_summary = 0;
+      if (nas_summary < 10) {
+        nas_summary++;
+        fprintf(stderr,
+          "[NON-ACTIVE-SHEET-SUMMARY] collapse=%zu  %d face(s) remapped without decIM entry\n",
+          decInfo.size(), nas_count);
+      }
+    }
+  }
 
   // ================================================================
   // VF-based two-pass topology update
