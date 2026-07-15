@@ -36,3 +36,7 @@ build_log.txt
 *.exe
 *.out
 *.app
+*.md
+
+*/reports/*
+*/md_files_10_collapse_viz_backup/*

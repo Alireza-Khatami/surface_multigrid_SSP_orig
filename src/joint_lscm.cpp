@@ -10,7 +10,8 @@ bool joint_lscm(
   const std::vector<int> & Nsv,
   const std::vector<int> & Ndv,
   Eigen::MatrixXd & UV_pre,
-  Eigen::MatrixXd & UV_post)
+  Eigen::MatrixXd & UV_post,
+  std::optional<int> * out_case)
 {
   using namespace Eigen;
 	using namespace std;
@@ -224,7 +225,8 @@ bool joint_lscm(
 		abort();
 	}
 
-	// cout << "whichCase: " << whichCase << endl; 
+	if (out_case) *out_case = whichCase;
+
 	switch (whichCase){
 		case 0:
 			joint_lscm_case0(V_pre,FUV_pre,V_post,FUV_post,vi,vj,bdLoop,verbose,isDebug,onBd,UV_pre,UV_post);

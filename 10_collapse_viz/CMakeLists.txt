@@ -22,11 +22,10 @@ find_package(LIBIGL REQUIRED)
 
 include_directories("../src/")
 
-# App sources — list explicitly so new files are visible at a glance
+# Core sources — always compiled.
+# visualizer.cpp and sheet_seam_viz.cpp are added below only when C2F_VIZ_DIAGNOSTIC is ON.
 set(APP_SRCS
     main.cpp
-    visualizer.cpp
-    sheet_seam_viz.cpp
     coarse_fine_viz.cpp
     orient_faces_consistently.cpp
 )
@@ -36,8 +35,16 @@ file(GLOB SSP_SRCS ../src/*.cpp)
 
 add_executable(${PROJECT_NAME}_bin ${APP_SRCS} ${SSP_SRCS})
 
+target_compile_features(${PROJECT_NAME}_bin PRIVATE cxx_std_17)
+
 target_link_libraries(${PROJECT_NAME}_bin igl::core polyscope)
 
 if(MSVC)
   target_compile_definitions(${PROJECT_NAME}_bin PRIVATE _USE_MATH_DEFINES NOMINMAX)
+endif()
+
+option(C2F_VIZ_DIAGNOSTIC "Enable per-collapse ring_post c2f diagnostic polyscope visualization (traced walk, point clouds, arrows)" OFF)
+if(C2F_VIZ_DIAGNOSTIC)
+    target_compile_definitions(${PROJECT_NAME}_bin PRIVATE C2F_VIZ_DIAGNOSTIC)
+    target_sources(${PROJECT_NAME}_bin PRIVATE visualizer.cpp sheet_seam_viz.cpp)
 endif()

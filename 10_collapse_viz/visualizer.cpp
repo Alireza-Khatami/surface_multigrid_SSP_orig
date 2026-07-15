@@ -40,14 +40,16 @@ static float gRingScale         = 1.0f;
 static float gStepDelayMs       = 100.0f;
 static bool  gRunning           = false;
 static bool  gRunToSeam         = false;
+static bool  gRunToBdCase       = false;  // stop at LSCM Case 1 or 2 (one/both endpoints on boundary)
 static bool  gCanonicalView     = false;
 static bool  gShowRingPre       = true;
 static bool  gShowRingPost      = true;
-static bool  gShowUVPre         = true;
-static bool  gShowUVPost        = true;
-static bool  gShowArrowPre      = true;
-static bool  gShowArrowPost     = true;
+static bool  gShowUVPre         = false;
+static bool  gShowUVPost        = false;
+static bool  gShowArrowPre      = false;
+static bool  gShowArrowPost     = false;
 static bool  gShowCorrArrows    = true;
+static bool  gShowCorrPts      = true;
 static float gPostHeight        = 1.0f;   // elevation of ring_post above ring_pre (× ring_span, along avg_normal)
 static bool  gShowCollapsedEdge = true;
 static bool  gShowMeshPre       = false;
@@ -154,7 +156,8 @@ struct DisplayGeometry {
     MatrixXd uv_post_3d;   // UV post panel lifted into 3D
     MatrixXd arrows_pre;   // ring → UV pre vectors
     MatrixXd arrows_post;  // ring → UV post vectors
-    MatrixXd corr_arrows;  // post vertex → computed pre position (query_coarse_to_fine logic)
+    MatrixXd corr_arrows;  // pre → post correspondence vectors (query_coarse_to_fine logic)
+    MatrixXd corr_pts;    // tips of corr_arrows: 3D positions on post one-ring
     Vector3d avg_normal;   // one-ring average face normal
     Vector3d centroid;     // one-ring centroid
     double   ring_span;
@@ -236,6 +239,8 @@ static DisplayGeometry compute_ring_geometry()
         int nV = (int)gSnap.UV_pre.rows();
         g.corr_arrows.resize(nV, 3);
         g.corr_arrows.setZero();
+        g.corr_pts.resize(nV, 3);
+        g.corr_pts.setConstant(std::numeric_limits<double>::quiet_NaN());
         for (int i = 0; i < nV; i++) {
             if (!std::isfinite(g.V_ring(i, 0))) continue;
             VectorXd queryUV = gSnap.UV_pre.row(i).transpose();
@@ -255,8 +260,9 @@ static DisplayGeometry compute_ring_geometry()
                 B(idxToFUV, 0) * g.V_ring_post.row(gSnap.FUV_post(idxToFUV, 0)).transpose() +
                 B(idxToFUV, 1) * g.V_ring_post.row(gSnap.FUV_post(idxToFUV, 1)).transpose() +
                 B(idxToFUV, 2) * g.V_ring_post.row(gSnap.FUV_post(idxToFUV, 2)).transpose();
-            // Arrow from pre_pos → post_pos
+            // Arrow from pre_pos → post_pos; tip as separate point cloud
             g.corr_arrows.row(i) = (post_pos - g.V_ring.row(i).transpose()).transpose();
+            g.corr_pts.row(i)    = post_pos.transpose();
         }
     }
 
@@ -362,6 +368,9 @@ static void register_ring_geometry(const DisplayGeometry & g)
 
         polyscope::registerPointCloud("ring_post_pts", g.V_ring_post)
             ->setPointColor({1.0f, 0.5f, 0.15f})->setPointRadius(pts_radius, true)->setEnabled(gShowRingPost);
+
+        polyscope::registerPointCloud("corr_pts", g.corr_pts)
+            ->setPointColor({0.1f, 0.9f, 0.3f})->setPointRadius(pts_radius * 50.0f, true)->setEnabled(gShowCorrPts);
     }
 
     // collapsed edge in 3-D: s at pre position → d at pre position
@@ -441,6 +450,7 @@ static void show_canonical_view()
     gc.V_ring_post = rot(g.V_ring_post);
     gc.uv_pre_3d   = rot(g.uv_pre_3d);
     gc.uv_post_3d  = rot(g.uv_post_3d);
+    gc.corr_pts    = rot(g.corr_pts);
 
     int nV = gc.V_ring.rows();
     gc.arrows_pre.resize(nV, 3);  gc.arrows_pre.setZero();
@@ -512,7 +522,21 @@ void ui_callback()
             if (gRunToSeam && hitSeam)
                 gRunToSeam = false;
 
-            if (!gRunToSeam)
+            if (!gDecInfo.empty()) {
+                const auto & lc = gDecInfo.back().lscm_case;
+                if (lc.has_value() && lc.value() >= 1) {
+                    fprintf(stderr, "[joint_lscm] case %d triggered (%s)\n",
+                        lc.value() + 1,
+                        lc.value() == 1 ? "one endpoint on boundary"
+                                        : "both endpoints on boundary");
+                    if (gRunToBdCase) {
+                        gRunToBdCase = false;
+                        gRunning     = false;
+                    }
+                }
+            }
+
+            if (!gRunToSeam && !gRunToBdCase)
                 std::this_thread::sleep_for(
                     std::chrono::milliseconds(static_cast<int>(gStepDelayMs)));
         }
@@ -546,9 +570,11 @@ void ui_callback()
             if (do_next_step()) { refresh_snap(); update_display(); ring_post_c2f_diagnostic(); }
         }
         ImGui::SameLine();
-        if (ImGui::Button("Run"))       { gRunning = true; }
+        if (ImGui::Button("Run"))            { gRunning = true; }
         ImGui::SameLine();
-        if (ImGui::Button("Next seam")) { gRunToSeam = true; gRunning = true; }
+        if (ImGui::Button("Next seam"))      { gRunToSeam   = true; gRunning = true; }
+        ImGui::SameLine();
+        if (ImGui::Button("Next bd case"))   { gRunToBdCase = true; gRunning = true; }
     }
 
     // Canonical / normal view toggle
@@ -599,7 +625,8 @@ void ui_callback()
     vis |= ImGui::Checkbox("UV post",         &gShowUVPost);
     vis |= ImGui::Checkbox("Arrows pre",      &gShowArrowPre);  ImGui::SameLine();
     vis |= ImGui::Checkbox("Arrows post",     &gShowArrowPost);
-    vis |= ImGui::Checkbox("Pre→Post corr",   &gShowCorrArrows);
+    vis |= ImGui::Checkbox("Pre→Post corr",   &gShowCorrArrows); ImGui::SameLine();
+    vis |= ImGui::Checkbox("Corr pts",        &gShowCorrPts);
     vis |= ImGui::Checkbox("Collapsed edges", &gShowCollapsedEdge);
     if (gHasPreMesh)
         vis |= ImGui::Checkbox("Mesh before collapse", &gShowMeshPre);

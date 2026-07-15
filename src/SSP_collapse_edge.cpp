@@ -486,7 +486,8 @@ bool SSP_collapse_edge(
     bool isValid = joint_lscm(
         V_pre_si, FUV_pre_si, V_post_si, FUV_post_si,
         b_si(0), b_si(1), Nsv_local, Ndv_local,
-        UV_pre_si, UV_post_si);
+        UV_pre_si, UV_post_si,
+        any_sheet_ok ? nullptr : &data.lscm_case);
     if (!isValid) return false;
 
     // Store SheetData

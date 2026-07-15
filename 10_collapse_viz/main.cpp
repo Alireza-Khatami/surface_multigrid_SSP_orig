@@ -1,4 +1,3 @@
-#include "visualizer.h"
 #include "orient_faces_consistently.h"
 
 #include <igl/read_triangle_mesh.h>
@@ -9,7 +8,9 @@
 #include <igl/collapse_edge.h>  // IGL_COLLAPSE_EDGE_NULL
 #include <igl/vertex_triangle_adjacency.h>
 
+#ifdef C2F_VIZ_DIAGNOSTIC
 #include <polyscope/polyscope.h>
+#endif
 
 #include <SSP_collapse_edge.h>
 #include <single_collapse_data.h>
@@ -27,6 +28,14 @@
 #include <limits>
 #include <string>
 #include <cmath>
+
+#ifdef C2F_VIZ_DIAGNOSTIC
+#include "visualizer.h"
+#include "coarse_fine_viz.h"
+#else
+void coarse_fine_compute_and_save(const std::string & path);
+void coarse_fine_save_bundle(const std::string & corrPath, const std::string & bundlePath);
+#endif
 
 using namespace Eigen;
 
@@ -168,9 +177,34 @@ int main(int argc, char * argv[])
 
     init_ssp(argv[1], std::stoi(argv[2]));
 
+    // Build output file names from mesh stem: c2f_<stem>.txt, correspondence_<stem>.c2f
+    std::string stem = argv[1];
+    {
+        size_t slash = stem.find_last_of("/\\");
+        if (slash != std::string::npos) stem = stem.substr(slash + 1);
+        size_t dot = stem.rfind('.');
+        if (dot != std::string::npos) stem = stem.substr(0, dot);
+    }
+    const std::string c2f_path    = "c2f_" + stem + ".txt";
+    const std::string bundle_path = "correspondence_" + stem + ".c2f";
+
+#ifdef C2F_VIZ_DIAGNOSTIC
     polyscope::init();
     polyscope::state::userCallback = ui_callback;
     update_display();
     polyscope::show();
+#else
+    // Headless: run all collapses to target without any GUI.
+    while (!gFinished)
+        do_next_step();
+#endif
+
+    // Auto-save on exit regardless of C2F_VIZ_DIAGNOSTIC and regardless of
+    // whether decimation reached the target face count.
+    if (!gDecInfo.empty()) {
+        coarse_fine_compute_and_save(c2f_path);
+        coarse_fine_save_bundle(c2f_path, bundle_path);
+    }
+
     return 0;
 }

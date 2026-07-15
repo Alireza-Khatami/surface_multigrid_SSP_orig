@@ -11,7 +11,10 @@
 
 #include <query_coarse_to_fine.h>
 #include <single_collapse_data.h>
+
+#ifdef C2F_VIZ_DIAGNOSTIC
 #include <compute_barycentric.h>
+#endif
 
 #include <Eigen/Dense>
 #include <fstream>
@@ -139,6 +142,7 @@ static void clear_pick_viz()
 }
 
 // ---- ring_post diagnostic structs ----
+#ifdef C2F_VIZ_DIAGNOSTIC
 
 struct WalkStep {
     int dIdx;
@@ -303,6 +307,8 @@ static VertexWalkResult traced_walk(int vi)
     res.final_BC = BC_cur;
     return res;
 }
+
+#endif // C2F_VIZ_DIAGNOSTIC
 
 // Run the full backward walk for one coarse vertex, then display results.
 static void run_single_vertex_c2f(int vi)
@@ -888,6 +894,7 @@ void coarse_fine_imgui_section()
 // ---------------------------------------------------------------------------
 void ring_post_c2f_diagnostic()
 {
+#ifdef C2F_VIZ_DIAGNOSTIC
     if (gDecInfo.empty()) return;
     const int collapse_idx = (int)gDecInfo.size() - 1;
     const single_collapse_data & d = gDecInfo.back();
@@ -1017,4 +1024,5 @@ void ring_post_c2f_diagnostic()
         ->setColor({0.5f, 0.5f, 1.0f})
         ->setRadius(0.00015, true)
         ->setEnabled(true);
+#endif // C2F_VIZ_DIAGNOSTIC
 }

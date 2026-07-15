@@ -2,6 +2,7 @@
 #define SINGEL_COLLAPSE_DATA_H
 
 #include <vector>
+#include <optional>
 #include <Eigen/Core>
 
 // Per-sheet UV data for one edge collapse.
@@ -23,6 +24,7 @@ struct single_collapse_data
     Eigen::MatrixXd V_pre, V_post;  // 3D geometry from first successful sheet (for display)
     std::vector<int> Nsv, Ndv;     // local winding-order neighbour lists (first sheet)
     int numFlapFaces = 0;           // faces killed in topology pass (2=manifold, >2=seam edge)
+    std::optional<int> lscm_case;   // joint_lscm case: 0=both interior, 1=one on bd, 2=both on bd
 };
 
 #endif

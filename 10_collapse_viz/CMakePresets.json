@@ -10,7 +10,8 @@
       "toolchainFile": "C:/Users/alirz/Projects/vcpkg/scripts/buildsystems/vcpkg.cmake",
       "environment": { "CMAKE_POLICY_VERSION_MINIMUM": "3.5" },
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug"
+        "CMAKE_BUILD_TYPE": "Debug",
+        "C2F_VIZ_DIAGNOSTIC": "ON"
       }
     },
     {
@@ -22,7 +23,8 @@
       "toolchainFile": "C:/Users/alirz/Projects/vcpkg/scripts/buildsystems/vcpkg.cmake",
       "environment": { "CMAKE_POLICY_VERSION_MINIMUM": "3.5" },
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release"
+        "CMAKE_BUILD_TYPE": "Release",
+        "C2F_VIZ_DIAGNOSTIC": "OFF"
       }
     }
   ],

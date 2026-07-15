@@ -25,6 +25,7 @@
 
 #include <profc.h>
 #include <vector>
+#include <optional>
 #include <iostream>
 #include <stdlib.h>
 #include <limits>
@@ -55,7 +56,8 @@ bool joint_lscm(
   const std::vector<int> & Nsv,
   const std::vector<int> & Ndv,
   Eigen::MatrixXd & UV_pre,
-  Eigen::MatrixXd & UV_post);
+  Eigen::MatrixXd & UV_post,
+  std::optional<int> * out_case = nullptr);
 
 bool check_valid_UV_lscm(
   const Eigen::MatrixXd & V_pre,
