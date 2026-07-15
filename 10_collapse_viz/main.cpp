@@ -4,9 +4,14 @@
 #include <igl/connect_boundary_to_infinity.h>
 #include <igl/edge_flaps.h>
 #include <igl/shortest_edge_and_midpoint.h>
+#include <igl/per_vertex_point_to_plane_quadrics.h>
 #include <igl/parallel_for.h>
 #include <igl/collapse_edge.h>  // IGL_COLLAPSE_EDGE_NULL
 #include <igl/vertex_triangle_adjacency.h>
+
+#include <SSP_qslim_optimal_collapse_edge_callbacks.h>
+#include <always_try_never_care.h>
+#include <decimate_func_types.h>
 
 #ifdef C2F_VIZ_DIAGNOSTIC
 #include <polyscope/polyscope.h>
@@ -15,7 +20,6 @@
 #include <SSP_collapse_edge.h>
 #include <single_collapse_data.h>
 #include <partition_into_sheets.h>
-#include <always_try_never_care.h>
 #include <min_heap.h>
 
 #include <Eigen/Dense>
@@ -58,6 +62,17 @@ std::vector<std::pair<int,int>> gSeamEdgeList;  // vertex pairs of seam (non-man
 int gTargetFaces  = 100;
 int gCollapseCount = 0;
 bool gFinished    = false;
+
+// Decimation strategy: 0 = midpoint, 1 = qslim
+int gDecType = 1;
+
+// Unified callbacks — set by init_ssp based on gDecType
+typedef std::tuple<MatrixXd, RowVectorXd, double> Quadric;
+static std::vector<Quadric> gQuadrics;
+static int gQSlimV1 = -1, gQSlimV2 = -1;
+static decimate_cost_and_placement_func gCostFn;
+static decimate_pre_collapse_func       gPreFn;
+static decimate_post_collapse_func      gPostFn;
 
 // ---- init ----
 static void init_ssp(const std::string & mesh_path, int tarF)
@@ -109,14 +124,32 @@ static void init_ssp(const std::string & mesh_path, int tarF)
         std::cout << "Seam edges: " << gSeamEdgeList.size() << "\n";
     }
 
+    // Build cost/placement callbacks based on chosen strategy
+    if (gDecType == 0) {
+        // Midpoint: cost = edge length, placement = midpoint
+        gCostFn = [](int e, const MatrixXd & V, const MatrixXi & F,
+                     const MatrixXi & E, const VectorXi & EMAP,
+                     const MatrixXi & EF, const MatrixXi & EI,
+                     double & cost, RowVectorXd & p) {
+            igl::shortest_edge_and_midpoint(e, V, F, E, EMAP, EF, EI, cost, p);
+        };
+        always_try_never_care(gPreFn, gPostFn);
+        std::cout << "Decimation: midpoint\n";
+    } else {
+        // QSlim: quadric error metric, optimal placement
+        igl::per_vertex_point_to_plane_quadrics(gV, gF, gEMAP, gEF, gEI, gQuadrics);
+        SSP_qslim_optimal_collapse_edge_callbacks(
+            gE, gQuadrics, gQSlimV1, gQSlimV2, gCostFn, gPreFn, gPostFn);
+        std::cout << "Decimation: qslim\n";
+    }
+
     gEQ = VectorXi::Zero(gE.rows());
     gC.resize(gE.rows(), gV.cols());
     {
         VectorXd costs(gE.rows());
         igl::parallel_for(gE.rows(), [&](const int e) {
-            double cost = e;
-            RowVectorXd p(1, 3);
-            igl::shortest_edge_and_midpoint(e, gV, gF, gE, gEMAP, gEF, gEI, cost, p);
+            double cost; RowVectorXd p;
+            gCostFn(e, gV, gF, gE, gEMAP, gEF, gEI, cost, p);
             gC.row(e) = p;
             costs(e) = cost;
         }, 10000);
@@ -133,10 +166,6 @@ bool do_next_step()
 {
     if (gFinished) return false;
 
-    decimate_pre_collapse_func  always_try;
-    decimate_post_collapse_func never_care;
-    always_try_never_care(always_try, never_care);
-
     for (int tries = 0; tries < 1'000'000; tries++) {
         if (gQ.empty() || std::get<0>(gQ.top()) == std::numeric_limits<double>::infinity()) {
             gFinished = true;
@@ -144,7 +173,7 @@ bool do_next_step()
         }
         int e, e1, e2, f1, f2;
         bool ok = SSP_collapse_edge(
-            igl::shortest_edge_and_midpoint, always_try, never_care,
+            gCostFn, gPreFn, gPostFn,
             gV, gF, gE, gEMAP, gEF, gEI,
             gQ, gEQ, gC, e, e1, e2, f1, f2,
             gDecInfo, gDecIM,
@@ -171,8 +200,17 @@ bool do_next_step()
 int main(int argc, char * argv[])
 {
     if (argc < 3) {
-        std::cerr << "usage: collapse_viz_bin  <mesh_path>  <target_faces>\n";
+        std::cerr << "usage: collapse_viz_bin  <mesh_path>  <target_faces>  [midpoint|qslim]\n";
         return 1;
+    }
+    if (argc >= 4) {
+        std::string mode = argv[3];
+        if (mode == "midpoint")     gDecType = 0;
+        else if (mode == "qslim")   gDecType = 1;
+        else {
+            std::cerr << "unknown decimation mode '" << mode << "' — use midpoint or qslim\n";
+            return 1;
+        }
     }
 
     init_ssp(argv[1], std::stoi(argv[2]));

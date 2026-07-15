@@ -30,6 +30,7 @@ extern MatrixXd gV;
 extern MatrixXi gF;
 extern int      gCollapseCount;
 extern bool     gFinished;
+extern int      gDecType;   // 0=midpoint, 1=qslim
 extern std::vector<single_collapse_data> gDecInfo;
 
 bool do_next_step();  // defined in main.cpp
@@ -547,7 +548,7 @@ void ui_callback()
     ImGui::SetNextWindowSize({340, 420}, ImGuiCond_FirstUseEver);
     ImGui::Begin("SSP Collapse Visualizer");
 
-    ImGui::Text("Collapses: %d", gCollapseCount);
+    ImGui::Text("Collapses: %d  [%s]", gCollapseCount, gDecType == 0 ? "midpoint" : "qslim");
     if (gSnap.valid)
         ImGui::Text("Edge: vi=%d  vj=%d", gSnap.vi, gSnap.vj);
     else
