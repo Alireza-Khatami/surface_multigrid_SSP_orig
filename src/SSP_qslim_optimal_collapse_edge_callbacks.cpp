@@ -62,75 +62,75 @@ void SSP_qslim_optimal_collapse_edge_callbacks(
       }
     }
 
-#ifdef ML_QEM_LOG
-    if (s_qslim_log_enabled)
-    {
-      Eigen::RowVectorXd va = V.row(E(e,0));
-      Eigen::RowVectorXd vb = V.row(E(e,1));
+// #ifdef ML_QEM_LOG
+//     if (s_qslim_log_enabled)
+//     {
+//       Eigen::RowVectorXd va = V.row(E(e,0));
+//       Eigen::RowVectorXd vb = V.row(E(e,1));
 
-      // [QSLIM-INF] — even midpoint gave NaN/Inf; edge permanently stuck.
-      // Skip when either endpoint is a boundary-to-infinity vertex (expected inf cost).
-      if (std::isinf(cost) && !std::isinf(va(0)) && !std::isinf(vb(0)))
-      {
-        fprintf(stderr,
-          "[QSLIM-INF] e=%d  v=(%d,%d)"
-          "  va=(%.4g,%.4g,%.4g)  vb=(%.4g,%.4g,%.4g)\n",
-          e, E(e,0), E(e,1),
-          va(0), va(1), va(2),
-          vb(0), vb(1), vb(2));
-      }
+//       // [QSLIM-INF] — even midpoint gave NaN/Inf; edge permanently stuck.
+//       // Skip when either endpoint is a boundary-to-infinity vertex (expected inf cost).
+//       if (std::isinf(cost) && !std::isinf(va(0)) && !std::isinf(vb(0)))
+//       {
+//         fprintf(stderr,
+//           "[QSLIM-INF] e=%d  v=(%d,%d)"
+//           "  va=(%.4g,%.4g,%.4g)  vb=(%.4g,%.4g,%.4g)\n",
+//           e, E(e,0), E(e,1),
+//           va(0), va(1), va(2),
+//           vb(0), vb(1), vb(2));
+//       }
 
-      // [QSLIM-MIDPOINT-FALLBACK] — A.inverse() was degenerate; used midpoint instead.
-      if (used_midpoint && !std::isinf(cost))
-      {
-        fprintf(stderr,
-          "[QSLIM-MIDPOINT-FALLBACK] e=%d  v=(%d,%d)"
-          "  va=(%.4g,%.4g,%.4g)  vb=(%.4g,%.4g,%.4g)"
-          "  p=(%.4g,%.4g,%.4g)  cost=%.6g\n",
-          e, E(e,0), E(e,1),
-          va(0), va(1), va(2),
-          vb(0), vb(1), vb(2),
-          p(0),  p(1),  p(2), cost);
-      }
+//       // [QSLIM-MIDPOINT-FALLBACK] — A.inverse() was degenerate; used midpoint instead.
+//       if (used_midpoint && !std::isinf(cost))
+//       {
+//         fprintf(stderr,
+//           "[QSLIM-MIDPOINT-FALLBACK] e=%d  v=(%d,%d)"
+//           "  va=(%.4g,%.4g,%.4g)  vb=(%.4g,%.4g,%.4g)"
+//           "  p=(%.4g,%.4g,%.4g)  cost=%.6g\n",
+//           e, E(e,0), E(e,1),
+//           va(0), va(1), va(2),
+//           vb(0), vb(1), vb(2),
+//           p(0),  p(1),  p(2), cost);
+//       }
 
-      // [QSLIM-OOB] — optimal p escaped the original mesh bounding box.
-      if (!std::isinf(cost))
-      {
-        // Lazily build bbox from non-infinity vertices on the first call.
-        static Eigen::RowVectorXd bbox_min, bbox_max;
-        static bool bbox_ready = false;
-        if (!bbox_ready)
-        {
-          const double inf = std::numeric_limits<double>::infinity();
-          bbox_min = Eigen::RowVectorXd::Constant(V.cols(),  inf);
-          bbox_max = Eigen::RowVectorXd::Constant(V.cols(), -inf);
-          for (int i = 0; i < V.rows(); i++) {
-            if (std::isinf(V(i, 0))) continue;
-            bbox_min = bbox_min.cwiseMin(V.row(i));
-            bbox_max = bbox_max.cwiseMax(V.row(i));
-          }
-          bbox_ready = true;
-        }
-        bool oob = false;
-        for (int d = 0; d < (int)p.size(); d++)
-          if (p(d) < bbox_min(d) || p(d) > bbox_max(d)) { oob = true; break; }
-        if (oob)
-        {
-          fprintf(stderr,
-            "[QSLIM-OOB] e=%d  v=(%d,%d)"
-            "  va=(%.4g,%.4g,%.4g)  vb=(%.4g,%.4g,%.4g)"
-            "  p=(%.4g,%.4g,%.4g)  cost=%.6g"
-            "  bbox=(%.4g,%.4g,%.4g)-(%.4g,%.4g,%.4g)\n",
-            e, E(e,0), E(e,1),
-            va(0), va(1), va(2),
-            vb(0), vb(1), vb(2),
-            p(0),  p(1),  p(2), cost,
-            bbox_min(0), bbox_min(1), bbox_min(2),
-            bbox_max(0), bbox_max(1), bbox_max(2));
-        }
-      }
-    }
-#endif
+//       // [QSLIM-OOB] — optimal p escaped the original mesh bounding box.
+//       if (!std::isinf(cost))
+//       {
+//         // Lazily build bbox from non-infinity vertices on the first call.
+//         static Eigen::RowVectorXd bbox_min, bbox_max;
+//         static bool bbox_ready = false;
+//         if (!bbox_ready)
+//         {
+//           const double inf = std::numeric_limits<double>::infinity();
+//           bbox_min = Eigen::RowVectorXd::Constant(V.cols(),  inf);
+//           bbox_max = Eigen::RowVectorXd::Constant(V.cols(), -inf);
+//           for (int i = 0; i < V.rows(); i++) {
+//             if (std::isinf(V(i, 0))) continue;
+//             bbox_min = bbox_min.cwiseMin(V.row(i));
+//             bbox_max = bbox_max.cwiseMax(V.row(i));
+//           }
+//           bbox_ready = true;
+//         }
+//         bool oob = false;
+//         for (int d = 0; d < (int)p.size(); d++)
+//           if (p(d) < bbox_min(d) || p(d) > bbox_max(d)) { oob = true; break; }
+//         if (oob)
+//         {
+//           fprintf(stderr,
+//             "[QSLIM-OOB] e=%d  v=(%d,%d)"
+//             "  va=(%.4g,%.4g,%.4g)  vb=(%.4g,%.4g,%.4g)"
+//             "  p=(%.4g,%.4g,%.4g)  cost=%.6g"
+//             "  bbox=(%.4g,%.4g,%.4g)-(%.4g,%.4g,%.4g)\n",
+//             e, E(e,0), E(e,1),
+//             va(0), va(1), va(2),
+//             vb(0), vb(1), vb(2),
+//             p(0),  p(1),  p(2), cost,
+//             bbox_min(0), bbox_min(1), bbox_min(2),
+//             bbox_max(0), bbox_max(1), bbox_max(2));
+//         }
+//       }
+//     }
+// #endif
   };
 
   // Remember endpoints.

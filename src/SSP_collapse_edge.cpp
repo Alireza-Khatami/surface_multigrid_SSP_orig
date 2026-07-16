@@ -6,6 +6,19 @@
 #include <set>
 #include <cstdio>
 
+// ---- Seam-edge diagnostic log ----
+// Call SSP_seam_log_open(path) once from main; all [SEAM-*] lines go there.
+// Falls back to stderr if no file is open.
+static FILE * s_seam_log = nullptr;
+void SSP_seam_log_open(const char * path) {
+  if (s_seam_log) fclose(s_seam_log);
+  s_seam_log = path ? fopen(path, "w") : nullptr;
+}
+void SSP_seam_log_close() {
+  if (s_seam_log) { fclose(s_seam_log); s_seam_log = nullptr; }
+}
+#define SEAM_LOG(fmt, ...) fprintf(s_seam_log ? s_seam_log : stderr, fmt, __VA_ARGS__)
+
 // ============================================================
 // Inner overload
 // Performs per-sheet UV computation and VF-based topology update.
@@ -54,8 +67,25 @@ bool SSP_collapse_edge(
   {
     vector<int> Nsv_alec = Nsv;
     vector<int> Ndv_alec = Ndv;
-    if (!igl::edge_collapse_is_valid(Nsv_alec, Ndv_alec))
+    if (!igl::edge_collapse_is_valid(Nsv_alec, Ndv_alec)) {
+      // Log seam-edge rejections: link condition requires 2 shared vertices for
+      // manifold interior; seam edges have 3+ shared real faces → always fail here.
+      {
+        const int _nOrig = (int)faceSheetID.size();
+        auto _isnull = [&](int f) {
+          return F(f,0)==IGL_COLLAPSE_EDGE_NULL && F(f,1)==IGL_COLLAPSE_EDGE_NULL
+              && F(f,2)==IGL_COLLAPSE_EDGE_NULL; };
+        set<int> _s;
+        for (int f : Nsf) if (!_isnull(f) && f < _nOrig) _s.insert(f);
+        int _sh = 0;
+        for (int f : Ndf) if (!_isnull(f) && f < _nOrig && _s.count(f)) _sh++;
+        if (_sh > 2)
+          SEAM_LOG("[SEAM-REJECT-VALIDITY]  e=(%d,%d) vi=%d vj=%d"
+            "  shared_real_faces=%d  Nsv_sz=%zu Ndv_sz=%zu\n",
+            E(e,0), E(e,1), vi, vj, _sh, Nsv.size(), Ndv.size());
+      }
       return false;
+    }
   }
 
   const int m             = F.rows();
@@ -207,6 +237,11 @@ bool SSP_collapse_edge(
     if (sheets_Ndf.count(kv.first) && !sheets_Ndf[kv.first].empty())
       active_sheets.insert(kv.first);
 
+  const bool is_seam_collapse = (active_sheets.size() > 1);
+  if (is_seam_collapse)
+    SEAM_LOG("[SEAM-TRY]  e=(%d,%d) vi=%d vj=%d  active_sheets=%zu\n",
+      E(e,0), E(e,1), vi, vj, active_sheets.size());
+
   // Helper: is vtx referenced by any face in flist?
   auto vtx_in_flist = [&](const vector<int> & flist, int vtx) -> bool {
     for (int f : flist)
@@ -274,7 +309,12 @@ bool SSP_collapse_edge(
     bool validEdge = get_collapse_onering_faces(
         V, F, vi, vj, Nsf_si, Ndf_si,
         FIdx_pre_si, FIdx_post_si, F_ring_pre_si, F_ring_post_si);
-    if (!validEdge) return false;
+    if (!validEdge) {
+      if (is_seam_collapse)
+        SEAM_LOG("[SEAM-FAIL-ONERING]  sid=%d  e=(%d,%d) vi=%d vj=%d\n",
+          sid, E(e,0), E(e,1), vi, vj);
+      return false;
+    }
 
     // Compact local mesh for this sheet
     MatrixXd V_pre_si;
@@ -285,7 +325,12 @@ bool SSP_collapse_edge(
       remove_unreferenced_lessF(V, F_ring_pre_si, V_pre_si, FUV_pre_si, IM_tmp, subsetVIdx_si);
     }
 
-    if (FUV_pre_si.rows() <= 2) continue;  // too few faces for this sheet
+    if (FUV_pre_si.rows() <= 2) {
+      if (is_seam_collapse)
+        SEAM_LOG("[SEAM-SKIP-FEW-FACES]  sid=%d  FUV_rows=%d  e=(%d,%d)\n",
+          sid, FUV_pre_si.rows(), E(e,0), E(e,1));
+      continue;
+    }
 
     // Find local indices of vi and vj (subsetVIdx is sorted ascending, so vi<vj globally → local vi<vj)
     VectorXi b_si(2);
@@ -296,6 +341,9 @@ bool SSP_collapse_edge(
     }
 
     if (b_si(0) < 0 || b_si(1) < 0 || b_si(0) >= b_si(1)) {
+      if (is_seam_collapse)
+        SEAM_LOG("[SEAM-SKIP-BSI]  sid=%d  b=(%d,%d)  e=(%d,%d) vi=%d vj=%d\n",
+          sid, b_si(0), b_si(1), E(e,0), E(e,1), vi, vj);
 #ifdef SSP_LSCM_LOG
       static int b_fail = 0;
       if (b_fail < 5) {
@@ -330,6 +378,9 @@ bool SSP_collapse_edge(
     vector<int> Ndv_local = fan_walk_local(E(e,0), E(e,1), Ndf_walk, subsetVIdx_si);
 
     if (Nsv_local.empty() || Ndv_local.empty()) {
+      if (is_seam_collapse)
+        SEAM_LOG("[SEAM-SKIP-FANWALK]  sid=%d  Nsv=%zu Ndv=%zu  e=(%d,%d)\n",
+          sid, Nsv_local.size(), Ndv_local.size(), E(e,0), E(e,1));
 #ifdef SSP_LSCM_LOG
       static int fw_empty = 0;
       if (fw_empty < 10) {
@@ -465,7 +516,11 @@ bool SSP_collapse_edge(
       }
 #endif
 
-      if (!all_ok) continue;
+      if (!all_ok) {
+        if (is_seam_collapse)
+          SEAM_LOG("[SEAM-SKIP-INV]  sid=%d  e=(%d,%d)\n", sid, E(e,0), E(e,1));
+        continue;
+      }
     }
     // ---- end pre-joint_lscm invariant check ----
 
@@ -490,6 +545,9 @@ bool SSP_collapse_edge(
         UV_pre_si, UV_post_si,
         any_sheet_ok ? nullptr : &data.lscm_case);
     if (!isValid) {
+      if (is_seam_collapse)
+        SEAM_LOG("[SEAM-FAIL-LSCM]  sid=%d  e=(%d,%d) vi=%d vj=%d\n",
+          sid, E(e,0), E(e,1), vi, vj);
 #ifdef SSP_LSCM_LOG
       fprintf(stderr,
         "[LSCM-FAIL] after_collapse=%zu  e=(%d,%d)  sid=%d  vi=%d vj=%d\n",
@@ -526,6 +584,9 @@ bool SSP_collapse_edge(
   }
 
   if (!any_sheet_ok) {
+    if (is_seam_collapse)
+      SEAM_LOG("[SEAM-FAIL-ALL-SHEETS]  e=(%d,%d) vi=%d vj=%d  active_sheets=%zu\n",
+        E(e,0), E(e,1), vi, vj, active_sheets.size());
 #ifdef SSP_LSCM_LOG
     static int saf_count = 0;
     static int saf_total = 0;

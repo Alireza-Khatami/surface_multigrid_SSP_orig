@@ -156,6 +156,9 @@ bool SSP_collapse_edge(
 //     Eigen::VectorXi & EQ,
 //     Eigen::MatrixXd & C);
 
+void SSP_seam_log_open(const char * path);
+void SSP_seam_log_close();
+
 bool SSP_collapse_edge(
     const decimate_cost_and_placement_func & cost_and_placement,
     const decimate_pre_collapse_func       & pre_collapse,

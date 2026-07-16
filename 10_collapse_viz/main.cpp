@@ -62,8 +62,12 @@ VectorXi gFaceSheetID;
 int gNumSheets    = 1;
 std::vector<std::vector<int>> gVF;
 std::vector<std::pair<int,int>> gSeamEdgeList;  // vertex pairs of seam (non-manifold) edges
+std::vector<double> gInitCosts;               // initial cost per edge (index = gE row)
 int gTargetFaces  = 100;
 int gCollapseCount = 0;
+int gSeamCollapseCount = 0;   // collapses where the edge was still a seam at collapse time
+int gSeamAttemptCount = 0;    // pre_collapse calls where edge was still a seam (success or not)
+bool gLastCollapseWasSeam = false;
 bool gFinished    = false;
 
 // Decimation strategy: 0 = midpoint, 1 = qslim, 2 = meshlab
@@ -193,12 +197,71 @@ static void init_ssp(const std::string & mesh_path, int tarF)
             gC.row(e) = p;
             costs(e) = cost;
         }, 10000);
+        gInitCosts.assign(costs.data(), costs.data() + costs.size());
         for (int e = 0; e < gE.rows(); e++)
             gQ.emplace(costs(e), e, 0);
     }
 
     gDecIM.resize(gF.rows());
     gDecInfo.reserve(FO.rows() - tarF + 1);
+}
+
+// ---- seam edge cost diagnostic ----
+// Called once after init_ssp. For each seam edge (3+ incident faces) prints
+// the edge index, vertex pair, endpoint positions and collapse cost.
+static void print_seam_edge_costs(const std::string & out_path = "seam_edge_costs.txt")
+{
+    if (gSeamEdgeList.empty()) return;
+
+    FILE * fout = fopen(out_path.c_str(), "w");
+    if (!fout) {
+        fprintf(stderr, "[SEAM-COSTS] could not open %s for writing\n", out_path.c_str());
+        return;
+    }
+
+    // Build vertex-pair → edge index lookup from gE
+    std::map<std::pair<int,int>, int> edgeIdx;
+    for (int e = 0; e < gE.rows(); e++) {
+        int u = gE(e,0), v = gE(e,1);
+        edgeIdx[{std::min(u,v), std::max(u,v)}] = e;
+    }
+
+    // Sorted copy of all initial costs for rank lookup (1-based: rank 1 = lowest cost)
+    std::vector<double> sorted_costs = gInitCosts;
+    std::sort(sorted_costs.begin(), sorted_costs.end());
+    const int n_edges = (int)sorted_costs.size();
+
+    fprintf(fout, "seam_edges=%d  total_edges=%d\n",
+            (int)gSeamEdgeList.size(), n_edges);
+    for (int i = 0; i < (int)gSeamEdgeList.size(); i++) {
+        int u = gSeamEdgeList[i].first, v = gSeamEdgeList[i].second;
+        auto it = edgeIdx.find({u, v});
+        if (it == edgeIdx.end()) {
+            fprintf(fout, "[%d] v=(%d,%d)  edge=NOT_FOUND\n", i, u, v);
+            continue;
+        }
+        int e = it->second;
+        double cost; RowVectorXd p;
+        gCostFn(e, gV, gF, gE, gEMAP, gEF, gEI, cost, p);
+
+        // rank = 1-based position in the sorted queue (number of edges with lower cost + 1)
+        int rank = (int)(std::lower_bound(sorted_costs.begin(), sorted_costs.end(), cost)
+                         - sorted_costs.begin()) + 1;
+
+        Eigen::RowVectorXd va = gV.row(u), vb = gV.row(v);
+        fprintf(fout,
+            "[%d] e=%d  v=(%d,%d)"
+            "  va=(%.6g,%.6g,%.6g)  vb=(%.6g,%.6g,%.6g)"
+            "  cost=%.6g  rank=%d/%d\n",
+            i, e, u, v,
+            va(0), va(1), va(2),
+            vb(0), vb(1), vb(2),
+            cost, rank, n_edges);
+    }
+
+    fclose(fout);
+    fprintf(stderr, "[SEAM-COSTS] wrote %d seam edges to %s\n",
+            (int)gSeamEdgeList.size(), out_path.c_str());
 }
 
 // ---- one step ----
@@ -215,7 +278,9 @@ bool do_next_step()
                     live++;
             std::cerr << "[FINISHED] queue_exhausted  live_faces=" << live
                       << "  target=" << gTargetFaces
-                      << "  collapses=" << gCollapseCount << "\n";
+                      << "  collapses=" << gCollapseCount
+                      << "  seam_attempts=" << gSeamAttemptCount
+                      << "  seam_collapses=" << gSeamCollapseCount << "\n";
             return false;
         }
         int e, e1, e2, f1, f2;
@@ -228,7 +293,9 @@ bool do_next_step()
 
         if (ok) {
             gCollapseCount++;
-            std::cerr << "############## collapse ############ " << gCollapseCount << "\n";
+            if (gLastCollapseWasSeam) gSeamCollapseCount++;
+            std::cerr << "############## collapse ############ " << gCollapseCount
+                      << "  seam=" << gSeamCollapseCount << "/" << gCollapseCount << "\n";
 
             int live = 0;
             for (int f = 0; f < gF.rows(); f++)
@@ -238,7 +305,9 @@ bool do_next_step()
                 gFinished = true;
                 std::cerr << "[FINISHED] target_reached  live_faces=" << live
                           << "  target=" << gTargetFaces
-                          << "  collapses=" << gCollapseCount << "\n";
+                          << "  collapses=" << gCollapseCount
+                          << "  seam_attempts=" << gSeamAttemptCount
+                          << "  seam_collapses=" << gSeamCollapseCount << "\n";
             }
             return true;
         }
@@ -246,7 +315,9 @@ bool do_next_step()
     gFinished = true;
     std::cerr << "[FINISHED] max_tries_exceeded"
               << "  target=" << gTargetFaces
-              << "  collapses=" << gCollapseCount << "\n";
+              << "  collapses=" << gCollapseCount
+              << "  seam_attempts=" << gSeamAttemptCount
+              << "  seam_collapses=" << gSeamCollapseCount << "\n";
     return false;
 }
 
@@ -280,6 +351,36 @@ int main(int argc, char * argv[])
     if (gDecType == 2)
         meshlab_enable_cost_logging();
 
+    // Wrap gPreFn to detect seam collapses at collapse time.
+    // A seam edge is one where 3+ live real faces share the same vertex pair in the
+    // CURRENT topology (rechecked every collapse, not just from the initial seam list).
+    {
+        auto orig_pre = gPreFn;
+        gPreFn = [orig_pre](
+            const MatrixXd & V, const MatrixXi & F, const MatrixXi & E,
+            const VectorXi & EMAP, const MatrixXi & EF, const MatrixXi & EI,
+            const igl::min_heap<std::tuple<double,int,int>> & Q,
+            const VectorXi & EQ, const MatrixXd & C, const int e) -> bool
+        {
+            bool result = orig_pre(V, F, E, EMAP, EF, EI, Q, EQ, C, e);
+            if (result) {
+                int u = E(e,0), v = E(e,1);
+                const int nFSheet = (int)gFaceSheetID.size();
+                // Build set of live real faces incident to u, then count those also in v's list
+                std::set<int> u_faces;
+                for (int f : gVF[u])
+                    if (f < nFSheet && !is_face_dead(F, f))
+                        u_faces.insert(f);
+                int shared = 0;
+                for (int f : gVF[v])
+                    if (u_faces.count(f)) shared++;
+                gLastCollapseWasSeam = (shared > 2);
+                if (gLastCollapseWasSeam) gSeamAttemptCount++;
+            }
+            return result;
+        };
+    }
+
     // Build output file names from mesh stem: c2f_<stem>.txt, correspondence_<stem>.c2f
     std::string stem = argv[1];
     {
@@ -291,6 +392,9 @@ int main(int argc, char * argv[])
     const std::string c2f_path    = "c2f_" + stem + ".txt";
     const std::string bundle_path = "correspondence_" + stem + ".c2f";
 
+    print_seam_edge_costs("seam_edge_costs_" + stem + ".txt");
+    SSP_seam_log_open(("seam_diag_" + stem + ".txt").c_str());
+
 #ifdef C2F_VIZ_DIAGNOSTIC
     polyscope::init();
     polyscope::state::userCallback = ui_callback;
@@ -301,6 +405,8 @@ int main(int argc, char * argv[])
     while (!gFinished)
         do_next_step();
 #endif
+
+    SSP_seam_log_close();
 
     // Auto-save on exit regardless of C2F_VIZ_DIAGNOSTIC and regardless of
     // whether decimation reached the target face count.
