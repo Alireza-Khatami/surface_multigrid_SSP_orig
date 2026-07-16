@@ -7,6 +7,7 @@
 
 #include <igl/remove_unreferenced.h>
 #include <igl/collapse_edge.h>  // IGL_COLLAPSE_EDGE_NULL
+#include "face_dead.h"
 
 #include <single_collapse_data.h>
 
@@ -72,7 +73,7 @@ static MatrixXi live_faces_ex_ss(std::vector<int>& origIdx)
     std::vector<std::array<int,3>> rows;
     for (int f = 0; f < gF.rows(); f++) {
         int v0 = gF(f,0), v1 = gF(f,1), v2 = gF(f,2);
-        if (v0 == IGL_COLLAPSE_EDGE_NULL) continue;
+        if (is_face_dead(gF, f)) continue;
         if (std::isinf(gV(v0,0)) || std::isinf(gV(v1,0)) || std::isinf(gV(v2,0))) continue;
         rows.push_back({v0, v1, v2});
         origIdx.push_back(f);
@@ -107,7 +108,7 @@ void update_seam_onering_display()
     for (int v : {vi, vj}) {
         if (v >= (int)gVF.size()) continue;
         for (int f : gVF[v]) {
-            if (gF(f,0) == IGL_COLLAPSE_EDGE_NULL) continue;
+            if (is_face_dead(gF, f)) continue;
             if (std::isinf(gV(gF(f,0),0)) || std::isinf(gV(gF(f,1),0)) ||
                 std::isinf(gV(gF(f,2),0))) continue;
             if (f >= nFSheet) continue;
@@ -264,7 +265,7 @@ void sheet_seam_imgui_section()
         for (int v : {vi, vj}) {
             if (v >= (int)gVF.size()) continue;
             for (int f : gVF[v]) {
-                if (gF(f,0) == IGL_COLLAPSE_EDGE_NULL) continue;
+                if (is_face_dead(gF, f)) continue;
                 if (std::isinf(gV(gF(f,0),0))) continue;
                 if (f < nFSheet) sheets.insert(gFaceSheetID(f));
             }

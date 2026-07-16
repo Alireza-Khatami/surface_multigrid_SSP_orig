@@ -27,9 +27,11 @@ void query_coarse_to_fine(
   std::atomic<int> cnt_sheet_fallback{0};
   std::atomic<int> cnt_pre_row_miss{0};
 
+#ifdef SSP_LSCM_LOG
   fprintf(stderr,
     "[query_coarse_to_fine START]  queries=%d  decInfo.size=%zu\n",
     numQuery, decInfo.size());
+#endif
 
   // convert BF vertex indices from V to VO (fine mesh indices)
   {
@@ -49,17 +51,21 @@ void query_coarse_to_fine(
     [&verbose, &FIdx, &BC, &BF, &decIM, &decInfo, &queryCounts, &faceSheetID,
      &cnt_early_exit, &cnt_sheet_fallback, &cnt_pre_row_miss](const int qIdx)
   {
+#ifdef SSP_LSCM_LOG
     // Per-query log buffer — flushed atomically so parallel output doesn't interleave.
     std::ostringstream log;
+#endif
 
     int dIdx = decInfo.size();
     int walk_steps = 0;
     int initial_FIdx = FIdx(qIdx);
 
+#ifdef SSP_LSCM_LOG
     log << "[WALK-START] qIdx=" << qIdx
         << "  initial_FIdx=" << initial_FIdx
         << "  initial_BF=(" << BF(qIdx,0) << "," << BF(qIdx,1) << "," << BF(qIdx,2) << ")"
         << "  initial_BC=(" << BC(qIdx,0) << "," << BC(qIdx,1) << "," << BC(qIdx,2) << ")\n";
+#endif
 
     while (true)
     {
@@ -81,6 +87,7 @@ void query_coarse_to_fine(
       if (!if_find_dIdx)
       {
         ++cnt_early_exit;
+#ifdef SSP_LSCM_LOG
         log << "[WALK-EXIT] qIdx=" << qIdx
             << "  steps=" << walk_steps
             << "  exit_FIdx=" << (int)FIdx(qIdx)
@@ -90,6 +97,7 @@ void query_coarse_to_fine(
             << "  decIM=[";
         for (int e : decIM[(int)FIdx(qIdx)]) log << e << " ";
         log << "]\n";
+#endif
         break;
       }
 
@@ -104,6 +112,7 @@ void query_coarse_to_fine(
           if (sd.global_sheet_id == sid) { sd_ptr = &sd; break; }
         if (!sd_ptr && !decInfo[dIdx].sheets.empty()) {
           ++cnt_sheet_fallback;
+#ifdef SSP_LSCM_LOG
           log << "[SHEET-FALLBACK] qIdx=" << qIdx
               << "  FIdx=" << (int)FIdx(qIdx)
               << "  face_sheet=" << sid
@@ -111,6 +120,7 @@ void query_coarse_to_fine(
               << "  available_sheets=[";
           for (auto & s : decInfo[dIdx].sheets) log << s.global_sheet_id << " ";
           log << "]\n";
+#endif
           sd_ptr = &decInfo[dIdx].sheets[0];
         }
       }
@@ -124,12 +134,14 @@ void query_coarse_to_fine(
           if (sd.FIdx_pre(r) == queryFIdx) { pre_row = r; break; }
         if (pre_row < 0) {
           ++cnt_pre_row_miss;
+#ifdef SSP_LSCM_LOG
           log << "[PRE-ROW-MISS] qIdx=" << qIdx
               << "  FIdx=" << (int)FIdx(qIdx)
               << "  dIdx=" << dIdx
               << "  sd.sheet=" << sd.global_sheet_id
               << "  FIdx_pre.size=" << (int)sd.FIdx_pre.size()
               << "\n";
+#endif
           continue;
         }
       }
@@ -175,6 +187,7 @@ void query_coarse_to_fine(
       int new_v1   = sd.subsetVIdx(sd.FUV_pre(idxToFUV,1));
       int new_v2   = sd.subsetVIdx(sd.FUV_pre(idxToFUV,2));
 
+#ifdef SSP_LSCM_LOG
       log << "[WALK-STEP] qIdx=" << qIdx
           << "  step=" << walk_steps
           << "  from_FIdx=" << queryFIdx
@@ -187,6 +200,7 @@ void query_coarse_to_fine(
           << "  new_BF=(" << new_v0 << "," << new_v1 << "," << new_v2 << ")"
           << "  new_BC=(" << B(idxToFUV,0) << "," << B(idxToFUV,1) << "," << B(idxToFUV,2) << ")"
           << "\n";
+#endif
 
       walk_steps++;
       BC.row(qIdx)  = B.row(idxToFUV);
@@ -196,14 +210,18 @@ void query_coarse_to_fine(
       FIdx(qIdx)    = new_FIdx;
     }
 
+#ifdef SSP_LSCM_LOG
     // Flush the entire per-query trace atomically
     fprintf(stderr, "%s", log.str().c_str());
+#endif
   }, 1000);
 
+#ifdef SSP_LSCM_LOG
   fprintf(stderr,
     "[query_coarse_to_fine SUMMARY]  queries=%d  early_exits=%d  "
     "sheet_fallbacks=%d  pre_row_misses=%d\n",
     numQuery, cnt_early_exit.load(), cnt_sheet_fallback.load(), cnt_pre_row_miss.load());
+#endif
 
   if (verbose)
     cout << "finish query points\n";

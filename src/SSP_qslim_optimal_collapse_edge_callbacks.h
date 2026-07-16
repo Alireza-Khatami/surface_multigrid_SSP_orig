@@ -28,6 +28,11 @@
   //     determining placement of vertex (see collapse_edge)
   //   pre_collapse  callback before edge collapse (see collapse_edge)
   //   post_collapse  callback after edge collapse (see collapse_edge)
+  // Enable/disable ML_QEM_LOG output from the cost_and_placement callback.
+  // Disabled by default so the initial cost-computation pass in init_ssp is silent.
+  // Call SSP_qslim_enable_log(true) after init_ssp to turn on collapse-time logging.
+  void SSP_qslim_enable_log(bool enable);
+
   void SSP_qslim_optimal_collapse_edge_callbacks(
     Eigen::MatrixXi & E,
     std::vector<std::tuple<Eigen::MatrixXd,Eigen::RowVectorXd,double> > & 

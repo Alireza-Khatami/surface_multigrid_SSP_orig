@@ -11,7 +11,9 @@
       "environment": { "CMAKE_POLICY_VERSION_MINIMUM": "3.5" },
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "C2F_VIZ_DIAGNOSTIC": "ON"
+        "C2F_VIZ_DIAGNOSTIC": "ON",
+        "SSP_LSCM_LOG": "OFF",
+        "ML_QEM_LOG":"ON"
       }
     },
     {
@@ -24,7 +26,9 @@
       "environment": { "CMAKE_POLICY_VERSION_MINIMUM": "3.5" },
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "C2F_VIZ_DIAGNOSTIC": "OFF"
+        "C2F_VIZ_DIAGNOSTIC": "OFF",
+        "SSP_LSCM_LOG": "OFF",
+        "ML_QEM_LOG":"ON"
       }
     }
   ],

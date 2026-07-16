@@ -28,6 +28,8 @@ set(APP_SRCS
     main.cpp
     coarse_fine_viz.cpp
     orient_faces_consistently.cpp
+    meshlab_qslim_callbacks.cpp
+    meshlab_qslim_config.cpp
 )
 
 # SSP library sources — glob is fine here; all files belong to the shared library
@@ -47,4 +49,14 @@ option(C2F_VIZ_DIAGNOSTIC "Enable per-collapse ring_post c2f diagnostic polyscop
 if(C2F_VIZ_DIAGNOSTIC)
     target_compile_definitions(${PROJECT_NAME}_bin PRIVATE C2F_VIZ_DIAGNOSTIC)
     target_sources(${PROJECT_NAME}_bin PRIVATE visualizer.cpp sheet_seam_viz.cpp)
+endif()
+
+option(SSP_LSCM_LOG "Enable SSP LSCM mapping diagnostic logs (fan_walk, pre-jlscm, LSCM-FAIL, NON-ACTIVE-SHEET, etc.)" ON)
+if(SSP_LSCM_LOG)
+    target_compile_definitions(${PROJECT_NAME}_bin PRIVATE SSP_LSCM_LOG)
+endif()
+
+option(ML_QEM_LOG "Enable MeshLab QEM rejection logs (ML-COST-REJECT, ML-REJECT)" ON)
+if(ML_QEM_LOG)
+    target_compile_definitions(${PROJECT_NAME}_bin PRIVATE ML_QEM_LOG)
 endif()

@@ -7,11 +7,13 @@
 #include <igl/per_vertex_point_to_plane_quadrics.h>
 #include <igl/parallel_for.h>
 #include <igl/collapse_edge.h>  // IGL_COLLAPSE_EDGE_NULL
+#include "face_dead.h"
 #include <igl/vertex_triangle_adjacency.h>
 
 #include <SSP_qslim_optimal_collapse_edge_callbacks.h>
 #include <always_try_never_care.h>
 #include <decimate_func_types.h>
+#include "meshlab_qslim_callbacks.h"
 
 #ifdef C2F_VIZ_DIAGNOSTIC
 #include <polyscope/polyscope.h>
@@ -48,6 +50,7 @@ MatrixXd gV;
 MatrixXd gVO;           // original mesh vertices (before connect_boundary_to_infinity)
 MatrixXi gF, gE;
 MatrixXi gFO;           // original mesh faces
+VectorXi gFaceFlipped;  // 1 = face was CW and got re-wound, 0 = already CCW
 VectorXi gEMAP;
 MatrixXi gEF, gEI;
 igl::min_heap<std::tuple<double,int,int>> gQ;
@@ -63,13 +66,15 @@ int gTargetFaces  = 100;
 int gCollapseCount = 0;
 bool gFinished    = false;
 
-// Decimation strategy: 0 = midpoint, 1 = qslim
+// Decimation strategy: 0 = midpoint, 1 = qslim, 2 = meshlab
 int gDecType = 1;
 
 // Unified callbacks — set by init_ssp based on gDecType
 typedef std::tuple<MatrixXd, RowVectorXd, double> Quadric;
 static std::vector<Quadric> gQuadrics;
 static int gQSlimV1 = -1, gQSlimV2 = -1;
+static int gMlV1    = -1, gMlV2    = -1;
+static MeshlabQEMConfig gMlCfg;
 static decimate_cost_and_placement_func gCostFn;
 static decimate_pre_collapse_func       gPreFn;
 static decimate_post_collapse_func      gPostFn;
@@ -86,6 +91,10 @@ static void init_ssp(const std::string & mesh_path, int tarF)
     {
         MatrixXi FF; VectorXi C;
         int n_flipped = orient_faces_consistently(VO, FO, FF, C);
+        // Record which faces were re-wound (CW → CCW) before overwriting FO
+        gFaceFlipped.resize(FO.rows());
+        for (int f = 0; f < FO.rows(); f++)
+            gFaceFlipped(f) = (FF(f,0) != FO(f,0)) ? 1 : 0;
         FO = FF;
         std::cout << "orient_faces_consistently: " << n_flipped
                   << " / " << FO.rows() << " faces re-wound\n";
@@ -98,6 +107,33 @@ static void init_ssp(const std::string & mesh_path, int tarF)
     gFO = FO;
 
     igl::connect_boundary_to_infinity(VO, FO, gV, gF);
+
+    // Face-count comparison immediately after connect_boundary_to_infinity,
+    // before parallel_for, so it always runs regardless of later crashes.
+    {
+        int live = 0, null_faces = 0, inf_faces = 0;
+        for (int f = 0; f < gF.rows(); f++) {
+            int v0 = gF(f,0), v1 = gF(f,1), v2 = gF(f,2);
+            if (is_face_dead(gF, f)) {
+                null_faces++;
+                fprintf(stderr, "[INIT null-face] f=%d  v=(%d,%d,%d)  in_orig_range=%s\n",
+                    f, v0, v1, v2, (f < gFO.rows()) ? "YES" : "no(cap)");
+                continue;
+            }
+            if (std::isinf(gV(v0,0)) || std::isinf(gV(v1,0)) || std::isinf(gV(v2,0))) { inf_faces++; continue; }
+            live++;
+        }
+        fprintf(stderr, "[INIT face-count]"
+                "  IGL_COLLAPSE_EDGE_NULL=%d"
+                "  gFO.rows()=%d  gF.rows()=%d"
+                "  live=%d  inf_cap=%d  null=%d"
+                "  diff(gFO-live)=%d\n",
+                (int)IGL_COLLAPSE_EDGE_NULL,
+                (int)gFO.rows(), (int)gF.rows(),
+                live, inf_faces, null_faces,
+                (int)gFO.rows() - live);
+    }
+
     igl::edge_flaps(gF, gE, gEMAP, gEF, gEI);
 
     {
@@ -135,12 +171,16 @@ static void init_ssp(const std::string & mesh_path, int tarF)
         };
         always_try_never_care(gPreFn, gPostFn);
         std::cout << "Decimation: midpoint\n";
-    } else {
+    } else if (gDecType == 1) {
         // QSlim: quadric error metric, optimal placement
         igl::per_vertex_point_to_plane_quadrics(gV, gF, gEMAP, gEF, gEI, gQuadrics);
         SSP_qslim_optimal_collapse_edge_callbacks(
             gE, gQuadrics, gQSlimV1, gQSlimV2, gCostFn, gPreFn, gPostFn);
         std::cout << "Decimation: qslim\n";
+    } else {
+        // MeshLab QEM: area-weighted quadrics + boundary reinforcement
+        meshlab_setup_callbacks(gV, gF, gE, gEF, gVF, gMlV1, gMlV2, gMlCfg, gCostFn, gPreFn, gPostFn);
+        std::cout << "Decimation: meshlab\n";
     }
 
     gEQ = VectorXi::Zero(gE.rows());
@@ -169,6 +209,13 @@ bool do_next_step()
     for (int tries = 0; tries < 1'000'000; tries++) {
         if (gQ.empty() || std::get<0>(gQ.top()) == std::numeric_limits<double>::infinity()) {
             gFinished = true;
+            int live = 0;
+            for (int f = 0; f < gF.rows(); f++)
+                if (!is_face_dead(gF, f) && !std::isinf(gV(gF(f,0), 0)))
+                    live++;
+            std::cerr << "[FINISHED] queue_exhausted  live_faces=" << live
+                      << "  target=" << gTargetFaces
+                      << "  collapses=" << gCollapseCount << "\n";
             return false;
         }
         int e, e1, e2, f1, f2;
@@ -181,18 +228,25 @@ bool do_next_step()
 
         if (ok) {
             gCollapseCount++;
+            std::cerr << "############## collapse ############ " << gCollapseCount << "\n";
 
-            // Count live (non-inf) faces for stopping condition
             int live = 0;
             for (int f = 0; f < gF.rows(); f++)
-                if (gF(f,0) != IGL_COLLAPSE_EDGE_NULL && !std::isinf(gV(gF(f,0), 0)))
+                if (!is_face_dead(gF, f) && !std::isinf(gV(gF(f,0), 0)))
                     live++;
-            if (live <= gTargetFaces) gFinished = true;
-
+            if (live <= gTargetFaces) {
+                gFinished = true;
+                std::cerr << "[FINISHED] target_reached  live_faces=" << live
+                          << "  target=" << gTargetFaces
+                          << "  collapses=" << gCollapseCount << "\n";
+            }
             return true;
         }
     }
     gFinished = true;
+    std::cerr << "[FINISHED] max_tries_exceeded"
+              << "  target=" << gTargetFaces
+              << "  collapses=" << gCollapseCount << "\n";
     return false;
 }
 
@@ -206,14 +260,25 @@ int main(int argc, char * argv[])
     if (argc >= 4) {
         std::string mode = argv[3];
         if (mode == "midpoint")     gDecType = 0;
-        else if (mode == "qslim")   gDecType = 1;
+        else if (mode == "qslim")    gDecType = 1;
+        else if (mode == "meshlab")  gDecType = 2;
         else {
-            std::cerr << "unknown decimation mode '" << mode << "' — use midpoint or qslim\n";
+            std::cerr << "unknown decimation mode '" << mode << "' — use midpoint, qslim or meshlab\n";
             return 1;
         }
     }
 
+    if (gDecType == 2) {
+        if (gMlCfg.read("meshlab_qem.ini"))
+            std::cout << "Loaded meshlab_qem.ini\n";
+        else
+            std::cout << "meshlab_qem.ini not found — using defaults\n";
+    }
+
     init_ssp(argv[1], std::stoi(argv[2]));
+    SSP_qslim_enable_log(true);   // activate ML_QEM_LOG output now that init cost pass is done
+    if (gDecType == 2)
+        meshlab_enable_cost_logging();
 
     // Build output file names from mesh stem: c2f_<stem>.txt, correspondence_<stem>.c2f
     std::string stem = argv[1];

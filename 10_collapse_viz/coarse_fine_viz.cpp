@@ -8,6 +8,7 @@
 #include <polyscope/pick.h>
 
 #include <igl/collapse_edge.h>       // IGL_COLLAPSE_EDGE_NULL
+#include "face_dead.h"
 
 #include <query_coarse_to_fine.h>
 #include <single_collapse_data.h>
@@ -72,7 +73,7 @@ static void build_pick_pts()
         if (std::isinf(gV(v, 0))) continue;
         for (int f : gVF[v]) {
             if (f >= nFO) continue;
-            if (gF(f, 0) == IGL_COLLAPSE_EDGE_NULL) continue;
+            if (is_face_dead(gF, f)) continue;
             if (std::isinf(gV(gF(f, 0), 0))) continue;
             gPickCompactToGlobal.push_back(v);
             break;
@@ -177,7 +178,7 @@ static VertexWalkResult traced_walk(int vi)
     int fi = -1;
     for (int f : gVF[vi]) {
         if (f >= nFO) continue;
-        if (gF(f, 0) == IGL_COLLAPSE_EDGE_NULL) continue;
+        if (is_face_dead(gF, f)) continue;
         if (std::isinf(gV(gF(f, 0), 0))) continue;
         fi = f; break;
     }
@@ -320,7 +321,7 @@ static void run_single_vertex_c2f(int vi)
     int fi = -1;
     for (int f : gVF[vi]) {
         if (f >= nFO) continue;
-        if (gF(f, 0) == IGL_COLLAPSE_EDGE_NULL) continue;
+        if (is_face_dead(gF, f)) continue;
         if (std::isinf(gV(gF(f, 0), 0))) continue;
         fi = f; break;
     }
@@ -440,7 +441,7 @@ void coarse_fine_compute_and_save(const std::string & path)
         if (std::isinf(gV(v, 0))) continue;
         for (int f : gVF[v]) {
             if (f >= nFO) continue;
-            if (gF(f, 0) == IGL_COLLAPSE_EDGE_NULL) continue;
+            if (is_face_dead(gF, f)) continue;
             if (std::isinf(gV(gF(f, 0), 0))) continue;
             coarseVerts.push_back(v);
             break;
@@ -461,7 +462,7 @@ void coarse_fine_compute_and_save(const std::string & path)
         int fi = -1;
         for (int f : gVF[vi]) {
             if (f >= nFO) continue;
-            if (gF(f, 0) == IGL_COLLAPSE_EDGE_NULL) continue;
+            if (is_face_dead(gF, f)) continue;
             if (std::isinf(gV(gF(f, 0), 0))) continue;
             fi = f; break;
         }
@@ -602,7 +603,7 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
     MatrixXi tmpF(nFO, 3);
     int nLive = 0;
     for (int f = 0; f < nFO; f++) {
-        if (gF(f, 0) == IGL_COLLAPSE_EDGE_NULL) continue;
+        if (is_face_dead(gF, f)) continue;
         bool has_inf = false;
         for (int c = 0; c < 3; c++)
             if (std::isinf(gV(gF(f, c), 0))) { has_inf = true; break; }
@@ -722,7 +723,7 @@ void coarse_fine_load_and_show(const std::string & path)
     MatrixXi tmpF(nFO, 3);
     int nLive = 0;
     for (int f = 0; f < nFO; f++) {
-        if (gF(f, 0) == IGL_COLLAPSE_EDGE_NULL) continue;
+        if (is_face_dead(gF, f)) continue;
         bool has_inf = false;
         for (int c = 0; c < 3; c++)
             if (std::isinf(gV(gF(f, c), 0))) { has_inf = true; break; }
@@ -945,6 +946,7 @@ void ring_post_c2f_diagnostic()
         any_dup = true;
         for (int idx : grp) grouped[idx] = true;
 
+#ifdef SSP_LSCM_LOG
         fprintf(stderr,
             "\n[RING-POST-DUP] collapse=%d  %zu coarse verts → same fine pos"
             " (%.8f, %.8f, %.8f)\n",
@@ -976,13 +978,16 @@ void ring_post_c2f_diagnostic()
                     st.BF_out(0), st.BF_out(1), st.BF_out(2));
             }
         }
+#endif
     }
 
+#ifdef SSP_LSCM_LOG
     if (!any_dup) {
         fprintf(stderr,
             "[RING-POST-DUP] collapse=%d  no duplicates among %zu ring_post verts\n",
             collapse_idx, ring_post_verts.size());
     }
+#endif
 
     // ---- Polyscope visualization ----
 

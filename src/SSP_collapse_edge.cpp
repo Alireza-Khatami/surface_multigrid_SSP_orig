@@ -107,8 +107,8 @@ bool SSP_collapse_edge(
     for (auto & kv : nb_count)
       if (kv.second == 1 && kv.first != end_vtx) { start_vtx = kv.first; break; }
 
+#ifdef SSP_LSCM_LOG
     // [fan_walk DEBUG] fire whenever infVtx appears in the face list (= open fan).
-    // No static cap — we need to see every occurrence to catch the pattern.
     if (nb_count.count(infVtx)) {
       const char * method = (start_vtx != -1) ? "count-1" : "closed-fallback";
       fprintf(stderr,
@@ -116,13 +116,13 @@ bool SSP_collapse_edge(
         "start_method=%s  start=%d%s\n",
         center, end_vtx, nb_count.at(infVtx), method, start_vtx,
         (start_vtx == infVtx) ? " *** INF-AS-START ***" : "");
-      // Show the full count-1 set so we can see which real boundary vtx (if any) was masked
       fprintf(stderr, "  nb count-1 (excl end=%d): [", end_vtx);
       for (auto & kv : nb_count)
         if (kv.second == 1 && kv.first != end_vtx)
           fprintf(stderr, "%d%s ", kv.first, kv.first == infVtx ? "(INF)" : "");
       fprintf(stderr, "]\n");
     }
+#endif
 
     if (start_vtx == -1) {
       // Closed fan: pick third vertex of any face containing (center, end_vtx)
@@ -175,8 +175,7 @@ bool SSP_collapse_edge(
     result.reserve(walk.size());
     for (int gv : walk) result.push_back(to_local(gv));
 
-    // [fan_walk DEBUG] print final walk for every open fan so we can see
-    // whether -1 lands at position 0 (open end found), middle, or near end.
+#ifdef SSP_LSCM_LOG
     if (nb_count.count(infVtx)) {
       fprintf(stderr, "  walk result (local): [");
       for (int v : result) fprintf(stderr, "%d,", v);
@@ -185,6 +184,7 @@ bool SSP_collapse_edge(
         if (result[i] == -1) { inf_pos = i; break; }
       fprintf(stderr, "]  -1 at pos %d / %d\n", inf_pos, (int)result.size());
     }
+#endif
 
     return result;
   };
@@ -215,10 +215,7 @@ bool SSP_collapse_edge(
     return false;
   };
 
-  // [sheets] diagnostic: for each active sheet, check whether the fan end-vertex
-  // actually appears in the face list — this is what active_sheets currently skips.
-  // fan_walk_local(center=E(e,1), end=E(e,0), Nsf_walk) → E(e,0) must be in Nsf faces
-  // fan_walk_local(center=E(e,0), end=E(e,1), Ndf_walk) → E(e,1) must be in Ndf faces
+#ifdef SSP_LSCM_LOG
   {
     static int sheet_log = 0;
     if (sheet_log < 40) {
@@ -235,6 +232,7 @@ bool SSP_collapse_edge(
       }
     }
   }
+#endif
 
   // Walk face list builder: real faces of sheet si + adjacent infinity faces of vertex v
   auto get_walk_faces = [&](
@@ -297,8 +295,8 @@ bool SSP_collapse_edge(
       else if (subsetVIdx_si(ii) == vj) b_si(1) = ii;
     }
 
-    // [b_si FAIL] diagnostic
     if (b_si(0) < 0 || b_si(1) < 0 || b_si(0) >= b_si(1)) {
+#ifdef SSP_LSCM_LOG
       static int b_fail = 0;
       if (b_fail < 5) {
         b_fail++;
@@ -315,6 +313,7 @@ bool SSP_collapse_edge(
         if (nsf_real == 0)
           fprintf(stderr, "  HYPOTHESIS: sheets_Nsf[sid] contains only infinity faces\n");
       }
+#endif
       continue;
     }
 
@@ -330,8 +329,8 @@ bool SSP_collapse_edge(
     vector<int> Nsv_local = fan_walk_local(E(e,1), E(e,0), Nsf_walk, subsetVIdx_si);
     vector<int> Ndv_local = fan_walk_local(E(e,0), E(e,1), Ndf_walk, subsetVIdx_si);
 
-    // [fan_walk EMPTY] diagnostic
     if (Nsv_local.empty() || Ndv_local.empty()) {
+#ifdef SSP_LSCM_LOG
       static int fw_empty = 0;
       if (fw_empty < 10) {
         fw_empty++;
@@ -355,7 +354,7 @@ bool SSP_collapse_edge(
           fprintf(stderr, "\n");
         }
       }
-      // assert intentionally disabled — collecting diagnostics, gracefully skip sheet
+#endif
       continue;
     }
 
@@ -435,6 +434,7 @@ bool SSP_collapse_edge(
 
       bool all_ok = inv_A && inv_B && inv_C && inv_D && inv_F && inv_G && inv_H;
 
+#ifdef SSP_LSCM_LOG
       static int pre_log = 0;
       if (!all_ok || pre_log < 5) {
         pre_log++;
@@ -463,6 +463,7 @@ bool SSP_collapse_edge(
           !inv_C ? "FAIL INV-C: local index out of range" :
                    "FAIL INV-D: loc_vi or loc_vj absent from Nsv+Ndv");
       }
+#endif
 
       if (!all_ok) continue;
     }
@@ -488,7 +489,14 @@ bool SSP_collapse_edge(
         b_si(0), b_si(1), Nsv_local, Ndv_local,
         UV_pre_si, UV_post_si,
         any_sheet_ok ? nullptr : &data.lscm_case);
-    if (!isValid) return false;
+    if (!isValid) {
+#ifdef SSP_LSCM_LOG
+      fprintf(stderr,
+        "[LSCM-FAIL] after_collapse=%zu  e=(%d,%d)  sid=%d  vi=%d vj=%d\n",
+        decInfo.size(), E(e,0), E(e,1), sid, vi, vj);
+#endif
+      return false;
+    }
 
     // Store SheetData
     SheetData sd;
@@ -518,11 +526,7 @@ bool SSP_collapse_edge(
   }
 
   if (!any_sheet_ok) {
-    // Log which real faces of d were in this rejected collapse's one-ring.
-    // If these faces overlap with the backward walk's exit faces (e.g. 21, 64, 72),
-    // it means those faces are "missing" a decIM entry they should have had —
-    // causing the walk to exit earlier than correct.
-    // If they DON'T overlap, early walk exits are correct feature-face behavior.
+#ifdef SSP_LSCM_LOG
     static int saf_count = 0;
     static int saf_total = 0;
     saf_total++;
@@ -538,6 +542,7 @@ bool SSP_collapse_edge(
         if (!null_face(f) && f < numOrigFaces) fprintf(stderr, "%d ", f);
       fprintf(stderr, "]\n");
     }
+#endif
     return false;
   }
 
@@ -549,24 +554,47 @@ bool SSP_collapse_edge(
   // but that are NOT in any active sheet's one-ring → no decIM entry will be written.
   // These faces will have stale gF entries when the backward walk queries them.
   {
-    static int nas_log = 0;
     const vector<int> & nV2Fd_check = (!eflip ? Nsf : Ndf);
     int nas_count = 0;
+#ifdef SSP_LSCM_LOG
+    static int nas_log = 0;
+#endif
     for (int f : nV2Fd_check) {
       if (null_face(f) || f >= numOrigFaces) continue;
       if (FIdx_combined.find(f) == FIdx_combined.end()) {
         nas_count++;
+
+        NonActiveSheetFace naf;
+        naf.face_idx  = f;
+        naf.sheet_id  = (int)faceSheetID(f);
+        for (int c = 0; c < 3; c++)
+          if (std::isinf(V(F(f,c), 0))) { naf.is_infinity_face = true; break; }
+        naf.p0 = V.row(F(f,0)).head<3>().transpose();
+        naf.p1 = V.row(F(f,1)).head<3>().transpose();
+        naf.p2 = V.row(F(f,2)).head<3>().transpose();
+        data.non_active_faces.push_back(naf);
+
+#ifdef SSP_LSCM_LOG
         if (nas_log < 30) {
           nas_log++;
-          fprintf(stderr,
-            "[NON-ACTIVE-SHEET-FACE] collapse=%zu  face=%d  sheet=%d  "
-            "d=%d s=%d  active_sheets=[",
-            decInfo.size(), f, (int)faceSheetID(f), d, s);
-          for (int sid : active_sheets) fprintf(stderr, "%d ", sid);
-          fprintf(stderr, "]  → gF will get d→s remap but NO decIM entry\n");
+          if (naf.is_infinity_face) {
+            fprintf(stderr,
+              "[NON-ACTIVE-SHEET-FACE] collapse=%zu  face=%d  sheet=%d"
+              "  → infinity face, not a geometry sheet\n",
+              decInfo.size(), f, naf.sheet_id);
+          } else {
+            fprintf(stderr,
+              "[NON-ACTIVE-SHEET-FACE] collapse=%zu  face=%d  sheet=%d  "
+              "d=%d s=%d  active_sheets=[",
+              decInfo.size(), f, naf.sheet_id, d, s);
+            for (int sid : active_sheets) fprintf(stderr, "%d ", sid);
+            fprintf(stderr, "]  → gF will get d→s remap but NO decIM entry\n");
+          }
         }
+#endif
       }
     }
+#ifdef SSP_LSCM_LOG
     if (nas_count > 0) {
       static int nas_summary = 0;
       if (nas_summary < 10) {
@@ -576,6 +604,7 @@ bool SSP_collapse_edge(
           decInfo.size(), nas_count);
       }
     }
+#endif
   }
 
   // ================================================================
@@ -710,13 +739,14 @@ bool SSP_collapse_edge(
     }
     verts.assign(vset.begin(), vset.end());
 
-    // [collect_onering] diagnostic
+#ifdef SSP_LSCM_LOG
     static int co_log = 0;
     if (inf_count > 0 && co_log < 5) {
       co_log++;
       fprintf(stderr, "[collect_onering] v=%d  faces=%zu  inf=%d\n",
               v, faces.size(), inf_count);
     }
+#endif
   };
 
   // Pop lowest-cost valid edge
@@ -745,14 +775,15 @@ bool SSP_collapse_edge(
   collect_onering(E(e,1), Nsf, Nsv_verts);
   collect_onering(E(e,0), Ndf, Ndv_verts);
 
-  // [BOGUS ONE-RING] diagnostic
   if ((int)Nsv_verts.size() < 2 || (int)Ndv_verts.size() < 2) {
+#ifdef SSP_LSCM_LOG
     static int bogus = 0;
     if (bogus < 5) {
       bogus++;
       fprintf(stderr, "[BOGUS ONE-RING] e=%d E=(%d,%d)  Nsv=%zu  Ndv=%zu\n",
               e, E(e,0), E(e,1), Nsv_verts.size(), Ndv_verts.size());
     }
+#endif
     EQ(e)++;
     Q.emplace(numeric_limits<double>::infinity(), e, EQ(e));
     return false;

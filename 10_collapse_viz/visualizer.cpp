@@ -9,6 +9,7 @@
 
 #include <igl/remove_unreferenced.h>
 #include <igl/collapse_edge.h>  // IGL_COLLAPSE_EDGE_NULL
+#include "face_dead.h"
 #include <igl/writeOBJ.h>
 
 #include <single_collapse_data.h>
@@ -28,9 +29,12 @@ using namespace Eigen;
 // ---- SSP state defined in main.cpp ----
 extern MatrixXd gV;
 extern MatrixXi gF;
+extern MatrixXd gVO;          // original mesh vertices
+extern MatrixXi gFO;          // original mesh faces (post orient_faces_consistently)
+extern VectorXi gFaceFlipped; // 1 = face was CW and got re-wound, 0 = already CCW
 extern int      gCollapseCount;
 extern bool     gFinished;
-extern int      gDecType;   // 0=midpoint, 1=qslim
+extern int      gDecType;   // 0=midpoint, 1=qslim, 2=meshlab
 extern std::vector<single_collapse_data> gDecInfo;
 
 bool do_next_step();  // defined in main.cpp
@@ -42,6 +46,8 @@ static float gStepDelayMs       = 100.0f;
 static bool  gRunning           = false;
 static bool  gRunToSeam         = false;
 static bool  gRunToBdCase       = false;  // stop at LSCM Case 1 or 2 (one/both endpoints on boundary)
+static int   gBreakAtCollapse   = -1;     // stop when gCollapseCount reaches this; -1 = disabled
+static char  gBreakAtBuf[16]    = "";
 static bool  gCanonicalView     = false;
 static bool  gShowRingPre       = true;
 static bool  gShowRingPost      = true;
@@ -54,6 +60,7 @@ static bool  gShowCorrPts      = true;
 static float gPostHeight        = 1.0f;   // elevation of ring_post above ring_pre (× ring_span, along avg_normal)
 static bool  gShowCollapsedEdge = true;
 static bool  gShowMeshPre       = false;
+static bool  gShowOrigOrient    = false; // original fine mesh with CW/CCW face colors
 static float edge_radius        = 0.00006f;
 static float pts_radius         = 0.00008f;
 
@@ -83,7 +90,7 @@ static MatrixXi live_faces()
     rows.reserve(gF.rows());
     for (int f = 0; f < gF.rows(); f++) {
         int v0 = gF(f,0), v1 = gF(f,1), v2 = gF(f,2);
-        if (v0 == IGL_COLLAPSE_EDGE_NULL) continue;
+        if (is_face_dead(gF, f)) continue;
         if (std::isinf(gV(v0,0)) || std::isinf(gV(v1,0)) || std::isinf(gV(v2,0))) continue;
         rows.push_back({v0, v1, v2});
     }
@@ -469,6 +476,38 @@ static void show_canonical_view()
     polyscope::removeAllStructures();
     clear_seam_onering();  // structures are gone; keep name list consistent
     register_ring_geometry(gc);
+
+    // Non-active sheet faces: faces incident to d that belong to sheets NOT
+    // processed by this collapse.  Rendered in purple at their pre-collapse
+    // 3D positions, rotated into the same canonical frame.  Infinity faces skipped.
+    if (!gDecInfo.empty()) {
+        const auto & naf_list = gDecInfo.back().non_active_faces;
+        std::vector<std::array<double,3>> verts;
+        std::vector<std::array<int,3>>    faces;
+        for (const auto & naf : naf_list) {
+            if (naf.is_infinity_face) continue;
+            if (!naf.p0.allFinite() || !naf.p1.allFinite() || !naf.p2.allFinite()) continue;
+            int base = (int)verts.size();
+            for (const Vector3d & pt : {naf.p0, naf.p1, naf.p2}) {
+                Vector3d rp = R * (pt - g.centroid);
+                verts.push_back({rp.x(), rp.y(), rp.z()});
+            }
+            faces.push_back({base, base+1, base+2});
+        }
+        if (!faces.empty()) {
+            MatrixXd nafV((int)verts.size(), 3);
+            MatrixXi nafF((int)faces.size(), 3);
+            for (int i = 0; i < (int)verts.size(); i++)
+                nafV.row(i) << verts[i][0], verts[i][1], verts[i][2];
+            for (int i = 0; i < (int)faces.size(); i++)
+                nafF.row(i) << faces[i][0], faces[i][1], faces[i][2];
+            polyscope::registerSurfaceMesh("non_active_sheet_faces", nafV, nafF)
+                ->setSurfaceColor({0.55f, 0.3f, 0.85f})
+                ->setEdgeWidth(1.5)
+                ->setSmoothShade(false)
+                ->setTransparency(0.45f);
+        }
+    }
 }
 
 // ---- update polyscope display ----
@@ -489,6 +528,20 @@ void update_display()
             auto * mp = polyscope::registerSurfaceMesh("mesh_pre", gPreV, gPreF);
             mp->setSurfaceColor({0.4f, 0.9f, 0.4f})->setEdgeWidth(0.5)
               ->setTransparency(0.5f)->setEnabled(gShowMeshPre);
+        }
+
+        // Original fine mesh with face orientation colors:
+        //   green = face was already CCW (kept), red = face was CW (re-wound)
+        if (gFO.rows() > 0 && gFaceFlipped.size() == gFO.rows()) {
+            int nF = gFO.rows();
+            MatrixXd fc(nF, 3);
+            for (int f = 0; f < nF; f++)
+                fc.row(f) = gFaceFlipped(f)
+                    ? RowVector3d(1.0, 0.2, 0.2)   // red  = was CW
+                    : RowVector3d(0.2, 0.85, 0.3);  // green = already CCW
+            auto * om = polyscope::registerSurfaceMesh("orig_mesh_orient", gVO, gFO);
+            om->setEdgeWidth(0.5)->setEnabled(gShowOrigOrient);
+            om->addFaceColorQuantity("cw_ccw", fc)->setEnabled(true);
         }
 
         update_sheet_display();
@@ -520,16 +573,20 @@ void ui_callback()
             ring_post_c2f_diagnostic();
 
             bool hitSeam = !gDecInfo.empty() && gDecInfo.back().sheets.size() > 1;
-            if (gRunToSeam && hitSeam)
+            if (gRunToSeam && hitSeam) {
                 gRunToSeam = false;
+                gRunning   = false;
+            }
 
             if (!gDecInfo.empty()) {
                 const auto & lc = gDecInfo.back().lscm_case;
                 if (lc.has_value() && lc.value() >= 1) {
+#ifdef SSP_LSCM_LOG
                     fprintf(stderr, "[joint_lscm] case %d triggered (%s)\n",
                         lc.value() + 1,
                         lc.value() == 1 ? "one endpoint on boundary"
                                         : "both endpoints on boundary");
+#endif
                     if (gRunToBdCase) {
                         gRunToBdCase = false;
                         gRunning     = false;
@@ -537,7 +594,12 @@ void ui_callback()
                 }
             }
 
-            if (!gRunToSeam && !gRunToBdCase)
+            if (gBreakAtCollapse > 0 && gCollapseCount >= gBreakAtCollapse) {
+                gRunning         = false;
+                gBreakAtCollapse = -1;
+            }
+
+            if (!gRunToSeam && !gRunToBdCase && gRunning)
                 std::this_thread::sleep_for(
                     std::chrono::milliseconds(static_cast<int>(gStepDelayMs)));
         }
@@ -548,7 +610,8 @@ void ui_callback()
     ImGui::SetNextWindowSize({340, 420}, ImGuiCond_FirstUseEver);
     ImGui::Begin("SSP Collapse Visualizer");
 
-    ImGui::Text("Collapses: %d  [%s]", gCollapseCount, gDecType == 0 ? "midpoint" : "qslim");
+    ImGui::Text("Collapses: %d  [%s]", gCollapseCount,
+        gDecType == 0 ? "midpoint" : gDecType == 1 ? "qslim" : "meshlab");
     if (gSnap.valid)
         ImGui::Text("Edge: vi=%d  vj=%d", gSnap.vi, gSnap.vj);
     else
@@ -576,6 +639,18 @@ void ui_callback()
         if (ImGui::Button("Next seam"))      { gRunToSeam   = true; gRunning = true; }
         ImGui::SameLine();
         if (ImGui::Button("Next bd case"))   { gRunToBdCase = true; gRunning = true; }
+
+        ImGui::SetNextItemWidth(80);
+        ImGui::InputText("##breakat", gBreakAtBuf, sizeof(gBreakAtBuf),
+                         ImGuiInputTextFlags_CharsDecimal);
+        ImGui::SameLine();
+        if (ImGui::Button("Run to #")) {
+            int n = std::atoi(gBreakAtBuf);
+            if (n > gCollapseCount) { gBreakAtCollapse = n; gRunning = true; }
+        }
+        if (gBreakAtCollapse > 0)
+            ImGui::SameLine(), ImGui::TextColored({1.0f,0.8f,0.2f,1.0f},
+                "(waiting for #%d)", gBreakAtCollapse);
     }
 
     // Canonical / normal view toggle
@@ -631,6 +706,7 @@ void ui_callback()
     vis |= ImGui::Checkbox("Collapsed edges", &gShowCollapsedEdge);
     if (gHasPreMesh)
         vis |= ImGui::Checkbox("Mesh before collapse", &gShowMeshPre);
+    vis |= ImGui::Checkbox("Fine mesh orient (red=CW, green=CCW)", &gShowOrigOrient);
     if (vis && gSnap.valid) update_display();
 
     ImGui::Separator();
