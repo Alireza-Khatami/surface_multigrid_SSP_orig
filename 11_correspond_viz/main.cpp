@@ -6,6 +6,8 @@
 
 #include <Eigen/Dense>
 
+#include <single_collapse_data.h>
+
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -13,11 +15,15 @@
 #include <cstdint>
 #include <cmath>
 
+#include "bundle.h"
+#include "face_sample_viz.h"
+
 using namespace Eigen;
 
 // -----------------------------------------------------------------------
 // Bundle format (little-endian binary, extension .c2f):
-//   magic   uint32  0xC2F50001
+//   magic   uint32  0xC2F50001 = v1 (no SSP data)
+//                   0xC2F50002 = v2 (includes SSP query data)
 //   NC      uint32  compact coarse vertex count
 //   FC      uint32  coarse face count
 //   NF      uint32  fine vertex count
@@ -27,15 +33,8 @@ using namespace Eigen;
 //   fine vertices    NF×3 double
 //   fine faces       FF×3 uint32
 //   correspondence   NC × (bc0 bc1 bc2 double  +  fv0 fv1 fv2 uint32)
+//   [v2 only] SSP query data
 // -----------------------------------------------------------------------
-
-struct Bundle {
-    MatrixXd coarseV;   // NC × 3
-    MatrixXi coarseF;   // FC × 3
-    MatrixXd fineV;     // NF × 3
-    MatrixXi fineF;     // FF × 3
-    MatrixXd corrVec;   // NC × 3  (fine_pos - coarse_pos)
-};
 
 static bool load_bundle(const std::string & path, Bundle & b)
 {
@@ -46,9 +45,10 @@ static bool load_bundle(const std::string & path, Bundle & b)
     auto readD  = [&](double   & v) { in.read((char*)&v, 8); };
 
     uint32_t magic; read32(magic);
-    if (magic != 0xC2F50001) {
+    if (magic != 0xC2F50001 && magic != 0xC2F50002) {
         std::cerr << "[bundle] Bad magic 0x" << std::hex << magic << "\n"; return false;
     }
+    const bool v2 = (magic == 0xC2F50002);
 
     uint32_t NC, FC, NF, FF;
     read32(NC); read32(FC); read32(NF); read32(FF);
@@ -75,16 +75,91 @@ static bool load_bundle(const std::string & path, Bundle & b)
         b.fineF(f,0) = v0; b.fineF(f,1) = v1; b.fineF(f,2) = v2;
     }
 
-    // Read correspondence, build world-space vectors.
+    // Read correspondence (derive corrVec from bc+fv).
     b.corrVec.resize(NC, 3);
     for (uint32_t i = 0; i < NC; i++) {
         double bc0, bc1, bc2; readD(bc0); readD(bc1); readD(bc2);
         uint32_t fv0, fv1, fv2; read32(fv0); read32(fv1); read32(fv2);
-
         RowVector3d fine_pos = bc0 * b.fineV.row(fv0)
                              + bc1 * b.fineV.row(fv1)
                              + bc2 * b.fineV.row(fv2);
         b.corrVec.row(i) = fine_pos - b.coarseV.row(i);
+    }
+
+    // ---- v2: SSP query data ----
+    if (v2) {
+        auto read32s = [&](int32_t & v) { in.read((char*)&v, 4); };
+
+        uint32_t nV_total, nF_decIM, nFO;
+        read32(nV_total); read32(nF_decIM); read32(nFO);
+        b.nV_total = (int)nV_total;
+        b.nF_total = (int)nF_decIM;
+
+        b.vtxMap.resize(NC);
+        for (uint32_t i = 0; i < NC; i++) {
+            int32_t v; read32s(v); b.vtxMap[i] = v;
+        }
+
+        b.faceMap.resize(FC);
+        for (uint32_t f = 0; f < FC; f++) {
+            int32_t v; read32s(v); b.faceMap[f] = v;
+        }
+
+        b.faceSheetID.resize(nFO);
+        for (uint32_t f = 0; f < nFO; f++) {
+            int32_t v; read32s(v); b.faceSheetID(f) = v;
+        }
+
+        b.decIM.resize(nF_decIM);
+        for (uint32_t f = 0; f < nF_decIM; f++) {
+            uint32_t cnt; read32(cnt);
+            b.decIM[f].resize(cnt);
+            for (uint32_t k = 0; k < cnt; k++) {
+                int32_t v; read32s(v); b.decIM[f][k] = v;
+            }
+        }
+
+        uint32_t nDec; read32(nDec);
+        b.decInfo.resize(nDec);
+        for (uint32_t d = 0; d < nDec; d++) {
+            uint32_t nSheets; read32(nSheets);
+            b.decInfo[d].sheets.resize(nSheets);
+            for (uint32_t s = 0; s < nSheets; s++) {
+                SheetData & sd = b.decInfo[d].sheets[s];
+                int32_t sid; read32s(sid); sd.global_sheet_id = sid;
+
+                uint32_t svSz; read32(svSz);
+                sd.subsetVIdx.resize(svSz);
+                for (uint32_t j = 0; j < svSz; j++) {
+                    int32_t v; read32s(v); sd.subsetVIdx(j) = v;
+                }
+
+                uint32_t uvRows; read32(uvRows);
+                sd.UV_pre.resize(uvRows, 2);
+                for (uint32_t r = 0; r < uvRows; r++) {
+                    readD(sd.UV_pre(r, 0)); readD(sd.UV_pre(r, 1));
+                }
+                sd.UV_post.resize(uvRows, 2);
+                for (uint32_t r = 0; r < uvRows; r++) {
+                    readD(sd.UV_post(r, 0)); readD(sd.UV_post(r, 1));
+                }
+
+                uint32_t fuvRows; read32(fuvRows);
+                sd.FUV_pre.resize(fuvRows, 3);
+                for (uint32_t r = 0; r < fuvRows; r++) {
+                    int32_t a, bv, c; read32s(a); read32s(bv); read32s(c);
+                    sd.FUV_pre(r,0)=a; sd.FUV_pre(r,1)=bv; sd.FUV_pre(r,2)=c;
+                }
+                sd.FIdx_pre.resize(fuvRows);
+                for (uint32_t r = 0; r < fuvRows; r++) {
+                    int32_t v; read32s(v); sd.FIdx_pre(r) = v;
+                }
+            }
+        }
+
+        b.hasSspData = true;
+        std::cerr << "[bundle] Loaded v2 SSP data: nDec=" << nDec
+                  << "  nF_decIM=" << nF_decIM << "\n";
     }
 
     if (!in) { std::cerr << "[bundle] Read error in " << path << "\n"; return false; }
@@ -94,13 +169,13 @@ static bool load_bundle(const std::string & path, Bundle & b)
 }
 
 // ---- global viz state ----
-static Bundle  gBundle;
-static float   gZOffset        = 0.0f;
-static int     gSampleStep     = 1;     // visualize every gSampleStep-th coarse vertex
-static bool    gShowArrows     = true;  // checkbox: show/hide correspondence arrows
-static int     gSelectedSample = -1;   // sample-local index of the clicked point (-1 = none)
+Bundle gBundle;
+float  gZOffset        = 1.0f;
+static int     gSampleStep     = 1;
+static bool    gShowArrows     = true;
+static int     gSelectedSample = -1;
 
-// ---- helpers to compute coarse/fine positions for a single coarse index ----
+// ---- helpers ----
 static void coarse_fine_pts(int coarseIdx,
                              RowVector3d & cPt, RowVector3d & fPt, RowVector3d & arrow)
 {
@@ -112,9 +187,7 @@ static void coarse_fine_pts(int coarseIdx,
 }
 
 // -----------------------------------------------------------------------
-// Selection viz: a single highlighted coarse point + its arrow + fine dest.
-// Uses a static flag to track whether the structures exist so we can remove
-// them cleanly when the selection is cleared.
+// Selection viz: single highlighted coarse point + arrow + fine dest.
 // -----------------------------------------------------------------------
 static bool gSelRegistered = false;
 
@@ -139,17 +212,15 @@ static void rebuild_selection_viz()
     MatrixXd cM(1,3), fM(1,3), aM(1,3);
     cM.row(0) = cPt; fM.row(0) = fPt; aM.row(0) = arrow;
 
-    // Selected coarse point — red, larger
     auto* sc = polyscope::registerPointCloud("sel_coarse", cM);
     sc->setPointColor({1.0f, 0.15f, 0.15f});
     sc->setPointRadius(0.012, true);
 
     auto* vq = sc->addVectorQuantity("to_fine", aM, polyscope::VectorType::AMBIENT);
-    vq->setEnabled(true);   // always show the selected-pair arrow regardless of checkbox
+    vq->setEnabled(true);
     vq->setVectorColor({1.0f, 0.0f, 0.0f});
     vq->setVectorLengthScale(1.0, false);
 
-    // Selected fine destination — red, larger
     auto* sf = polyscope::registerPointCloud("sel_fine", fM);
     sf->setPointColor({1.0f, 0.15f, 0.15f});
     sf->setPointRadius(0.012, true);
@@ -168,7 +239,6 @@ static void rebuild_coarse_viz()
     ps->setSurfaceColor({0.25f, 0.52f, 0.95f});
     ps->setEdgeWidth(0.5f);
     ps->setSmoothShade(false);
-    // Correspondence arrows live on the sampled point cloud, not the full mesh.
 }
 
 static void rebuild_sample_viz()
@@ -196,7 +266,6 @@ static void rebuild_sample_viz()
         arrowVecs(j, 2)  -= (double)gZOffset;
     }
 
-    // Sampled coarse points (yellow)
     auto* cp = polyscope::registerPointCloud("sample_coarse", coarsePts);
     cp->setPointColor({1.0f, 0.85f, 0.0f});
     cp->setPointRadius(0.006, true);
@@ -206,7 +275,6 @@ static void rebuild_sample_viz()
     vq->setVectorColor({1.0f, 0.35f, 0.05f});
     vq->setVectorLengthScale(1.0, false);
 
-    // Correspondence destinations on fine mesh (green)
     auto* fp = polyscope::registerPointCloud("sample_fine", finePts);
     fp->setPointColor({0.15f, 0.85f, 0.40f});
     fp->setPointRadius(0.006, true);
@@ -217,6 +285,7 @@ static void rebuild_all()
     rebuild_coarse_viz();
     rebuild_sample_viz();
     rebuild_selection_viz();
+    rebuild_face_sample_viz();
 }
 
 int main(int argc, char ** argv)
@@ -229,7 +298,6 @@ int main(int argc, char ** argv)
     polyscope::init();
     polyscope::options::programName = "Coarse-to-Fine Correspondence";
 
-    // Fine mesh — semi-transparent background reference.
     polyscope::registerSurfaceMesh("fine_mesh", gBundle.fineV, gBundle.fineF)
         ->setSurfaceColor({0.55f, 0.55f, 0.55f})
         ->setEdgeWidth(0.3f)
@@ -242,24 +310,38 @@ int main(int argc, char ** argv)
 
     polyscope::state::userCallback = [NC]() {
 
-        // ---- pick detection (runs every frame, cheap) ----
+        // ---- pick detection ----
         {
-            int newSel = -1;
+            int newSel  = -1;
+            int newFace = -1;
             if (polyscope::pick::haveSelection()) {
                 auto sel = polyscope::pick::getSelection();
                 polyscope::Structure* structure = sel.first;
                 size_t localInd = sel.second;
                 if (structure && structure->name == "sample_coarse")
                     newSel = (int)localInd;
+                if (structure && structure->name == "coarse_mesh") {
+                    auto* sm = dynamic_cast<polyscope::SurfaceMesh*>(structure);
+                    if (sm) {
+                        size_t nV = sm->nVertices();
+                        size_t nF = sm->nFaces();
+                        if (localInd >= nV && localInd < nV + nF)
+                            newFace = (int)(localInd - nV);
+                    }
+                }
             }
             if (newSel != gSelectedSample) {
                 gSelectedSample = newSel;
                 rebuild_selection_viz();
             }
+            if (newFace != gSelectedFace) {
+                gSelectedFace = newFace;
+                rebuild_face_sample_viz();
+            }
         }
 
         // ---- UI window ----
-        ImGui::SetNextWindowSize({340, 155}, ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize({340, 230}, ImGuiCond_FirstUseEver);
         ImGui::Begin("Correspondence");
 
         bool changed = false;
@@ -270,7 +352,7 @@ int main(int argc, char ** argv)
 
         ImGui::SetNextItemWidth(220);
         if (ImGui::SliderInt("Sample every X pts", &gSampleStep, 1, 40)) {
-            gSelectedSample = -1;  // sample indices changed — clear stale selection
+            gSelectedSample = -1;
             changed = true;
         }
 
@@ -289,6 +371,28 @@ int main(int argc, char ** argv)
         }
 
         if (changed) rebuild_all();
+
+        ImGui::Separator();
+        ImGui::Text("Face sampling (click a coarse face)");
+        ImGui::SetNextItemWidth(120);
+        if (ImGui::InputInt("n samples", &gFaceSampleN)) {
+            gFaceSampleN = std::max(1, gFaceSampleN);
+            if (gSelectedFace >= 0) rebuild_face_sample_viz();
+        }
+        {
+            bool visChanged = false;
+            if (ImGui::Checkbox("coarse samples", &gShowFaceSampleCoarse)) visChanged = true;
+            ImGui::SameLine();
+            if (ImGui::Checkbox("fine samples",   &gShowFaceSampleFine))   visChanged = true;
+            if (visChanged) update_face_sample_visibility();
+        }
+        if (gSelectedFace >= 0) {
+            ImGui::Text("Face %d  |  %d samples", gSelectedFace, gFaceSampleN);
+            if (ImGui::Button("Clear face")) {
+                gSelectedFace = -1;
+                rebuild_face_sample_viz();
+            }
+        }
 
         ImGui::End();
     };

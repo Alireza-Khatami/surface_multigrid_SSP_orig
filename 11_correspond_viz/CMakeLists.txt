@@ -12,11 +12,22 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(polyscope)
 
-add_executable(${PROJECT_NAME}_bin main.cpp)
-target_link_libraries(${PROJECT_NAME}_bin polyscope)
+# libigl (core only — polyscope owns OpenGL/GLFW)
+set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/../08_subdiv_remesh/cmake)
+option(LIBIGL_WITH_OPENGL      "Use OpenGL" OFF)
+option(LIBIGL_WITH_OPENGL_GLFW "Use GLFW"   OFF)
+find_package(LIBIGL REQUIRED)
 
-# Eigen from the libigl submodule — already on disk, no extra download needed.
-target_include_directories(${PROJECT_NAME}_bin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../libigl/external/eigen)
+include_directories("../src/")
+
+# SSP library sources
+file(GLOB SSP_SRCS ../src/*.cpp)
+
+add_executable(${PROJECT_NAME}_bin main.cpp face_sample_viz.cpp ${SSP_SRCS})
+
+target_compile_features(${PROJECT_NAME}_bin PRIVATE cxx_std_17)
+
+target_link_libraries(${PROJECT_NAME}_bin igl::core polyscope)
 
 if(MSVC)
   target_compile_definitions(${PROJECT_NAME}_bin PRIVATE _USE_MATH_DEFINES NOMINMAX)

@@ -1,0 +1,484 @@
+"""
+c2f_query.py — Python loader and correspondence query for .c2f bundles.
+
+Mirrors what 11_correspond_viz/ does in C++:
+  - load_bundle()              reads the binary .c2f file
+  - compute_barycentric_2d()   2-D barycentric coords in UV space
+  - query_coarse_to_fine()     walks the SSP decimation sequence backwards
+  - sample_face_correspondence() samples a coarse face and maps to fine mesh
+
+Usage:
+    python c2f_query.py bundle.c2f [--face 42] [--n 50]
+"""
+
+import struct
+import sys
+import numpy as np
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+
+# ---------------------------------------------------------------------------
+# Data structures (mirrors bundle.h + single_collapse_data.h)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SheetData:
+    global_sheet_id: int
+    subsetVIdx: np.ndarray   # (svSz,)  int32 — global vertex indices, sorted asc
+    UV_pre:  np.ndarray      # (uvRows, 2) float64
+    UV_post: np.ndarray      # (uvRows, 2) float64
+    FUV_pre: np.ndarray      # (fuvRows, 3) int32 — local vertex indices
+    FIdx_pre: np.ndarray     # (fuvRows,)   int32 — global original face indices
+
+
+@dataclass
+class CollapseData:
+    sheets: List[SheetData] = field(default_factory=list)
+
+
+@dataclass
+class Bundle:
+    # Compact coarse mesh
+    coarseV: np.ndarray      # (NC, 3) float64
+    coarseF: np.ndarray      # (FC, 3) int32
+
+    # Original fine mesh
+    fineV: np.ndarray        # (NF, 3) float64
+    fineF: np.ndarray        # (FF, 3) int32
+
+    # Vertex correspondence: fine_pos = coarseV[i] + corrVec[i]
+    corrVec: np.ndarray      # (NC, 3) float64
+
+    # v2 SSP query data (present only if has_ssp_data)
+    has_ssp_data: bool = False
+    nV_total: int = 0        # global SSP vertex count (includes infVtx)
+    nF_total: int = 0        # original face count (= nFO)
+    vtxMap: Optional[np.ndarray] = None    # (NC,) int32  compact→global vertex
+    faceMap: Optional[np.ndarray] = None   # (FC,) int32  compact→global face
+    faceSheetID: Optional[np.ndarray] = None   # (nFO,) int32
+    decIM: List[List[int]] = field(default_factory=list)
+    decInfo: List[CollapseData] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Binary reader helpers
+# ---------------------------------------------------------------------------
+
+class _Reader:
+    """Minimal binary reader wrapping a bytes buffer."""
+
+    def __init__(self, data: bytes):
+        self._data = data
+        self._pos = 0
+
+    def u32(self) -> int:
+        v, = struct.unpack_from('<I', self._data, self._pos)
+        self._pos += 4
+        return v
+
+    def i32(self) -> int:
+        v, = struct.unpack_from('<i', self._data, self._pos)
+        self._pos += 4
+        return v
+
+    def f64(self) -> float:
+        v, = struct.unpack_from('<d', self._data, self._pos)
+        self._pos += 8
+        return v
+
+    def u32_array(self, n: int) -> np.ndarray:
+        arr = np.frombuffer(self._data, dtype='<u4', count=n, offset=self._pos)
+        self._pos += 4 * n
+        return arr.astype(np.int32)
+
+    def i32_array(self, n: int) -> np.ndarray:
+        arr = np.frombuffer(self._data, dtype='<i4', count=n, offset=self._pos)
+        self._pos += 4 * n
+        return arr.copy()
+
+    def f64_array(self, n: int) -> np.ndarray:
+        arr = np.frombuffer(self._data, dtype='<f8', count=n, offset=self._pos)
+        self._pos += 8 * n
+        return arr.copy()
+
+
+# ---------------------------------------------------------------------------
+# load_bundle
+# ---------------------------------------------------------------------------
+
+def load_bundle(path: str) -> Bundle:
+    """
+    Read a .c2f bundle file (v1 or v2) and return a Bundle.
+
+    Raises:
+        ValueError  on bad magic or read errors.
+    """
+    with open(path, 'rb') as fh:
+        data = fh.read()
+
+    r = _Reader(data)
+
+    magic = r.u32()
+    if magic not in (0xC2F50001, 0xC2F50002):
+        raise ValueError(f'Bad magic: 0x{magic:08X}')
+    v2 = (magic == 0xC2F50002)
+
+    NC = r.u32()
+    FC = r.u32()
+    NF = r.u32()
+    FF = r.u32()
+
+    # Coarse mesh
+    coarseV = r.f64_array(NC * 3).reshape(NC, 3)
+    coarseF = r.u32_array(FC * 3).reshape(FC, 3)
+
+    # Fine mesh
+    fineV = r.f64_array(NF * 3).reshape(NF, 3)
+    fineF = r.u32_array(FF * 3).reshape(FF, 3)
+
+    # Correspondence table → corrVec
+    corrVec = np.empty((NC, 3), dtype=np.float64)
+    for i in range(NC):
+        bc = np.array([r.f64(), r.f64(), r.f64()])
+        fv = np.array([r.u32(), r.u32(), r.u32()], dtype=np.int32)
+        fine_pos = bc[0] * fineV[fv[0]] + bc[1] * fineV[fv[1]] + bc[2] * fineV[fv[2]]
+        corrVec[i] = fine_pos - coarseV[i]
+
+    b = Bundle(coarseV=coarseV, coarseF=coarseF,
+               fineV=fineV, fineF=fineF,
+               corrVec=corrVec)
+
+    if not v2:
+        print(f'[bundle] Loaded v1  NC={NC} FC={FC} NF={NF} FF={FF}')
+        return b
+
+    # ---- v2 SSP data ----
+    nV_total = r.u32()
+    nF_decIM = r.u32()
+    nFO      = r.u32()
+
+    b.nV_total = nV_total
+    b.nF_total = nF_decIM
+
+    b.vtxMap      = r.i32_array(NC)
+    b.faceMap     = r.i32_array(FC)
+    b.faceSheetID = r.i32_array(nFO)
+
+    # decIM: one variable-length list per original face
+    b.decIM = []
+    for _ in range(nF_decIM):
+        cnt = r.u32()
+        b.decIM.append(r.i32_array(cnt).tolist())
+
+    # decInfo: one CollapseData per collapse
+    nDec = r.u32()
+    b.decInfo = []
+    for _ in range(nDec):
+        nSheets = r.u32()
+        cd = CollapseData()
+        for _ in range(nSheets):
+            sid   = r.i32()
+            svSz  = r.u32()
+            subsetVIdx = r.i32_array(svSz)
+
+            uvRows  = r.u32()
+            UV_pre  = r.f64_array(uvRows * 2).reshape(uvRows, 2)
+            UV_post = r.f64_array(uvRows * 2).reshape(uvRows, 2)
+
+            fuvRows  = r.u32()
+            FUV_pre  = r.i32_array(fuvRows * 3).reshape(fuvRows, 3)
+            FIdx_pre = r.i32_array(fuvRows)
+
+            cd.sheets.append(SheetData(
+                global_sheet_id=sid,
+                subsetVIdx=subsetVIdx,
+                UV_pre=UV_pre,
+                UV_post=UV_post,
+                FUV_pre=FUV_pre,
+                FIdx_pre=FIdx_pre,
+            ))
+        b.decInfo.append(cd)
+
+    b.has_ssp_data = True
+    print(f'[bundle] Loaded v2  NC={NC} FC={FC} NF={NF} FF={FF}'
+          f'  nDec={nDec}  nFO={nFO}')
+    return b
+
+
+# ---------------------------------------------------------------------------
+# compute_barycentric_2d
+# ---------------------------------------------------------------------------
+
+def compute_barycentric_2d(p: np.ndarray,
+                            UV: np.ndarray,
+                            F: np.ndarray) -> np.ndarray:
+    """
+    Barycentric coordinates of a 2-D point `p` with respect to every face in F.
+
+    Parameters
+    ----------
+    p  : (2,)         query point in UV space
+    UV : (nV, 2)      UV vertices
+    F  : (nF, 3)      face vertex indices (into UV)
+
+    Returns
+    -------
+    B  : (nF, 3)   barycentric coordinates (u, v, w) for each face.
+                   Negative components indicate the point is outside that triangle.
+    """
+    a = UV[F[:, 0]]   # (nF, 2)
+    b = UV[F[:, 1]]
+    c = UV[F[:, 2]]
+
+    v0 = b - a        # (nF, 2)
+    v1 = c - a
+    v2 = p - a        # broadcast: (nF, 2)
+
+    d00 = (v0 * v0).sum(axis=1)
+    d01 = (v0 * v1).sum(axis=1)
+    d11 = (v1 * v1).sum(axis=1)
+    d20 = (v2 * v0).sum(axis=1)
+    d21 = (v2 * v1).sum(axis=1)
+
+    denom = d00 * d11 - d01 * d01
+    vv = (d11 * d20 - d01 * d21) / denom
+    ww = (d00 * d21 - d01 * d20) / denom
+    uu = 1.0 - vv - ww
+
+    return np.stack([uu, vv, ww], axis=1)   # (nF, 3)
+
+
+# ---------------------------------------------------------------------------
+# query_coarse_to_fine
+# ---------------------------------------------------------------------------
+
+def query_coarse_to_fine(
+    decInfo:     List[CollapseData],
+    decIM:       List[List[int]],
+    faceSheetID: np.ndarray,
+    BC:          np.ndarray,
+    BF:          np.ndarray,
+    FIdx:        np.ndarray,
+) -> None:
+    """
+    Walk each query point backwards through the SSP decimation sequence.
+
+    Modifies BC, BF, FIdx in-place so that after the call:
+        fine_pos = BC[q,0]*fineV[BF[q,0]] + BC[q,1]*fineV[BF[q,1]] + BC[q,2]*fineV[BF[q,2]]
+    gives the fine-mesh position corresponding to the original coarse-mesh query.
+
+    Parameters
+    ----------
+    decInfo     : list of CollapseData (length = number of SSP collapses)
+    decIM       : list of sorted collapse-index lists, one per original face
+    faceSheetID : (nFO,) int32 — sheet ID per original face
+    BC          : (N, 3) float64 — barycentric weights  [modified in-place]
+    BF          : (N, 3) int32   — global vertex indices [modified in-place]
+    FIdx        : (N,)   int32   — global face index     [modified in-place]
+    """
+    N    = len(FIdx)
+    nDec = len(decInfo)
+    nFO  = len(faceSheetID)
+
+    for q in range(N):
+        d_idx = nDec   # start from "present" (one past the last collapse)
+
+        while True:
+            face = int(FIdx[q])
+
+            # Find the most recent collapse older than d_idx that touched face
+            d_list = decIM[face]
+            found = False
+            for ii in range(len(d_list) - 1, -1, -1):
+                if d_idx > d_list[ii]:
+                    d_idx = d_list[ii]
+                    found = True
+                    break
+            if not found:
+                break
+
+            # Determine the sheet this face belongs to
+            sid = int(faceSheetID[face]) if face < nFO else 0
+
+            # Find the matching SheetData; fall back to sheet[0] if not found
+            cd  = decInfo[d_idx]
+            sd  = None
+            for s in cd.sheets:
+                if s.global_sheet_id == sid:
+                    sd = s
+                    break
+            if sd is None and cd.sheets:
+                sd = cd.sheets[0]   # best-effort fallback (see assumption §3)
+            if sd is None:
+                continue
+
+            # Find the pre-collapse face row matching the current face
+            pre_row = -1
+            for r in range(len(sd.FIdx_pre)):
+                if sd.FIdx_pre[r] == face:
+                    pre_row = r
+                    break
+            if pre_row < 0:
+                continue
+
+            # Project BC through UV_post → UV query point
+            v0, v1, v2 = sd.FUV_pre[pre_row]
+            uv_query = (BC[q, 0] * sd.UV_post[v0] +
+                        BC[q, 1] * sd.UV_post[v1] +
+                        BC[q, 2] * sd.UV_post[v2])
+
+            # Compute barycentric coords in UV_pre for all local faces
+            B = compute_barycentric_2d(uv_query, sd.UV_pre, sd.FUV_pre)
+
+            # Pick the face whose minimum barycentric coord is largest (most inside)
+            min_per_face = B.min(axis=1)          # (fuvRows,)
+            best = int(np.argmax(min_per_face))   # largest min = most inside
+
+            # Clamp small negatives and renormalize
+            b_row = np.maximum(0.0, B[best])
+            s_row = b_row.sum()
+            if s_row > 0:
+                b_row /= s_row
+            else:
+                b_row = np.array([1.0 / 3, 1.0 / 3, 1.0 / 3])
+
+            new_fidx = int(sd.FIdx_pre[best])
+            new_v0   = int(sd.subsetVIdx[sd.FUV_pre[best, 0]])
+            new_v1   = int(sd.subsetVIdx[sd.FUV_pre[best, 1]])
+            new_v2   = int(sd.subsetVIdx[sd.FUV_pre[best, 2]])
+
+            BC[q]   = b_row
+            BF[q]   = [new_v0, new_v1, new_v2]
+            FIdx[q] = new_fidx
+
+
+# ---------------------------------------------------------------------------
+# sample_face_correspondence
+# ---------------------------------------------------------------------------
+
+def sample_face_correspondence(
+    bundle: Bundle,
+    coarse_face_idx: int,
+    n_samples: int = 20,
+    seed: int = 42,
+) -> dict:
+    """
+    Sample `n_samples` uniformly random barycentric points inside a coarse
+    triangle, then map each one to the fine mesh via SSP correspondence.
+
+    Parameters
+    ----------
+    bundle          : loaded Bundle (must have v2 SSP data)
+    coarse_face_idx : index into bundle.coarseF
+    n_samples       : number of samples
+    seed            : RNG seed for reproducibility
+
+    Returns
+    -------
+    dict with:
+        'BC'         : (N, 3) final barycentric coords on fine mesh
+        'BF'         : (N, 3) fine global vertex indices
+        'coarse_pts' : (N, 3) 3D positions on the coarse mesh
+        'fine_pts'   : (N, 3) 3D positions on the fine mesh
+        'displace'   : (N, 3) fine_pts - coarse_pts
+    """
+    if not bundle.has_ssp_data:
+        raise RuntimeError('Bundle has no SSP data (need a v2 .c2f file)')
+
+    cf = int(coarse_face_idx)
+    ci0, ci1, ci2 = bundle.coarseF[cf]
+    cv0 = bundle.coarseV[ci0]
+    cv1 = bundle.coarseV[ci1]
+    cv2 = bundle.coarseV[ci2]
+
+    # Global SSP vertex indices for the coarse face corners
+    gvi0 = int(bundle.vtxMap[ci0])
+    gvi1 = int(bundle.vtxMap[ci1])
+    gvi2 = int(bundle.vtxMap[ci2])
+
+    # Global SSP face index
+    gfi = int(bundle.faceMap[cf])
+
+    # Fold-sampled uniform barycentric coordinates (square → triangle)
+    rng = np.random.default_rng(seed)
+    r   = rng.random((n_samples, 2))
+    mask = r[:, 0] + r[:, 1] > 1.0
+    r[mask] = 1.0 - r[mask]    # fold excess back inside
+
+    BC = np.empty((n_samples, 3), dtype=np.float64)
+    BC[:, 0] = r[:, 0]
+    BC[:, 1] = r[:, 1]
+    BC[:, 2] = 1.0 - r[:, 0] - r[:, 1]
+
+    # Coarse 3D positions
+    coarse_pts = (BC[:, 0:1] * cv0 +
+                  BC[:, 1:2] * cv1 +
+                  BC[:, 2:3] * cv2)
+
+    # Initial BF and FIdx: all samples start on the same coarse face
+    BF   = np.tile([gvi0, gvi1, gvi2], (n_samples, 1)).astype(np.int32)
+    FIdx = np.full(n_samples, gfi, dtype=np.int32)
+
+    # Walk backwards through SSP collapses
+    query_coarse_to_fine(
+        bundle.decInfo,
+        bundle.decIM,
+        bundle.faceSheetID,
+        BC, BF, FIdx,
+    )
+
+    # Evaluate fine 3D positions from walked BC/BF
+    fine_pts = (BC[:, 0:1] * bundle.fineV[BF[:, 0]] +
+                BC[:, 1:2] * bundle.fineV[BF[:, 1]] +
+                BC[:, 2:3] * bundle.fineV[BF[:, 2]])
+
+    return {
+        'BC':         BC,
+        'BF':         BF,
+        'coarse_pts': coarse_pts,
+        'fine_pts':   fine_pts,
+        'displace':   fine_pts - coarse_pts,
+    }
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+def _parse_args():
+    import argparse
+    p = argparse.ArgumentParser(description='C2F bundle loader and query demo')
+    p.add_argument('bundle', help='Path to .c2f file')
+    p.add_argument('--face', type=int, default=0,
+                   help='Coarse face index to sample (default: 0)')
+    p.add_argument('--n', type=int, default=20,
+                   help='Number of samples per face (default: 20)')
+    return p.parse_args()
+
+
+def main():
+    args = _parse_args()
+
+    b = load_bundle(args.bundle)
+
+    print(f'Coarse mesh:  {b.coarseV.shape[0]} vertices  {b.coarseF.shape[0]} faces')
+    print(f'Fine   mesh:  {b.fineV.shape[0]} vertices  {b.fineF.shape[0]} faces')
+
+    if not b.has_ssp_data:
+        print('[v1 bundle] No SSP data — showing vertex correspondence only.')
+        print(f'corrVec[0] = {b.corrVec[0]}')
+        return
+
+    print(f'SSP collapses: {len(b.decInfo)}')
+
+    result = sample_face_correspondence(b, args.face, args.n)
+    print(f'\nFace {args.face}  —  {args.n} samples:')
+    print(f'  coarse_pts[0] = {result["coarse_pts"][0]}')
+    print(f'  fine_pts[0]   = {result["fine_pts"][0]}')
+    print(f'  displace[0]   = {result["displace"][0]}')
+    print(f'  ||displace||  = {np.linalg.norm(result["displace"], axis=1).mean():.6f}  (mean over {args.n} samples)')
+
+
+if __name__ == '__main__':
+    main()
