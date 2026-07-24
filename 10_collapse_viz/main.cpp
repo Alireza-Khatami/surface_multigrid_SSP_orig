@@ -1,6 +1,8 @@
 #include "orient_faces_consistently.h"
 
 #include <igl/read_triangle_mesh.h>
+#include <igl/remove_unreferenced.h>
+#include <igl/writeOBJ.h>
 #include <igl/connect_boundary_to_infinity.h>
 #include <igl/edge_flaps.h>
 #include <igl/shortest_edge_and_midpoint.h>
@@ -264,6 +266,32 @@ static void print_seam_edge_costs(const std::string & out_path = "seam_edge_cost
             (int)gSeamEdgeList.size(), out_path.c_str());
 }
 
+// ---- export simplified mesh ----
+static void save_simplified_mesh(const std::string & path)
+{
+    // Collect live faces: not dead, not incident to the infinity cap vertex
+    std::vector<std::array<int,3>> rows;
+    for (int f = 0; f < gF.rows(); f++) {
+        if (is_face_dead(gF, f)) continue;
+        int v0 = gF(f,0), v1 = gF(f,1), v2 = gF(f,2);
+        if (std::isinf(gV(v0,0)) || std::isinf(gV(v1,0)) || std::isinf(gV(v2,0))) continue;
+        rows.push_back({v0, v1, v2});
+    }
+    MatrixXi Flive((int)rows.size(), 3);
+    for (int i = 0; i < (int)rows.size(); i++)
+        Flive.row(i) << rows[i][0], rows[i][1], rows[i][2];
+
+    // Strip the infinity cap vertex and compact vertex indices
+    MatrixXd Vout; MatrixXi Fout; VectorXi I, J;
+    igl::remove_unreferenced(gV.leftCols(3), Flive, Vout, Fout, I, J);
+
+    if (!igl::writeOBJ(path, Vout, Fout))
+        fprintf(stderr, "[SAVE-MESH] writeOBJ failed: %s\n", path.c_str());
+    else
+        fprintf(stderr, "[SAVE-MESH] wrote %d faces  %d verts  → %s\n",
+            (int)Fout.rows(), (int)Vout.rows(), path.c_str());
+}
+
 // ---- one step ----
 bool do_next_step()
 {
@@ -407,6 +435,9 @@ int main(int argc, char * argv[])
 #endif
 
     SSP_seam_log_close();
+
+    // Export the simplified mesh regardless of how many collapses happened.
+    save_simplified_mesh("simplified_" + stem + ".obj");
 
     // Auto-save on exit regardless of C2F_VIZ_DIAGNOSTIC and regardless of
     // whether decimation reached the target face count.

@@ -86,6 +86,15 @@ def main():
         "SEAM-FAIL-LSCM",
         "SEAM-FAIL-ALL-SHEETS",
     ]
+    # also collect fail= labels from SEAM-SKIP-INV
+    inv_fail_labels = []
+    with open(path) as f:
+        for line in f:
+            if "[SEAM-SKIP-INV]" in line:
+                mf = re.search(r'fail=(\S+)', line)
+                if mf:
+                    inv_fail_labels.append(mf.group(1))
+
     present = [t for t in stage_tags if tag_counts.get(t, 0) > 0]
     if present:
         print(f"\n  --- per-stage rejection counts (after validity passed) ---")
@@ -94,14 +103,17 @@ def main():
             if n == 0:
                 continue
             entries = stage_detail[tag]
-            # count unique edges
             unique_edges = len({e for e, _ in entries if e is not None})
-            # count per sid
             sid_dist = Counter(s for _, s in entries if s >= 0)
             sid_str = "  sids: " + ", ".join(
                 f"{s}×{c}" for s, c in sid_dist.most_common(5)
             ) if sid_dist else ""
             print(f"  [{tag}]  {n:4d} events  {unique_edges} unique edges{sid_str}")
+            if tag == "SEAM-SKIP-INV" and inv_fail_labels:
+                inv_dist = Counter(inv_fail_labels)
+                for label, cnt in inv_dist.most_common():
+                    bar = "#" * min(40, cnt)
+                    print(f"    {label:<30s}  {cnt:4d}  {bar}")
 
     # ---- unknown / extra tags ----
     known = {

@@ -86,7 +86,8 @@ bool get_collapse_onering_faces(
 
 	// find the faces to keep
   VectorXi f_keep;
-  get_post_faces(F_ring_pre, vi,vj, f_keep, F_ring_post);
+  if (!get_post_faces(F_ring_pre, vi,vj, f_keep, F_ring_post))
+    return false;  // 3+ flap faces: phantom topology from VF-merge, reject collapse
 
   igl::slice(FIdx_ring_pre,f_keep,1,FIdx_ring_post);
 	// if (FIdx_ring_pre.size() == FIdx_ring_post.size())

@@ -42,7 +42,7 @@ bool do_next_step();  // defined in main.cpp
 // ---- display-only state ----
 static float gUVOffset          = 1.5f;
 static float gRingScale         = 1.0f;
-static float gStepDelayMs       = 100.0f;
+static float gStepDelayMs       = 0.0f;
 static bool  gRunning           = false;
 static bool  gRunToSeam         = false;
 static bool  gRunToBdCase       = false;  // stop at LSCM Case 1 or 2 (one/both endpoints on boundary)

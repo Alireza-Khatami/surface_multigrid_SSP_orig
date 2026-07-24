@@ -600,7 +600,10 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
     }
 
     // Build compact coarse mesh (same logic as load_and_show).
+    // Also track original (global) face indices for the SSP query data.
     MatrixXi tmpF(nFO, 3);
+    std::vector<int> fullFOrigIdx;   // compact face idx → global face idx
+    fullFOrigIdx.reserve(512);
     int nLive = 0;
     for (int f = 0; f < nFO; f++) {
         if (is_face_dead(gF, f)) continue;
@@ -609,6 +612,7 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
             if (std::isinf(gV(gF(f, c), 0))) { has_inf = true; break; }
         if (has_inf) continue;
         tmpF.row(nLive++) = gF.row(f);
+        fullFOrigIdx.push_back(f);
     }
     MatrixXi fullF = tmpF.topRows(nLive);
 
@@ -629,7 +633,7 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
     std::ofstream out(bundlePath, std::ios::binary);
     if (!out) { std::cerr << "[bundle] Cannot write " << bundlePath << "\n"; return; }
 
-    const uint32_t magic = 0xC2F50001;
+    const uint32_t magic = 0xC2F50002;  // v2: includes SSP query data
     out.write((const char*)&magic, 4);
     out.write((const char*)&NC, 4);
     out.write((const char*)&FC, 4);
@@ -664,8 +668,89 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
         out.write((const char*)&c.fv2, 4);
     }
 
+    // ---- SSP query data (v2) ----
+    // Sizes for reconstructing identity IM and IMF inside query_coarse_to_fine.
+    const uint32_t nV_total  = (uint32_t)gV.rows();
+    const uint32_t nF_decIM  = (uint32_t)gDecIM.size();
+    const uint32_t nFO_u     = (uint32_t)nFO;
+    out.write((const char*)&nV_total, 4);
+    out.write((const char*)&nF_decIM, 4);
+    out.write((const char*)&nFO_u,    4);
+
+    // compact→global vertex map (NC int32s)
+    for (uint32_t i = 0; i < NC; i++) {
+        int32_t gv = (int32_t)newToOld[i];
+        out.write((const char*)&gv, 4);
+    }
+
+    // compact→global face map (FC int32s)
+    for (uint32_t f = 0; f < FC; f++) {
+        int32_t gf = (int32_t)fullFOrigIdx[f];
+        out.write((const char*)&gf, 4);
+    }
+
+    // gFaceSheetID (nFO int32s)
+    for (int f = 0; f < nFO; f++) {
+        int32_t sid = (int32_t)gFaceSheetID(f);
+        out.write((const char*)&sid, 4);
+    }
+
+    // gDecIM: for each face, variable-length list of collapse indices
+    for (uint32_t f = 0; f < nF_decIM; f++) {
+        uint32_t cnt = (uint32_t)gDecIM[f].size();
+        out.write((const char*)&cnt, 4);
+        for (int idx : gDecIM[f]) {
+            int32_t v = (int32_t)idx;
+            out.write((const char*)&v, 4);
+        }
+    }
+
+    // gDecInfo: collapse history (only fields used by query_coarse_to_fine)
+    uint32_t nDec = (uint32_t)gDecInfo.size();
+    out.write((const char*)&nDec, 4);
+    for (const auto & cd : gDecInfo) {
+        uint32_t nSheets = (uint32_t)cd.sheets.size();
+        out.write((const char*)&nSheets, 4);
+        for (const auto & sd : cd.sheets) {
+            int32_t sheet_id = (int32_t)sd.global_sheet_id;
+            out.write((const char*)&sheet_id, 4);
+
+            uint32_t svSz = (uint32_t)sd.subsetVIdx.size();
+            out.write((const char*)&svSz, 4);
+            for (int j = 0; j < (int)svSz; j++) {
+                int32_t v = (int32_t)sd.subsetVIdx(j);
+                out.write((const char*)&v, 4);
+            }
+
+            uint32_t uvRows = (uint32_t)sd.UV_pre.rows();
+            out.write((const char*)&uvRows, 4);
+            for (uint32_t r = 0; r < uvRows; r++) {
+                double u = sd.UV_pre(r, 0), v = sd.UV_pre(r, 1);
+                out.write((const char*)&u, 8); out.write((const char*)&v, 8);
+            }
+            for (uint32_t r = 0; r < uvRows; r++) {
+                double u = sd.UV_post(r, 0), v = sd.UV_post(r, 1);
+                out.write((const char*)&u, 8); out.write((const char*)&v, 8);
+            }
+
+            uint32_t fuvRows = (uint32_t)sd.FUV_pre.rows();
+            out.write((const char*)&fuvRows, 4);
+            for (uint32_t r = 0; r < fuvRows; r++) {
+                int32_t a = sd.FUV_pre(r,0), b = sd.FUV_pre(r,1), c2 = sd.FUV_pre(r,2);
+                out.write((const char*)&a, 4);
+                out.write((const char*)&b, 4);
+                out.write((const char*)&c2, 4);
+            }
+            for (uint32_t r = 0; r < fuvRows; r++) {
+                int32_t fi = (int32_t)sd.FIdx_pre(r);
+                out.write((const char*)&fi, 4);
+            }
+        }
+    }
+
     std::cerr << "[bundle] Saved NC=" << NC << " FC=" << FC
-              << " NF=" << NF << " FF=" << FF << " → " << bundlePath << "\n";
+              << " NF=" << NF << " FF=" << FF
+              << " nDec=" << nDec << " → " << bundlePath << "\n";
 }
 
 void coarse_fine_clear()

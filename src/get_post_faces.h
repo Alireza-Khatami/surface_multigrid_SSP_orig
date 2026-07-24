@@ -8,7 +8,10 @@
 #include <Eigen/Core>
 #include <Eigen/Dense>
 
-void get_post_faces(
+// Returns false when 3+ flap faces are found (non-manifold-within-sheet topology
+// produced by VF-merge after prior collapses).  Caller should treat this as an
+// invalid collapse attempt rather than asserting.
+bool get_post_faces(
 	const Eigen::MatrixXi & F_pre,
 	const int & vi,
 	const int & vj,

@@ -63,29 +63,29 @@ bool SSP_collapse_edge(
 
   assert(s < d && "s should be less than d");
 
-  // Validity check — uses full one-ring (unordered, order doesn't matter here)
+  // Validity check.
+  // Manifold edges (≤2 shared real faces): apply igl's link condition.
+  // Non-manifold seam edges (>2 shared real faces): skip it — igl's check always
+  // fails for seam edges because it expects exactly 2 shared vertices, but seam
+  // edges have one per incident face.  The per-sheet LSCM loop below is the
+  // correct validity gate for non-manifold topology.
   {
-    vector<int> Nsv_alec = Nsv;
-    vector<int> Ndv_alec = Ndv;
-    if (!igl::edge_collapse_is_valid(Nsv_alec, Ndv_alec)) {
-      // Log seam-edge rejections: link condition requires 2 shared vertices for
-      // manifold interior; seam edges have 3+ shared real faces → always fail here.
-      {
-        const int _nOrig = (int)faceSheetID.size();
-        auto _isnull = [&](int f) {
-          return F(f,0)==IGL_COLLAPSE_EDGE_NULL && F(f,1)==IGL_COLLAPSE_EDGE_NULL
-              && F(f,2)==IGL_COLLAPSE_EDGE_NULL; };
-        set<int> _s;
-        for (int f : Nsf) if (!_isnull(f) && f < _nOrig) _s.insert(f);
-        int _sh = 0;
-        for (int f : Ndf) if (!_isnull(f) && f < _nOrig && _s.count(f)) _sh++;
-        if (_sh > 2)
-          SEAM_LOG("[SEAM-REJECT-VALIDITY]  e=(%d,%d) vi=%d vj=%d"
-            "  shared_real_faces=%d  Nsv_sz=%zu Ndv_sz=%zu\n",
-            E(e,0), E(e,1), vi, vj, _sh, Nsv.size(), Ndv.size());
-      }
-      return false;
+    const int _nOrig = (int)faceSheetID.size();
+    auto _isnull = [&](int f) {
+      return F(f,0)==IGL_COLLAPSE_EDGE_NULL && F(f,1)==IGL_COLLAPSE_EDGE_NULL
+          && F(f,2)==IGL_COLLAPSE_EDGE_NULL; };
+    set<int> _s;
+    for (int f : Nsf) if (!_isnull(f) && f < _nOrig) _s.insert(f);
+    int _sh = 0;
+    for (int f : Ndf) if (!_isnull(f) && f < _nOrig && _s.count(f)) _sh++;
+
+    if (_sh <= 2) {
+      vector<int> Nsv_alec = Nsv;
+      vector<int> Ndv_alec = Ndv;
+      if (!igl::edge_collapse_is_valid(Nsv_alec, Ndv_alec))
+        return false;
     }
+    // _sh > 2: seam edge — skip link condition, proceed to per-sheet loop.
   }
 
   const int m             = F.rows();
@@ -518,7 +518,15 @@ bool SSP_collapse_edge(
 
       if (!all_ok) {
         if (is_seam_collapse)
-          SEAM_LOG("[SEAM-SKIP-INV]  sid=%d  e=(%d,%d)\n", sid, E(e,0), E(e,1));
+          SEAM_LOG("[SEAM-SKIP-INV]  sid=%d  e=(%d,%d)  fail=%s\n",
+            sid, E(e,0), E(e,1),
+            !inv_A ? "INV-A(empty-walk)" :
+            !inv_G ? "INV-G(walk-ends-at-inf)" :
+            !inv_H ? "INV-H(inf-as-start)" :
+            !inv_F ? "INV-F(walk-dead-end)" :
+            !inv_B ? "INV-B(e0/e1-uninit)" :
+            !inv_C ? "INV-C(idx-out-of-range)" :
+                     "INV-D(vi/vj-absent)");
         continue;
       }
     }
