@@ -36,6 +36,7 @@ SEL_FINE           = "sel_fine"
 FACE_COARSE        = "face_sample_coarse"
 FACE_FINE          = "face_sample_fine"
 FACE_HULL          = "face_sample_hull"
+FACE_CENTS         = "coarse_face_cents"  # centroid cloud for reliable face picking
 
 # ---- mutable global state (mirrors C++ globals) ----
 _bundle            = None   # Bundle loaded from .c2f
@@ -115,6 +116,7 @@ def rebuild_coarse_viz():
     m.set_color((0.25, 0.52, 0.95))
     m.set_edge_width(0.5)
     m.set_smooth_shade(False)
+
 
 
 # ---------------------------------------------------------------------------
@@ -232,8 +234,8 @@ def rebuild_face_sample_viz():
         else:
             fc = np.tile([0.25, 0.52, 0.95], (FC, 1))
             fc[_selected_face] = [1.0, 0.65, 0.0]
-            q = mesh.add_face_color_quantity("face_highlight", fc)
-            q.set_enabled(True)
+            mesh.add_color_quantity("face_highlight", fc, defined_on='faces')
+            mesh.set_enabled(True)
             _face_highlight_active = True
 
     if _selected_face < 0:
@@ -327,36 +329,7 @@ def ui_callback():
     global _face_n, _show_face_coarse, _show_face_fine
 
     NC = _bundle.coarseV.shape[0]
-
-    # ---- pick detection ----
-    new_sel  = _selected_sample
-    new_face = _selected_face
-
-    try:
-        if ps.have_selection():
-            struct, idx = ps.get_selection()
-            name = getattr(struct, 'name', None)
-
-            if name == SAMPLE_COARSE:
-                new_sel = int(idx)
-
-            elif name == COARSE_MESH:
-                nV = _bundle.coarseV.shape[0]
-                # Polyscope: indices 0..nV-1 = vertices, nV..nV+nF-1 = faces
-                if idx >= nV:
-                    new_face = int(idx - nV)
-    except Exception:
-        pass
-
     changed = False
-
-    if new_sel != _selected_sample:
-        _selected_sample = new_sel
-        rebuild_selection_viz()
-
-    if new_face != _selected_face:
-        _selected_face = new_face
-        rebuild_face_sample_viz()
 
     # ---- ImGui panel ----
     try:
@@ -387,7 +360,7 @@ def ui_callback():
 
     if _selected_sample >= 0:
         ci = _selected_sample * step
-        psim.TextUnformatted(f"Selected: sample[{_selected_sample}] → coarse[{ci}]")
+        psim.TextUnformatted(f"Selected: sample[{_selected_sample}] -> coarse[{ci}]")
         if psim.Button("Clear selection"):
             _selected_sample = -1
             rebuild_selection_viz()
@@ -398,7 +371,7 @@ def ui_callback():
     psim.Separator()
     psim.TextUnformatted("Face sampling  (click a coarse face)")
 
-    c, v = psim.InputInt("n samples", _face_n)
+    c, v = psim.SliderInt("n samples", _face_n, 1, 200)
     if c:
         _face_n = max(1, v)
         if _selected_face >= 0:
@@ -426,6 +399,31 @@ def ui_callback():
 
     psim.End()
 
+    # ---- pick detection (after psim.End so UI clicks are not misrouted) ----
+    io = psim.GetIO()
+    if io.MouseClicked[0]:
+        try:
+            pr = ps.pick(screen_coords=io.MousePos)
+        except Exception:
+            pr = None
+        if pr is not None and getattr(pr, 'is_hit', False):
+            sname = getattr(pr, 'structure_name', None)
+            sdata = getattr(pr, 'structure_data', None) or {}
+
+            if sname == SAMPLE_COARSE:
+                pt_idx = int(sdata.get('index', -1))
+                if pt_idx >= 0 and pt_idx != _selected_sample:
+                    _selected_sample = pt_idx
+                    rebuild_selection_viz()
+
+            elif sname == COARSE_MESH:
+                etype = sdata.get('element_type', None)
+                fidx  = int(sdata.get('index', -1))
+                nF    = _bundle.coarseF.shape[0]
+                if etype == 'face' and 0 <= fidx < nF and fidx != _selected_face:
+                    _selected_face = fidx
+                    rebuild_face_sample_viz()
+
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -447,7 +445,7 @@ def main():
 
     ps.init()
     ps.set_program_name("Coarse-to-Fine Correspondence")
-    ps.set_up_dir("z_up")
+    ps.set_up_dir("y_up")
 
     # Fine mesh — always shown at ground level, semi-transparent
     fm = ps.register_surface_mesh(FINE_MESH, _bundle.fineV, _bundle.fineF)
