@@ -1,6 +1,7 @@
 #include "visualizer.h"
 #include "sheet_seam_viz.h"
 #include "coarse_fine_viz.h"
+#include "face_sample_tracker.h"
 
 #include <polyscope/polyscope.h>
 #include <polyscope/surface_mesh.h>
@@ -460,6 +461,19 @@ static void show_canonical_view()
     gc.uv_post_3d  = rot(g.uv_post_3d);
     gc.corr_pts    = rot(g.corr_pts);
 
+    // After R, avg_normal maps to world_up=(0,-1,0), so all elevations are in -Y.
+    // Move UV_pre to the floor (Y=0, same level as ring_pre) and
+    // UV_post to ring_post height (Y = -gPostHeight * ring_span).
+    // This must be done before the arrow vectors below are computed.
+    {
+        double y_panel = -(double)gUVOffset   * g.ring_span; // current Y of both UV panels
+        double y_post  = -(double)gPostHeight * g.ring_span; // desired Y for UV_post
+        for (int i = 0; i < gc.uv_pre_3d.rows(); i++)
+            gc.uv_pre_3d(i, 1) -= y_panel;          // cancel panel offset → Y = 0
+        for (int i = 0; i < gc.uv_post_3d.rows(); i++)
+            gc.uv_post_3d(i, 1) += y_post - y_panel; // bring to ring_post Y
+    }
+
     int nV = gc.V_ring.rows();
     gc.arrows_pre.resize(nV, 3);  gc.arrows_pre.setZero();
     gc.arrows_post.resize(nV, 3); gc.arrows_post.setZero();
@@ -476,6 +490,16 @@ static void show_canonical_view()
     polyscope::removeAllStructures();
     clear_seam_onering();  // structures are gone; keep name list consistent
     register_ring_geometry(gc);
+
+    // In canonical view the UV surfaces are the primary geometry — hide the 3D ring meshes.
+    polyscope::getSurfaceMesh("one_ring_pre") ->setEnabled(false);
+    polyscope::getSurfaceMesh("one_ring_post")->setEnabled(false);
+    polyscope::getPointCloud ("ring_pre_pts") ->setEnabled(false);
+    polyscope::getPointCloud ("ring_post_pts")->setEnabled(false);
+    polyscope::getSurfaceMesh("uv_pre") ->setEnabled(true);
+    polyscope::getSurfaceMesh("uv_post")->setEnabled(true);
+    polyscope::getPointCloud ("uv_pre_pts") ->setEnabled(true);
+    polyscope::getPointCloud ("uv_post_pts")->setEnabled(true);
 
     // Non-active sheet faces: faces incident to d that belong to sheets NOT
     // processed by this collapse.  Rendered in purple at their pre-collapse
@@ -508,6 +532,8 @@ static void show_canonical_view()
                 ->setTransparency(0.45f);
         }
     }
+
+    sample_tracker_show_canonical(gc.uv_pre_3d, gc.uv_post_3d, gSnap.FUV_pre, gSnap.FUV_post);
 }
 
 // ---- update polyscope display ----
@@ -547,6 +573,8 @@ void update_display()
         update_sheet_display();
         update_seam_onering_display();
     }
+
+    sample_tracker_show();
 
     if (!gSnap.valid) return;
 

@@ -27,6 +27,7 @@ include_directories("../src/")
 set(APP_SRCS
     main.cpp
     coarse_fine_viz.cpp
+    face_sample_tracker.cpp
     orient_faces_consistently.cpp
     meshlab_qslim_callbacks.cpp
     meshlab_qslim_config.cpp
@@ -45,7 +46,7 @@ if(MSVC)
   target_compile_definitions(${PROJECT_NAME}_bin PRIVATE _USE_MATH_DEFINES NOMINMAX)
 endif()
 
-option(C2F_VIZ_DIAGNOSTIC "Enable per-collapse ring_post c2f diagnostic polyscope visualization (traced walk, point clouds, arrows)" OFF)
+option(C2F_VIZ_DIAGNOSTIC "Enable per-collapse ring_post c2f diagnostic polyscope visualization (traced walk, point clouds, arrows)" ON)
 if(C2F_VIZ_DIAGNOSTIC)
     target_compile_definitions(${PROJECT_NAME}_bin PRIVATE C2F_VIZ_DIAGNOSTIC)
     target_sources(${PROJECT_NAME}_bin PRIVATE visualizer.cpp sheet_seam_viz.cpp)

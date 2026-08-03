@@ -45,6 +45,8 @@ void coarse_fine_compute_and_save(const std::string & path);
 void coarse_fine_save_bundle(const std::string & corrPath, const std::string & bundlePath);
 #endif
 
+#include "face_sample_tracker.h"
+
 using namespace Eigen;
 
 // ---- SSP loop state (extern'd by visualizer.cpp) ----
@@ -322,6 +324,7 @@ bool do_next_step()
         if (ok) {
             gCollapseCount++;
             if (gLastCollapseWasSeam) gSeamCollapseCount++;
+            sample_tracker_update();
             std::cerr << "############## collapse ############ " << gCollapseCount
                       << "  seam=" << gSeamCollapseCount << "/" << gCollapseCount << "\n";
 
@@ -417,8 +420,12 @@ int main(int argc, char * argv[])
         size_t dot = stem.rfind('.');
         if (dot != std::string::npos) stem = stem.substr(0, dot);
     }
-    const std::string c2f_path    = "c2f_" + stem + ".txt";
-    const std::string bundle_path = "correspondence_" + stem + ".c2f";
+    const std::string c2f_path          = "c2f_"             + stem + ".txt";
+    const std::string bundle_path       = "correspondence_"   + stem + ".c2f";
+    const std::string samples_fine_path = "samples_fine_"     + stem + ".txt";
+    const std::string samples_coarse_path = "samples_coarse_" + stem + ".txt";
+
+    sample_tracker_init(2);
 
     print_seam_edge_costs("seam_edge_costs_" + stem + ".txt");
     SSP_seam_log_open(("seam_diag_" + stem + ".txt").c_str());
@@ -445,6 +452,8 @@ int main(int argc, char * argv[])
         coarse_fine_compute_and_save(c2f_path);
         coarse_fine_save_bundle(c2f_path, bundle_path);
     }
+
+    sample_tracker_save(samples_fine_path, samples_coarse_path);
 
     return 0;
 }
