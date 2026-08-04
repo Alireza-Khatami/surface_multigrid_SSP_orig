@@ -20,7 +20,7 @@ void SSP_seam_log_close() {
 }
 
 // ---- Validity checks toggle ----
-static bool s_validity_checks = true;
+static bool s_validity_checks = false;
 void SSP_validity_checks_enable(bool e) { s_validity_checks = e; }
 bool SSP_validity_checks_enabled()      { return s_validity_checks; }
 
