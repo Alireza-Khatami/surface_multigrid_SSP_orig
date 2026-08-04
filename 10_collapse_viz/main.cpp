@@ -183,7 +183,7 @@ static void init_ssp(const std::string & mesh_path, int tarF)
         // QSlim: quadric error metric, optimal placement
         igl::per_vertex_point_to_plane_quadrics(gV, gF, gEMAP, gEF, gEI, gQuadrics);
         SSP_qslim_optimal_collapse_edge_callbacks(
-            gE, gQuadrics, gQSlimV1, gQSlimV2, gCostFn, gPreFn, gPostFn);
+            gE, gQuadrics, gQSlimV1, gQSlimV2, gVF, gCostFn, gPreFn, gPostFn);
         std::cout << "Decimation: qslim\n";
     } else {
         // MeshLab QEM: area-weighted quadrics + boundary reinforcement

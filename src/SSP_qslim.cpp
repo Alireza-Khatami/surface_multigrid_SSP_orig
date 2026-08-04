@@ -51,8 +51,9 @@ bool SSP_qslim(
   decimate_cost_and_placement_func cost_and_placement;
   decimate_pre_collapse_func       pre_collapse;
   decimate_post_collapse_func      post_collapse;
+  static const std::vector<std::vector<int>> kEmptyVF; // no live VF here; checks no-op
   SSP_qslim_optimal_collapse_edge_callbacks(
-    E,quadrics,v1,v2, cost_and_placement, pre_collapse,post_collapse);
+    E,quadrics,v1,v2,kEmptyVF, cost_and_placement, pre_collapse,post_collapse);
   // Call to greedy decimator
   bool ret = SSP_midpoint(
     VO, FO,

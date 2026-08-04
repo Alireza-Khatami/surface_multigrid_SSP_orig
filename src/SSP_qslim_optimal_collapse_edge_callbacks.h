@@ -35,10 +35,11 @@
 
   void SSP_qslim_optimal_collapse_edge_callbacks(
     Eigen::MatrixXi & E,
-    std::vector<std::tuple<Eigen::MatrixXd,Eigen::RowVectorXd,double> > & 
+    std::vector<std::tuple<Eigen::MatrixXd,Eigen::RowVectorXd,double> > &
       quadrics,
     int & v1,
     int & v2,
+    const std::vector<std::vector<int>> & VF,
     decimate_cost_and_placement_func & cost_and_placement,
     decimate_pre_collapse_func & pre_collapse,
     decimate_post_collapse_func & post_collapse);

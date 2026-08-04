@@ -5,6 +5,7 @@
 #include <map>
 #include <set>
 #include <cstdio>
+#include <cmath>
 
 // ---- Seam-edge diagnostic log ----
 // Call SSP_seam_log_open(path) once from main; all [SEAM-*] lines go there.
@@ -562,6 +563,103 @@ bool SSP_collapse_edge(
         decInfo.size(), E(e,0), E(e,1), sid, vi, vj);
 #endif
       return false;
+    }
+
+    // ── Paper §4: UV Face Flips (Neural Subdivision, Hsueh-Ti et al. 2020) ──
+    // Reject if any post-collapse UV face has non-positive signed area.
+    {
+      bool uv_flip = false;
+      for (int fi = 0; fi < FUV_post_si.rows() && !uv_flip; ++fi) {
+        const int ua = FUV_post_si(fi,0), ub = FUV_post_si(fi,1), uc = FUV_post_si(fi,2);
+        const double ax = UV_post_si(ua,0), ay = UV_post_si(ua,1);
+        const double bx = UV_post_si(ub,0), by = UV_post_si(ub,1);
+        const double cx = UV_post_si(uc,0), cy = UV_post_si(uc,1);
+        if ((bx-ax)*(cy-ay) - (cx-ax)*(by-ay) <= 0.0) uv_flip = true;
+      }
+      if (uv_flip) {
+        fprintf(stderr, "[UV-REJECT] uv_face_flip  sid=%d  e=(%d,%d)\n",
+                sid, E(e,0), E(e,1));
+        if (FILE* lf = fopen("collapse_rejections_log.txt", "a"))
+        { fprintf(lf, "[UV-REJECT] uv_face_flip  sid=%d  e=(%d,%d)\n", sid, E(e,0), E(e,1)); fclose(lf); }
+        return false;
+      }
+    }
+
+    // ── Paper §4: Overlapped UV Faces (Neural Subdivision, Hsueh-Ti et al. 2020) ──
+    // For each interior vertex of the post-collapse UV patch, the total angle
+    // sum around it must equal 2π (discrete flatness — no UV overlaps).
+    {
+      const int nUV  = (int)UV_post_si.rows();
+      const int nFuv = (int)FUV_post_si.rows();
+
+      // Boundary vertices: on edges that appear exactly once
+      map<pair<int,int>, int> uv_edge_cnt;
+      for (int fi = 0; fi < nFuv; ++fi)
+        for (int c = 0; c < 3; ++c) {
+          int a = FUV_post_si(fi,c), b = FUV_post_si(fi,(c+1)%3);
+          if (a > b) std::swap(a,b);
+          uv_edge_cnt[{a,b}]++;
+        }
+      set<int> uv_bd;
+      for (auto & kv : uv_edge_cnt)
+        if (kv.second == 1) { uv_bd.insert(kv.first.first); uv_bd.insert(kv.first.second); }
+
+      bool bad_angle = false;
+      int  bad_angle_v = -1;
+      double bad_angle_sum = 0.0;
+      static constexpr double kTwoPi = 6.283185307179586;
+      int n_interior = 0;
+      for (int v = 0; v < nUV && !bad_angle; ++v) {
+        if (uv_bd.count(v)) continue;  // skip boundary vertices
+        ++n_interior;
+        double angle_sum = 0.0;
+        bool degenerate = false;
+        for (int fi = 0; fi < nFuv; ++fi) {
+          int vb_idx = -1, vc_idx = -1;
+          for (int c = 0; c < 3; ++c) {
+            if (FUV_post_si(fi,c) == v) {
+              vb_idx = FUV_post_si(fi,(c+1)%3);
+              vc_idx = FUV_post_si(fi,(c+2)%3);
+              break;
+            }
+          }
+          if (vb_idx < 0) continue;
+          Eigen::Vector2d pa(UV_post_si(v,0),      UV_post_si(v,1));
+          Eigen::Vector2d pb(UV_post_si(vb_idx,0), UV_post_si(vb_idx,1));
+          Eigen::Vector2d pc(UV_post_si(vc_idx,0), UV_post_si(vc_idx,1));
+          Eigen::Vector2d e1 = pb - pa, e2 = pc - pa;
+          double l1 = e1.norm(), l2 = e2.norm();
+          if (l1 < 1e-15 || l2 < 1e-15) { degenerate = true; bad_angle = true; bad_angle_v = v; break; }
+          double cos_a = std::max(-1.0, std::min(1.0, e1.dot(e2) / (l1*l2)));
+          angle_sum += std::acos(cos_a);
+        }
+        if (!degenerate && std::abs(angle_sum - kTwoPi) > 1e-15)
+        { bad_angle = true; bad_angle_v = v; bad_angle_sum = angle_sum; }
+      }
+      if (bad_angle) {
+        static int s_angle_rej = 0;
+        ++s_angle_rej;
+        if (s_angle_rej <= 50) {
+          fprintf(stderr,
+            "[UV-REJECT] uv_angle_sum  sid=%d  e=(%d,%d)"
+            "  bad_v=%d  angle_sum=%.6f  diff_from_2pi=%.6f"
+            "  n_interior=%d  nUV=%d  nFuv=%d  (reject#%d)\n",
+            sid, E(e,0), E(e,1),
+            bad_angle_v, bad_angle_sum, bad_angle_sum - kTwoPi,
+            n_interior, nUV, nFuv, s_angle_rej);
+          if (FILE* lf = fopen("collapse_rejections_log.txt", "a")) {
+            fprintf(lf,
+              "[UV-REJECT] uv_angle_sum  sid=%d  e=(%d,%d)"
+              "  bad_v=%d  angle_sum=%.6f  diff_from_2pi=%.6f"
+              "  n_interior=%d  nUV=%d  nFuv=%d\n",
+              sid, E(e,0), E(e,1),
+              bad_angle_v, bad_angle_sum, bad_angle_sum - kTwoPi,
+              n_interior, nUV, nFuv);
+            fclose(lf);
+          }
+        }
+        return false;
+      }
     }
 
     // Store SheetData

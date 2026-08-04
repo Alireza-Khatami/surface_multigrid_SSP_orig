@@ -26,30 +26,30 @@ struct MeshlabQEMConfig
     // svd_placement = false : fullPivLu (faithful vcg/MeshLab default, can fly off)
     bool   svd_placement           = true;
 
-    // ── Soft modifiers (raise cost, never veto collapse) ─────────────────────
-    // quality_check: divide error by worst post-collapse face quality
-    bool   quality_check           = true;
-    double quality_thr             = 0.3;    // clamp quality to this before dividing
-
-    // normal_check: divide error by remapped normal-change cosine
+    // ── Soft modifiers — not required by the paper ───────────────────────────
+    // Not required by the paper (Neural Subdivision, Hsueh-Ti et al. 2020).
+    // Paper uses hard veto gates only; soft modifiers are disabled in the callbacks.
+    bool   quality_check           = false;  // was true
+    double quality_thr             = 0.3;
     bool   normal_check            = false;
-    double normal_thr_deg          = 90.0;   // maximum acceptable normal rotation (degrees)
+    double normal_thr_deg          = 90.0;
 
     // ── Hard veto gates (set cost = +inf when triggered) ─────────────────────
-    // hard_quality_check: veto if post-collapse quality < thr AND < 90% of pre
-    bool   hard_quality_check      = false;
-    double hard_quality_thr        = 0.1;
+    // Paper (Neural Subdivision, Hsueh-Ti et al. 2020): Q > 0.2 for all neighbors.
+    // Removed condition: minPostQual < minPreQual * 0.9 — not in the paper.
+    bool   hard_quality_check      = true;   // was false
+    double hard_quality_thr        = 0.2;    // was 0.1; paper value
 
-    // hard_normal_check: veto if any surviving face flips (dihedral > 150 deg)
-    bool   hard_normal_check       = false;
+    // Paper (Neural Subdivision, Hsueh-Ti et al. 2020): dot(n_pre, n_post) > δ=0.2.
+    // Was: veto if dihedral > 150° — too loose; now uses paper threshold δ=0.2.
+    bool   hard_normal_check       = true;   // was false
 
-    // area_check: veto if relative area change > 1%
+    // area_check: not required by the paper (Neural Subdivision, Hsueh-Ti et al. 2020).
     bool   area_check              = false;
 
     // ── Topology ─────────────────────────────────────────────────────────────
-    // preserve_topology: run link-condition check in pre_fn
-    // (SSP already guards manifoldness; enable for an extra layer)
-    bool   preserve_topology       = false;
+    // Paper (Neural Subdivision, Hsueh-Ti et al. 2020): link condition required.
+    bool   preserve_topology       = true;   // was false
 
     // ── I/O ──────────────────────────────────────────────────────────────────
     // Read values from an ini-style key=value file.

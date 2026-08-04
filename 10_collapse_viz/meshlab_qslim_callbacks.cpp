@@ -161,9 +161,9 @@ static double face_quality(const Vector3d & p0, const Vector3d & p1, const Vecto
     double a2 = (p1-p0).squaredNorm();
     double b2 = (p2-p1).squaredNorm();
     double c2 = (p0-p2).squaredNorm();
-    double denom = a2 + b2 + c2;
+    double denom = std::powf(a2, 2.0f) + std::powf(b2, 2.0f) + std::powf(c2, 2.0f);
     if (denom < 1e-30) return 0.0;
-    return 2.0*std::sqrt(3.0) * (p1-p0).cross(p2-p0).norm() / denom;
+    return 4.0*std::sqrt(3.0) * (p1-p0).cross(p2-p0).norm() / denom;
 }
 
 static Vector3d face_normal(const Vector3d & p0, const Vector3d & p1, const Vector3d & p2)
@@ -351,11 +351,14 @@ void meshlab_setup_callbacks(
     cfg.print();
 
     const double kInf = std::numeric_limits<double>::infinity();
-    const double cos_hard_flip  = std::cos(150.0 * M_PI / 180.0);  // cos(150°) ≈ -0.866
-    const double cos_normal_thr = std::cos(cfg.normal_thr_deg * M_PI / 180.0);
+    // Paper (Neural Subdivision, Hsueh-Ti et al. 2020): dot(n_pre, n_post) > δ=0.2
+    // Was: std::cos(150° * π/180) ≈ -0.866 — too loose, allowed almost-complete flips.
+    const double cos_hard_flip  = 0.2;
+    // Not required by the paper (Neural Subdivision, Hsueh-Ti et al. 2020):
+    // const double cos_normal_thr = std::cos(cfg.normal_thr_deg * M_PI / 180.0);
 
     // ── cost_fn ──────────────────────────────────────────────────────────────
-    cost_fn = [&VF, &cfg, cos_hard_flip, cos_normal_thr, kInf](
+    cost_fn = [&VF, &cfg, cos_hard_flip, kInf](
         const int        e,
         const MatrixXd & V,
         const MatrixXi & F,
@@ -387,115 +390,83 @@ void meshlab_setup_callbacks(
             cost=kInf; p=RowVectorXd::Zero(3); return;
         }
 
-        // ── one-ring quality / normal scan ───────────────────────────────────
-        bool need_quality = cfg.quality_check  || cfg.hard_quality_check;
-        bool need_normal  = cfg.normal_check   || cfg.hard_normal_check;
-        bool need_area    = cfg.area_check;
+        // ── Paper §4 one-ring scan (Neural Subdivision, Hsueh-Ti et al. 2020) ─
+        // Active checks: hard face flip (δ=0.2) + hard quality (Q>0.2).
+        // Not required by the paper — commented out:
+        //   quality_check (soft cost modifier), normal_check (soft cost modifier),
+        //   area_check (area ratio gate), minPreQual * 0.9 pre-quality comparison.
+        bool need_quality = cfg.hard_quality_check;
+        bool need_normal  = cfg.hard_normal_check;
+        // bool need_area = cfg.area_check;  // not required by the paper
 
         double minPostQual = 1.0;
-        double minPreQual  = 1.0;
-        double minCos      = 1.0;
-        double preArea     = 0.0;
-        double postArea    = 0.0;
         bool   hard_flip   = false;
 
-        // Copy cfg fields and captured-by-value vars into locals so the inner visitor
-        // lambda can reach them via [&] (MSVC won't allow [&] to reach through an outer
-        // lambda's explicit capture list into its captured values).
+        // Locals for MSVC nested-lambda capture
         const bool   l_need_quality = need_quality;
         const bool   l_need_normal  = need_normal;
-        const bool   l_need_area    = need_area;
         const bool   l_hard_normal  = cfg.hard_normal_check;
-        const double l_cos_flip     = cos_hard_flip;
+        const double l_cos_flip     = cos_hard_flip;  // = 0.2 (paper's δ)
 
-        if (need_quality || need_normal || need_area)
+        if (need_quality || need_normal)
         {
             walk_surviving_faces(va, vb, optPos, V, F, VF,
                 [&](const Vector3d & q0, const Vector3d & q1, const Vector3d & q2,
                     const Vector3d & o0, const Vector3d & o1, const Vector3d & o2)
             {
-                if (l_need_quality) {
+                // Paper: Q > 0.2 for all neighboring triangles (Euclidean domain).
+                if (l_need_quality)
                     minPostQual = std::min(minPostQual, face_quality(q0,q1,q2));
-                    minPreQual  = std::min(minPreQual,  face_quality(o0,o1,o2));
-                }
+
+                // Paper: dot(n_pre, n_post) > δ=0.2.
+                // Removed: || face_quality(q0,q1,q2) < 0.01 — not required by the paper.
                 if (l_need_normal) {
                     Vector3d nPre  = face_normal(o0,o1,o2);
                     Vector3d nPost = face_normal(q0,q1,q2);
-                    double   cosA  = nPre.dot(nPost);
-                    minCos = std::min(minCos, cosA);
-                    if (l_hard_normal && (cosA < l_cos_flip || face_quality(q0,q1,q2) < 0.01))
+                    if (l_hard_normal && nPre.dot(nPost) <= l_cos_flip)
                         hard_flip = true;
-                }
-                if (l_need_area) {
-                    preArea  += (o1-o0).cross(o2-o0).norm() * 0.5;
-                    postArea += (q1-q0).cross(q2-q0).norm() * 0.5;
                 }
             });
 
             if (hard_flip) {
 #ifdef ML_QEM_LOG
                 if (gMLCostLog && ++gMLRej_hardFlip <= 5)
-                    fprintf(stderr, "[ML-COST-REJECT] hard_flip  e=%d  va=%d vb=%d  minCos=%g\n",
-                            e, va, vb, minCos);
+                    fprintf(stderr, "[ML-COST-REJECT] hard_flip  e=%d  va=%d vb=%d  delta=0.2\n",
+                            e, va, vb);
 #endif
                 cost = kInf; p = RowVectorXd::Zero(3); return;
             }
         }
 
-        // ── hard quality gate ────────────────────────────────────────────────
-        if (cfg.hard_quality_check &&
-            minPostQual < cfg.hard_quality_thr &&
-            minPostQual < minPreQual * 0.9)
+        // ── hard quality gate (paper: Q > 0.2) ──────────────────────────────
+        // Removed: minPostQual < minPreQual * 0.9 condition — not required by the paper.
+        if (cfg.hard_quality_check && minPostQual < cfg.hard_quality_thr)
         {
 #ifdef ML_QEM_LOG
             if (gMLCostLog && ++gMLRej_hardQual <= 5)
                 fprintf(stderr, "[ML-COST-REJECT] hard_quality  e=%d  va=%d vb=%d"
-                        "  postQual=%g  preQual=%g  thr=%g\n",
-                        e, va, vb, minPostQual, minPreQual, cfg.hard_quality_thr);
+                        "  postQual=%g  thr=%g\n",
+                        e, va, vb, minPostQual, cfg.hard_quality_thr);
 #endif
             cost = kInf; p = RowVectorXd::Zero(3); return;
         }
 
-        // ── hard area gate ───────────────────────────────────────────────────
-        if (cfg.area_check && (preArea + postArea) > 1e-30 &&
-            std::abs(preArea - postArea) / (preArea + postArea) > 0.01)
-        {
-#ifdef ML_QEM_LOG
-            if (gMLCostLog && ++gMLRej_areaRatio <= 5)
-                fprintf(stderr, "[ML-COST-REJECT] area_ratio  e=%d  va=%d vb=%d"
-                        "  preArea=%g  postArea=%g\n",
-                        e, va, vb, preArea, postArea);
-#endif
-            cost = kInf; p = RowVectorXd::Zero(3); return;
-        }
+        // ── hard area gate ─ not required by the paper ───────────────────────
+        // Not required by the paper (Neural Subdivision, Hsueh-Ti et al. 2020).
+        // if (cfg.area_check && (preArea + postArea) > 1e-30 &&
+        //     std::abs(preArea - postArea) / (preArea + postArea) > 0.01)
+        // { cost = kInf; p = RowVectorXd::Zero(3); return; }
 
-        // ── soft quality modifier ────────────────────────────────────────────
-        double qualFactor = 1.0;
-        if (cfg.quality_check) {
-            double q_eff = std::max(minPostQual, cfg.quality_thr);
-            q_eff = std::max(q_eff, 1e-6);
-            qualFactor = 1.0 / q_eff;
-        }
+        // ── soft quality modifier ─ not required by the paper ────────────────
+        // Not required by the paper (Neural Subdivision, Hsueh-Ti et al. 2020).
+        // Paper uses a hard veto on Q, not a soft cost penalty.
+        // if (cfg.quality_check) { qualFactor = 1.0 / max(minPostQual, cfg.quality_thr); }
 
-        // ── soft normal modifier ─────────────────────────────────────────────
-        double normFactor = 1.0;
-        if (cfg.normal_check) {
-            double mc = std::max(minCos, cos_normal_thr);
-            mc = std::abs((mc + 1.0) / 2.0);   // remap to [0,1], 0=worst
-            mc = std::max(mc, 1e-6);
-            normFactor = 1.0 / mc;
-        }
+        // ── soft normal modifier ─ not required by the paper ─────────────────
+        // Not required by the paper (Neural Subdivision, Hsueh-Ti et al. 2020).
+        // if (cfg.normal_check) { normFactor = ...; }
 
-        cost = err * qualFactor * normFactor;
-        if (std::isinf(cost) || cost != cost) {
-#ifdef ML_QEM_LOG
-            if (gMLCostLog && ++gMLRej_softNanInf <= 5)
-                fprintf(stderr, "[ML-COST-REJECT] soft_cost_nan_inf  e=%d  va=%d vb=%d"
-                        "  qualFactor=%g  normFactor=%g\n",
-                        e, va, vb, qualFactor, normFactor);
-#endif
-            cost=kInf; p=RowVectorXd::Zero(3); return;
-        }
+        cost = err;  // no soft modifiers; pure QEM error
         p = optPos.transpose().eval();
     };
 
