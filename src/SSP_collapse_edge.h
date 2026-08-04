@@ -163,6 +163,12 @@ void SSP_rej_log_open(const char * path);
 void SSP_rej_log_close();
 FILE * SSP_rej_log_file();  // shared by SSP_collapse_edge and qslim callbacks
 
+// Enable/disable all paper validity checks (UV face flip, UV angle sum,
+// Euclidean face flip, skinny triangle).  Default: enabled.
+// Call SSP_validity_checks_enable(false) from main to turn off via --no-validity-checks.
+void SSP_validity_checks_enable(bool enable);
+bool SSP_validity_checks_enabled();
+
 bool SSP_collapse_edge(
     const decimate_cost_and_placement_func & cost_and_placement,
     const decimate_pre_collapse_func       & pre_collapse,

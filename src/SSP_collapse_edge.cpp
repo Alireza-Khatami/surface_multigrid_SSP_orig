@@ -19,6 +19,11 @@ void SSP_seam_log_close() {
   if (s_seam_log) { fclose(s_seam_log); s_seam_log = nullptr; }
 }
 
+// ---- Validity checks toggle ----
+static bool s_validity_checks = true;
+void SSP_validity_checks_enable(bool e) { s_validity_checks = e; }
+bool SSP_validity_checks_enabled()      { return s_validity_checks; }
+
 // ---- Rejection log (UV + qslim cost rejections) ----
 // Call SSP_rej_log_open(path) once from main (after out_dir is known).
 // SSP_rej_log_file() is also used by SSP_qslim_optimal_collapse_edge_callbacks.
@@ -578,6 +583,8 @@ bool SSP_collapse_edge(
       return false;
     }
 
+    if (!s_validity_checks) goto store_sheet_data;
+
     // ── Paper §4: UV Face Flips (Neural Subdivision, Hsueh-Ti et al. 2020) ──
     // Reject if any post-collapse UV face has non-positive signed area.
     {
@@ -677,6 +684,7 @@ bool SSP_collapse_edge(
       }
     }
 
+    store_sheet_data:
     // Store SheetData
     SheetData sd;
     sd.global_sheet_id = sid;

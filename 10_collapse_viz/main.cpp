@@ -355,8 +355,24 @@ bool do_next_step()
 // ---- main ----
 int main(int argc, char * argv[])
 {
+    // Strip named flags before positional parsing.
+    bool validityChecks = true;
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--no-validity-checks") { validityChecks = false; argv[i] = nullptr; }
+        else if (a == "--validity-checks") { validityChecks = true;  argv[i] = nullptr; }
+    }
+    // Compact argv (remove nulls).
+    int new_argc = 0;
+    for (int i = 0; i < argc; ++i)
+        if (argv[i]) argv[new_argc++] = argv[i];
+    argc = new_argc;
+    SSP_validity_checks_enable(validityChecks);
+    if (!validityChecks)
+        std::cout << "Validity checks: DISABLED (--no-validity-checks)\n";
+
     if (argc < 3) {
-        std::cerr << "usage: collapse_viz_bin  <mesh_path>  <target_faces>  [midpoint|qslim|meshlab]  [n_samples_per_face]  [output_dir]\n";
+        std::cerr << "usage: collapse_viz_bin  <mesh_path>  <target_faces>  [midpoint|qslim|meshlab]  [n_samples_per_face]  [output_dir]  [--no-validity-checks]\n";
         return 1;
     }
     if (argc >= 4) {

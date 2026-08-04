@@ -145,12 +145,13 @@ void SSP_qslim_optimal_collapse_edge_callbacks(
 // #endif
 
     // ── Paper validity checks (Neural Subdivision, Hsueh-Ti et al. 2020) ────────
+    // Skipped when --no-validity-checks is passed on the command line.
     // §4: Euclidean Face Flips  — dot(n_pre, n_post) > δ=0.2
     // §4: Skinny Triangles       — Q > 0.2 for all neighboring faces (Euclidean)
     // UV-domain checks (UV face flips, UV angle sum) are enforced in
     // SSP_collapse_edge.cpp after joint_lscm, where UV_post is available.
     ++s_cost_n;
-    if (!std::isinf(cost))
+    if (!std::isinf(cost) && SSP_validity_checks_enabled())
     {
       ++s_finite_n;
       const Eigen::Vector3d optPos(p(0), p(1), p(2));
