@@ -356,7 +356,7 @@ bool do_next_step()
 int main(int argc, char * argv[])
 {
     if (argc < 3) {
-        std::cerr << "usage: collapse_viz_bin  <mesh_path>  <target_faces>  [midpoint|qslim]\n";
+        std::cerr << "usage: collapse_viz_bin  <mesh_path>  <target_faces>  [midpoint|qslim|meshlab]  [n_samples_per_face]  [output_dir]\n";
         return 1;
     }
     if (argc >= 4) {
@@ -366,6 +366,14 @@ int main(int argc, char * argv[])
         else if (mode == "meshlab")  gDecType = 2;
         else {
             std::cerr << "unknown decimation mode '" << mode << "' — use midpoint, qslim or meshlab\n";
+            return 1;
+        }
+    }
+    int gNSamplesPerFace = 2;
+    if (argc >= 5) {
+        gNSamplesPerFace = std::stoi(argv[4]);
+        if (gNSamplesPerFace < 1) {
+            std::cerr << "n_samples_per_face must be >= 1\n";
             return 1;
         }
     }
@@ -420,15 +428,19 @@ int main(int argc, char * argv[])
         size_t dot = stem.rfind('.');
         if (dot != std::string::npos) stem = stem.substr(0, dot);
     }
-    const std::string c2f_path          = "c2f_"             + stem + ".txt";
-    const std::string bundle_path       = "correspondence_"   + stem + ".c2f";
-    const std::string samples_fine_path = "samples_fine_"     + stem + ".txt";
-    const std::string samples_coarse_path = "samples_coarse_" + stem + ".txt";
+    // Optional output directory (argv[5]); default = current working directory.
+    std::string out_dir = (argc >= 6) ? argv[5] : ".";
+    if (!out_dir.empty() && out_dir.back() != '/' && out_dir.back() != '\\')
+        out_dir += '/';
+    const std::string c2f_path            = out_dir + "c2f_"             + stem + ".txt";
+    const std::string bundle_path         = out_dir + "correspondence_"   + stem + ".c2f";
+    const std::string samples_fine_path   = out_dir + "samples_fine_"     + stem + ".txt";
+    const std::string samples_coarse_path = out_dir + "samples_coarse_"   + stem + ".txt";
 
-    sample_tracker_init(2);
+    sample_tracker_init(gNSamplesPerFace);
 
-    print_seam_edge_costs("seam_edge_costs_" + stem + ".txt");
-    SSP_seam_log_open(("seam_diag_" + stem + ".txt").c_str());
+    print_seam_edge_costs(out_dir + "seam_edge_costs_" + stem + ".txt");
+    SSP_seam_log_open((out_dir + "seam_diag_" + stem + ".txt").c_str());
 
 #ifdef C2F_VIZ_DIAGNOSTIC
     polyscope::init();
@@ -444,7 +456,7 @@ int main(int argc, char * argv[])
     SSP_seam_log_close();
 
     // Export the simplified mesh regardless of how many collapses happened.
-    save_simplified_mesh("simplified_" + stem + ".obj");
+    save_simplified_mesh(out_dir + "simplified_" + stem + ".obj");
 
     // Auto-save on exit regardless of C2F_VIZ_DIAGNOSTIC and regardless of
     // whether decimation reached the target face count.
