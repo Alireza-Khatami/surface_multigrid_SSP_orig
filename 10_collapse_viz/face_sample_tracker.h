@@ -2,9 +2,10 @@
 #include <string>
 #include <Eigen/Dense>
 
-// Seed vertex samples (one per fine mesh vertex) plus n_per_face interior
-// barycentric samples per fine mesh triangle.  Call once after init_ssp().
-void sample_tracker_init(int n_per_face = 2);
+// Seed vertex samples (one per fine mesh vertex) plus n_total interior
+// barycentric samples distributed across fine mesh triangles proportional
+// to face area (larger faces receive more samples).  Call once after init_ssp().
+void sample_tracker_init(int n_total = 2000);
 
 // Remap all samples through the latest entry in gDecInfo.
 // Call immediately after every successful SSP_collapse_edge step.

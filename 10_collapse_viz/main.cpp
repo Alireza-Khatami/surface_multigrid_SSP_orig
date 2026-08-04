@@ -355,40 +355,60 @@ bool do_next_step()
 // ---- main ----
 int main(int argc, char * argv[])
 {
-    // Strip named flags before positional parsing.
-    bool validityChecks = false;
+    // Parse all named arguments; every arg has a default so none are required.
+    std::string meshPath       = "bunny.obj";
+    int         targetFaces    = 285;
+    std::string namedMode;
+    int         gNSamplesTotal = 2000;
+    std::string namedOutDir;
+    bool        validityChecks = false;
+
+
+    //usage    
+    // [--mesh_path PATH]       default: bunny.obj
+    // [--target_faces N]       default: 285
+    // [--mode midpoint|qslim|meshlab]   default: qslim
+    // [--n_samples_total N]    default: 2000
+    // [--output_dir PATH]      default: .
+    // [--validity-checks]
+
+    
     for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--validity-checks") { validityChecks = true; argv[i] = nullptr; }
+        if (!argv[i]) continue;
+        std::string a = argv[i];
+        if (a == "--validity-checks") {
+            validityChecks = true;
+        } else if (i + 1 < argc) {
+            if      (a == "--mesh_path")       meshPath       = argv[i+1];
+            else if (a == "--target_faces")    targetFaces    = std::stoi(argv[i+1]);
+            else if (a == "--mode")            namedMode      = argv[i+1];
+            else if (a == "--n_samples_total") gNSamplesTotal = std::stoi(argv[i+1]);
+            else if (a == "--output_dir")      namedOutDir    = argv[i+1];
+            else { continue; }
+            ++i;
+        }
     }
-    // Compact argv (remove nulls).
-    int new_argc = 0;
-    for (int i = 0; i < argc; ++i)
-        if (argv[i]) argv[new_argc++] = argv[i];
-    argc = new_argc;
+
     SSP_validity_checks_enable(validityChecks);
     std::cout << "Validity checks: " << (validityChecks ? "ENABLED" : "DISABLED") << "\n";
 
-    if (argc < 3) {
-        std::cerr << "usage: collapse_viz_bin  <mesh_path>  <target_faces>  [midpoint|qslim|meshlab]  [n_samples_per_face]  [output_dir]  [--validity-checks]\n";
-        return 1;
-    }
-    if (argc >= 4) {
-        std::string mode = argv[3];
-        if (mode == "midpoint")     gDecType = 0;
-        else if (mode == "qslim")    gDecType = 1;
-        else if (mode == "meshlab")  gDecType = 2;
+    if (!namedMode.empty()) {
+        if      (namedMode == "midpoint") gDecType = 0;
+        else if (namedMode == "qslim")    gDecType = 1;
+        else if (namedMode == "meshlab")  gDecType = 2;
         else {
-            std::cerr << "unknown decimation mode '" << mode << "' — use midpoint, qslim or meshlab\n";
+            std::cerr << "unknown --mode '" << namedMode << "' — use midpoint, qslim or meshlab\n"
+                      << "usage: collapse_viz_bin"
+                         "  [--mesh_path PATH]  [--target_faces N]"
+                         "  [--mode midpoint|qslim|meshlab]"
+                         "  [--n_samples_total N]  [--output_dir PATH]  [--validity-checks]\n";
             return 1;
         }
     }
-    int gNSamplesPerFace = 2;
-    if (argc >= 5) {
-        gNSamplesPerFace = std::stoi(argv[4]);
-        if (gNSamplesPerFace < 1) {
-            std::cerr << "n_samples_per_face must be >= 1\n";
-            return 1;
-        }
+
+    if (gNSamplesTotal < 1) {
+        std::cerr << "--n_samples_total must be >= 1\n";
+        return 1;
     }
 
     if (gDecType == 2) {
@@ -398,7 +418,7 @@ int main(int argc, char * argv[])
             std::cout << "meshlab_qem.ini not found — using defaults\n";
     }
 
-    init_ssp(argv[1], std::stoi(argv[2]));
+    init_ssp(meshPath.c_str(), targetFaces);
     SSP_qslim_enable_log(true);   // activate ML_QEM_LOG output now that init cost pass is done
     if (gDecType == 2)
         meshlab_enable_cost_logging();
@@ -434,15 +454,14 @@ int main(int argc, char * argv[])
     }
 
     // Build output file names from mesh stem: c2f_<stem>.txt, correspondence_<stem>.c2f
-    std::string stem = argv[1];
+    std::string stem = meshPath;
     {
         size_t slash = stem.find_last_of("/\\");
         if (slash != std::string::npos) stem = stem.substr(slash + 1);
         size_t dot = stem.rfind('.');
         if (dot != std::string::npos) stem = stem.substr(0, dot);
     }
-    // Optional output directory (argv[5]); default = current working directory.
-    std::string out_dir = (argc >= 6) ? argv[5] : ".";
+    std::string out_dir = namedOutDir.empty() ? "." : namedOutDir;
     if (!out_dir.empty() && out_dir.back() != '/' && out_dir.back() != '\\')
         out_dir += '/';
     const std::string c2f_path              = out_dir + "c2f_"               + stem + ".txt";
@@ -451,7 +470,7 @@ int main(int argc, char * argv[])
     const std::string samples_coarse_path   = out_dir + "samples_coarse_"     + stem + ".txt";
     const std::string samples_vertices_path = out_dir + "samples_vertices_"   + stem + ".txt";
 
-    sample_tracker_init(gNSamplesPerFace);
+    sample_tracker_init(gNSamplesTotal);
 
     print_seam_edge_costs(out_dir + "seam_edge_costs_" + stem + ".txt");
     SSP_seam_log_open((out_dir + "seam_diag_" + stem + ".txt").c_str());

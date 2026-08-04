@@ -72,7 +72,7 @@ static void fs_remove(int fi, int si)
 
 // ---- public API ----
 
-void sample_tracker_init(int n_per_face)
+void sample_tracker_init(int n_total)
 {
     gSamples.clear();
     gFaceSamples.clear();
@@ -116,37 +116,52 @@ void sample_tracker_init(int n_per_face)
         gSamples.push_back(s);
     }
 
-    // --- interior barycentric samples ---
+    // --- interior barycentric samples (area-weighted) ---
+    // Build CDF over face areas so larger faces receive proportionally more samples.
+    std::vector<double> area_cdf(nFO);
+    for (int fi = 0; fi < nFO; fi++) {
+        Vector3d v0 = gVO.row(gFO(fi, 0));
+        Vector3d v1 = gVO.row(gFO(fi, 1));
+        Vector3d v2 = gVO.row(gFO(fi, 2));
+        area_cdf[fi] = 0.5 * (v1 - v0).cross(v2 - v0).norm();
+        if (fi > 0) area_cdf[fi] += area_cdf[fi - 1];
+    }
+    const double total_area = area_cdf.back();
+
     std::mt19937 rng(1234);
     std::uniform_real_distribution<double> U(0.0, 1.0);
 
-    for (int fi = 0; fi < nFO; fi++) {
+    for (int k = 0; k < n_total; k++) {
+        // Pick a face proportional to area via binary search on the CDF.
+        double t = U(rng) * total_area;
+        int fi = (int)(std::lower_bound(area_cdf.begin(), area_cdf.end(), t) - area_cdf.begin());
+        if (fi >= nFO) fi = nFO - 1;
+
         RowVector3i bf;
         bf << gFO(fi,0), gFO(fi,1), gFO(fi,2);
 
-        for (int k = 0; k < n_per_face; k++) {
-            double r1 = U(rng), r2 = U(rng);
-            if (r1 + r2 > 1.0) { r1 = 1.0 - r1; r2 = 1.0 - r2; }
-            RowVector3d bc;
-            bc << r1, r2, 1.0 - r1 - r2;
+        // Uniform sampling inside the triangle (Osada et al.).
+        double r1 = U(rng), r2 = U(rng);
+        if (r1 + r2 > 1.0) { r1 = 1.0 - r1; r2 = 1.0 - r2; }
+        RowVector3d bc;
+        bc << r1, r2, 1.0 - r1 - r2;
 
-            Sample s;
-            s.id             = id++;
-            s.is_vertex      = false;
-            s.fine_vertex_id = -1;
-            s.fine_face_id   = fi;
-            s.fine_BC        = bc;
-            s.cur_FIdx       = fi;
-            s.cur_BC         = bc;
-            s.cur_BF         = bf;
-            fs_insert(fi, (int)gSamples.size());
-            gSamples.push_back(s);
-        }
+        Sample s;
+        s.id             = id++;
+        s.is_vertex      = false;
+        s.fine_vertex_id = -1;
+        s.fine_face_id   = fi;
+        s.fine_BC        = bc;
+        s.cur_FIdx       = fi;
+        s.cur_BC         = bc;
+        s.cur_BF         = bf;
+        fs_insert(fi, (int)gSamples.size());
+        gSamples.push_back(s);
     }
 
     fprintf(stderr,
-        "[sample_tracker] init: %d samples (%d vertex + %d interior)  nFO=%d  nVO=%d\n",
-        id, nVO, nFO * n_per_face, nFO, nVO);
+        "[sample_tracker] init: %d samples (%d vertex + %d interior area-weighted)  nFO=%d  nVO=%d  total_area=%.4g\n",
+        id, nVO, n_total, nFO, nVO, total_area);
 }
 
 void sample_tracker_update()
