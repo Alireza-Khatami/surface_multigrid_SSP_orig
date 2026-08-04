@@ -432,10 +432,11 @@ int main(int argc, char * argv[])
     std::string out_dir = (argc >= 6) ? argv[5] : ".";
     if (!out_dir.empty() && out_dir.back() != '/' && out_dir.back() != '\\')
         out_dir += '/';
-    const std::string c2f_path            = out_dir + "c2f_"             + stem + ".txt";
-    const std::string bundle_path         = out_dir + "correspondence_"   + stem + ".c2f";
-    const std::string samples_fine_path   = out_dir + "samples_fine_"     + stem + ".txt";
-    const std::string samples_coarse_path = out_dir + "samples_coarse_"   + stem + ".txt";
+    const std::string c2f_path              = out_dir + "c2f_"               + stem + ".txt";
+    const std::string bundle_path           = out_dir + "correspondence_"     + stem + ".c2f";
+    const std::string samples_fine_path     = out_dir + "samples_fine_"       + stem + ".txt";
+    const std::string samples_coarse_path   = out_dir + "samples_coarse_"     + stem + ".txt";
+    const std::string samples_vertices_path = out_dir + "samples_vertices_"   + stem + ".txt";
 
     sample_tracker_init(gNSamplesPerFace);
 
@@ -465,7 +466,7 @@ int main(int argc, char * argv[])
         coarse_fine_save_bundle(c2f_path, bundle_path);
     }
 
-    sample_tracker_save(samples_fine_path, samples_coarse_path);
+    sample_tracker_save(samples_fine_path, samples_coarse_path, samples_vertices_path);
 
     return 0;
 }

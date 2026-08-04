@@ -11,6 +11,8 @@ Mirrors 11_correspond_viz/ (C++ with Polyscope):
   - Convex hull of the fine sample points drawn as a teal patch
   - Sample-tracker overlay: loads samples_fine_*.txt / samples_coarse_*.txt
     produced by 10_collapse_viz, shows forward-tracked coarse->fine correspondence
+  - Vertex-tracker overlay: loads samples_vertices_*.txt, shows original fine
+    vertices tracked to their coarse correspondences
 
 Usage:
     python c2f_viz.py  <bundle.c2f>
@@ -27,6 +29,7 @@ import numpy as np
 import polyscope as ps
 import polyscope.imgui as psim
 from scipy.spatial import ConvexHull, QhullError
+import trimesh
 
 from c2f_query import load_bundle, query_coarse_to_fine
 
@@ -45,9 +48,12 @@ TRACKER_FINE        = "tracker_fine"
 TRACKER_COARSE      = "tracker_coarse"
 FACE_TRACKER_FINE   = "face_tracker_fine"
 FACE_TRACKER_COARSE = "face_tracker_coarse"
+TRACKER_VTX_FINE    = "vtx_tracker_fine"
+TRACKER_VTX_COARSE  = "vtx_tracker_coarse"
 
 # ---- mutable global state ----
 _bundle             = None
+_bundle_dir         = ""   # directory containing the loaded .c2f file
 
 _z_offset           = 1.0
 _sample_step        = 1
@@ -56,8 +62,8 @@ _selected_sample    = -1
 _selected_face      = -1
 
 _face_n             = 20
-_show_face_coarse   = True
-_show_face_fine     = True
+_show_face_coarse   = False
+_show_face_fine     = False
 
 _coarse_pc          = None
 _fine_pc            = None
@@ -73,6 +79,12 @@ _tracker_fine_pts    = None   # (N,3)  fine-mesh 3D positions
 _tracker_coarse_pts  = None   # (N,3)  coarse-mesh 3D positions (no Z offset)
 _tracker_coarse_fids = None   # (N,)   global gF face index per sample
 _show_tracker        = True
+
+# Vertex-tracker data (from samples_vertices_*.txt)
+_tracker_vtx_fine_pts   = None   # (Nv,3)  original fine vertex positions
+_tracker_vtx_coarse_pts = None   # (Nv,3)  coarse correspondence positions (no Z offset)
+_show_vtx_tracker        = True
+_deformed_fine_pts       = None   # (nFineV,3)  fineV with positions replaced by coarse corr.
 
 
 # ---------------------------------------------------------------------------
@@ -153,15 +165,15 @@ def rebuild_sample_viz():
         arr[2]        -= _z_offset
         arrow_vecs[j]  = arr
 
-    _coarse_pc = ps.register_point_cloud(SAMPLE_COARSE, coarse_pts)
-    _coarse_pc.set_color((1.0, 0.85, 0.0))
-    _coarse_pc.set_radius(0.006, relative=True)
-    _coarse_pc.add_vector_quantity("to_fine", arrow_vecs,
-        vectortype="ambient", enabled=_show_arrows, color=(1.0, 0.35, 0.05))
+    # _coarse_pc = ps.register_point_cloud(SAMPLE_COARSE, coarse_pts)
+    # _coarse_pc.set_color((1.0, 0.85, 0.0))
+    # _coarse_pc.set_radius(0.006, relative=True)
+    # _coarse_pc.add_vector_quantity("to_fine", arrow_vecs,
+    #     vectortype="ambient", enabled=_show_arrows, color=(1.0, 0.35, 0.05))
 
-    _fine_pc = ps.register_point_cloud(SAMPLE_FINE, fine_pts)
-    _fine_pc.set_color((0.15, 0.85, 0.40))
-    _fine_pc.set_radius(0.006, relative=True)
+    # _fine_pc = ps.register_point_cloud(SAMPLE_FINE, fine_pts)
+    # _fine_pc.set_color((0.15, 0.85, 0.40))
+    # _fine_pc.set_radius(0.006, relative=True)
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +419,82 @@ def load_tracker_samples(bundle_path: str):
     _tracker_coarse_fids = coarse_data[:N, 2].astype(np.int32)
 
 
+def load_vertex_tracker(bundle_path: str):
+    """
+    Auto-discover samples_vertices_*.txt next to the bundle.
+    Format per row: fine_vertex_id  coarse_face_id  b0 b1 b2  bv0 bv1 bv2
+    Fine positions come directly from fineV[fine_vertex_id].
+    Coarse positions are interpolated using the inverse vtxMap.
+    """
+    global _tracker_vtx_fine_pts, _tracker_vtx_coarse_pts
+
+    bundle_dir = os.path.dirname(os.path.abspath(bundle_path))
+    vtx_files  = sorted(glob.glob(os.path.join(bundle_dir, "samples_vertices_*.txt")))
+
+    if not vtx_files:
+        print("[vtx_tracker] No samples_vertices_*.txt found in", bundle_dir)
+        return
+
+    print(f"[vtx_tracker] Loading {os.path.basename(vtx_files[0])}")
+
+    rows = []
+    with open(vtx_files[0]) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split()
+            if len(parts) == 1:
+                continue
+            rows.append([float(x) for x in parts[:8]])
+
+    if not rows:
+        print("[vtx_tracker] Empty vertex file — skipping.")
+        return
+
+    data = np.array(rows, dtype=np.float64)
+    N    = len(data)
+    print(f"[vtx_tracker] {N} vertex tracks")
+
+    # Fine positions: fine_vertex_id indexes directly into fineV
+    fine_ids = data[:, 0].astype(np.int32)
+    _tracker_vtx_fine_pts = _bundle.fineV[fine_ids]
+
+    # Coarse positions: bv0/bv1/bv2 are global gV indices
+    if not _bundle.has_ssp_data or _bundle.vtxMap is None:
+        print("[vtx_tracker] Bundle has no vtxMap — cannot map coarse positions.")
+        return
+
+    gv_to_cv = {int(_bundle.vtxMap[i]): i for i in range(len(_bundle.vtxMap))}
+    coarseV  = _bundle.coarseV
+    bc       = data[:, 2:5]
+    bv0      = data[:, 5].astype(np.int32)
+    bv1      = data[:, 6].astype(np.int32)
+    bv2      = data[:, 7].astype(np.int32)
+    cv0 = np.array([gv_to_cv.get(int(v), 0) for v in bv0], dtype=np.int32)
+    cv1 = np.array([gv_to_cv.get(int(v), 0) for v in bv1], dtype=np.int32)
+    cv2 = np.array([gv_to_cv.get(int(v), 0) for v in bv2], dtype=np.int32)
+    _tracker_vtx_coarse_pts = (bc[:, 0:1] * coarseV[cv0]
+                              + bc[:, 1:2] * coarseV[cv1]
+                              + bc[:, 2:3] * coarseV[cv2])
+
+    # Build deformed fine mesh: fineV-indexed array where each vertex is replaced
+    # by its coarse correspondence.  Unreferenced vertices fall back to fineV.
+    global _deformed_fine_pts
+    _deformed_fine_pts = _bundle.fineV.copy()
+    _deformed_fine_pts[fine_ids] = _tracker_vtx_coarse_pts
+
+
+def export_deformed_fine_mesh(out_path: str):
+    if _deformed_fine_pts is None:
+        print("[export] No vertex tracker data loaded — cannot export.")
+        return
+    mesh = trimesh.Trimesh(vertices=_deformed_fine_pts, faces=_bundle.fineF, process=False)
+    mesh.export(out_path)
+    print(f"[export] Deformed fine mesh -> {out_path}  "
+          f"({len(_deformed_fine_pts)} verts, {len(_bundle.fineF)} faces)")
+
+
 def rebuild_tracker_viz():
     """Global tracker overlay, subsampled by _sample_step."""
     for name in (TRACKER_FINE, TRACKER_COARSE):
@@ -435,6 +523,34 @@ def rebuild_tracker_viz():
     pc_f.set_color((0.25, 0.90, 0.45))
     pc_f.set_radius(0.0035, relative=True)
     pc_f.set_enabled(_show_tracker)
+
+
+def rebuild_vtx_tracker_viz():
+    """Vertex-tracker overlay: original fine vertices -> coarse correspondences."""
+    for name in (TRACKER_VTX_FINE, TRACKER_VTX_COARSE):
+        if ps.has_point_cloud(name):
+            ps.remove_point_cloud(name)
+
+    if _tracker_vtx_fine_pts is None or _tracker_vtx_coarse_pts is None:
+        return
+
+    coarse_pts = _tracker_vtx_coarse_pts.copy()
+    coarse_pts[:, 2] += _z_offset
+    arrows = _tracker_vtx_fine_pts - coarse_pts
+
+    pc_c = ps.register_point_cloud(TRACKER_VTX_COARSE, coarse_pts)
+    pc_c.set_color((0.20, 0.70, 1.00))
+    pc_c.set_radius(0.004, relative=True)
+    pc_c.set_enabled(_show_vtx_tracker)
+    pc_c.add_vector_quantity("to_fine", arrows,
+                             vectortype="ambient",
+                             enabled=_show_vtx_tracker,
+                             color=(1.0, 0.80, 0.10))
+
+    pc_f = ps.register_point_cloud(TRACKER_VTX_FINE, _tracker_vtx_fine_pts)
+    pc_f.set_color((1.00, 0.35, 0.10))
+    pc_f.set_radius(0.004, relative=True)
+    pc_f.set_enabled(_show_vtx_tracker)
 
 
 def rebuild_face_tracker_viz():
@@ -479,8 +595,9 @@ def rebuild_all():
     rebuild_coarse_viz()
     rebuild_sample_viz()
     rebuild_selection_viz()
-    rebuild_face_sample_viz()
+    # rebuild_face_sample_viz()
     rebuild_tracker_viz()
+    rebuild_vtx_tracker_viz()
     rebuild_face_tracker_viz()
 
 
@@ -492,13 +609,13 @@ def ui_callback():
     global _z_offset, _sample_step, _show_arrows
     global _selected_sample, _selected_face
     global _face_n, _show_face_coarse, _show_face_fine
-    global _show_tracker
+    global _show_tracker, _show_vtx_tracker
 
     NC      = _bundle.coarseV.shape[0]
     changed = False
 
     try:
-        psim.SetNextWindowSize((350, 320), psim.ImGuiCond_FirstUseEver)
+        psim.SetNextWindowSize((350, 420), psim.ImGuiCond_FirstUseEver)
     except Exception:
         pass
     psim.Begin("Correspondence", True)
@@ -537,10 +654,10 @@ def ui_callback():
     psim.TextUnformatted("Face sampling  (click a coarse face)")
 
     c, v = psim.SliderInt("n samples", _face_n, 1, 200)
-    if c:
-        _face_n = max(1, v)
-        if _selected_face >= 0:
-            rebuild_face_sample_viz()
+    # if c:
+    #     _face_n = max(1, v)
+    #     if _selected_face >= 0:
+    #         rebuild_face_sample_viz()
 
     vis_changed = False
     c, v = psim.Checkbox("coarse samples", _show_face_coarse)
@@ -560,7 +677,7 @@ def ui_callback():
         psim.TextUnformatted(f"Face {_selected_face}  |  {_face_n} samples")
         if psim.Button("Clear face"):
             _selected_face = -1
-            rebuild_face_sample_viz()
+            # rebuild_face_sample_viz()
             rebuild_face_tracker_viz()
 
     psim.Separator()
@@ -574,6 +691,20 @@ def ui_callback():
             rebuild_tracker_viz()
     else:
         psim.TextUnformatted("(no sample files found)")
+
+    psim.Separator()
+    psim.TextUnformatted("Vertex tracker  (samples_vertices_*.txt)")
+    if _tracker_vtx_fine_pts is not None:
+        psim.TextUnformatted(f"{len(_tracker_vtx_fine_pts)} fine vertices tracked")
+        c, v = psim.Checkbox("Show vtx tracker", _show_vtx_tracker)
+        if c:
+            _show_vtx_tracker = v
+            rebuild_vtx_tracker_viz()
+        if psim.Button("Export deformed fine mesh"):
+            out_path = os.path.join(_bundle_dir, "deformed_fine_mesh.obj")
+            export_deformed_fine_mesh(out_path)
+    else:
+        psim.TextUnformatted("(no samples_vertices_*.txt found)")
 
     psim.End()
 
@@ -600,7 +731,7 @@ def ui_callback():
                 nF    = _bundle.coarseF.shape[0]
                 if etype == 'face' and 0 <= fidx < nF and fidx != _selected_face:
                     _selected_face = fidx
-                    rebuild_face_sample_viz()
+                    # rebuild_face_sample_viz()
                     rebuild_face_tracker_viz()
 
 
@@ -609,10 +740,11 @@ def ui_callback():
 # ---------------------------------------------------------------------------
 
 def main():
-    global _bundle
+    global _bundle, _bundle_dir
 
-    c2f_path = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\c2f_bundle.c2f"
-    _bundle  = load_bundle(c2f_path)
+    c2f_path   = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\c2f_bundle.c2f"
+    _bundle_dir = os.path.dirname(os.path.abspath(c2f_path))
+    _bundle    = load_bundle(c2f_path)
     print(f"Coarse: {_bundle.coarseV.shape[0]} verts  {_bundle.coarseF.shape[0]} faces")
     print(f"Fine:   {_bundle.fineV.shape[0]} verts  {_bundle.fineF.shape[0]} faces")
     if _bundle.has_ssp_data:
@@ -620,6 +752,7 @@ def main():
               f"{len(_bundle.decIM)} tracked faces")
 
     load_tracker_samples(c2f_path)
+    load_vertex_tracker(c2f_path)
 
     ps.init()
     ps.set_program_name("Coarse-to-Fine Correspondence")

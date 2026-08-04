@@ -32,6 +32,7 @@ extern std::vector<single_collapse_data> gDecInfo;
 struct Sample {
     int         id;
     bool        is_vertex;
+    int         fine_vertex_id; // gVO vertex index for vertex samples; -1 for interior
     // Frozen at seeding time (fine mesh):
     int         fine_face_id;  // gFO face index
     RowVector3d fine_BC;
@@ -103,13 +104,14 @@ void sample_tracker_init(int n_per_face)
         bf << gFO(fi,0), gFO(fi,1), gFO(fi,2);
 
         Sample s;
-        s.id           = id++;
-        s.is_vertex    = true;
-        s.fine_face_id = fi;
-        s.fine_BC      = bc;
-        s.cur_FIdx     = fi;
-        s.cur_BC       = bc;
-        s.cur_BF       = bf;
+        s.id             = id++;
+        s.is_vertex      = true;
+        s.fine_vertex_id = vi;
+        s.fine_face_id   = fi;
+        s.fine_BC        = bc;
+        s.cur_FIdx       = fi;
+        s.cur_BC         = bc;
+        s.cur_BF         = bf;
         fs_insert(fi, (int)gSamples.size());
         gSamples.push_back(s);
     }
@@ -129,13 +131,14 @@ void sample_tracker_init(int n_per_face)
             bc << r1, r2, 1.0 - r1 - r2;
 
             Sample s;
-            s.id           = id++;
-            s.is_vertex    = false;
-            s.fine_face_id = fi;
-            s.fine_BC      = bc;
-            s.cur_FIdx     = fi;
-            s.cur_BC       = bc;
-            s.cur_BF       = bf;
+            s.id             = id++;
+            s.is_vertex      = false;
+            s.fine_vertex_id = -1;
+            s.fine_face_id   = fi;
+            s.fine_BC        = bc;
+            s.cur_FIdx       = fi;
+            s.cur_BC         = bc;
+            s.cur_BF         = bf;
             fs_insert(fi, (int)gSamples.size());
             gSamples.push_back(s);
         }
@@ -235,7 +238,8 @@ void sample_tracker_update()
 }
 
 void sample_tracker_save(const std::string& fine_path,
-                         const std::string& coarse_path)
+                         const std::string& coarse_path,
+                         const std::string& vertices_path)
 {
     if (gSamples.empty()) {
         fprintf(stderr, "[sample_tracker] no samples to save\n");
@@ -269,6 +273,26 @@ void sample_tracker_save(const std::string& fine_path,
                   << " " << s.cur_BF(0) << " " << s.cur_BF(1) << " " << s.cur_BF(2) << "\n";
             fprintf(stderr, "[sample_tracker] wrote %zu coarse correspondences → %s\n",
                     gSamples.size(), coarse_path.c_str());
+        }
+    }
+    {
+        // One row per original fine-mesh vertex: fine_vertex_id + coarse correspondence.
+        std::vector<const Sample*> vtx_samples;
+        for (const Sample& s : gSamples)
+            if (s.is_vertex) vtx_samples.push_back(&s);
+
+        std::ofstream f(vertices_path);
+        if (!f) {
+            fprintf(stderr, "[sample_tracker] cannot write %s\n", vertices_path.c_str());
+        } else {
+            f << "# fine_vertex_id coarse_face_id b0 b1 b2 bv0 bv1 bv2\n";
+            f << vtx_samples.size() << "\n";
+            for (const Sample* s : vtx_samples)
+                f << s->fine_vertex_id << " " << s->cur_FIdx
+                  << " " << s->cur_BC(0) << " " << s->cur_BC(1) << " " << s->cur_BC(2)
+                  << " " << s->cur_BF(0) << " " << s->cur_BF(1) << " " << s->cur_BF(2) << "\n";
+            fprintf(stderr, "[sample_tracker] wrote %zu vertex tracks → %s\n",
+                    vtx_samples.size(), vertices_path.c_str());
         }
     }
 }
@@ -309,6 +333,41 @@ void sample_tracker_show()
         ->setPointColor({0.9f, 0.4f, 0.2f})
         ->setPointRadius(0.0005, true)
         ->setEnabled(true);
+#endif
+}
+
+void sample_tracker_show_vertices()
+{
+#ifdef C2F_VIZ_DIAGNOSTIC
+    // Collect vertex-only samples
+    std::vector<const Sample*> vsamps;
+    for (const Sample& s : gSamples)
+        if (s.is_vertex) vsamps.push_back(&s);
+    if (vsamps.empty()) return;
+
+    const int nV = (int)vsamps.size();
+    MatrixXd finePts(nV, 3), coarsePts(nV, 3), arrows(nV, 3);
+    for (int i = 0; i < nV; i++) {
+        const Sample& s = *vsamps[i];
+        // Fine position: directly from original vertex (no BC interpolation needed)
+        RowVector3d fp = gVO.row(s.fine_vertex_id);
+        // Coarse position: interpolate with live BC + vertex indices
+        RowVector3d cp =
+            s.cur_BC(0) * gV.row(s.cur_BF(0)).leftCols(3)
+          + s.cur_BC(1) * gV.row(s.cur_BF(1)).leftCols(3)
+          + s.cur_BC(2) * gV.row(s.cur_BF(2)).leftCols(3);
+        finePts.row(i)  = fp;
+        coarsePts.row(i) = cp;
+        arrows.row(i)   = cp - fp;
+    }
+
+    auto* pc_fine = polyscope::registerPointCloud("vtx_fine_pts", finePts);
+    pc_fine->setPointColor({0.2f, 0.7f, 1.0f})->setPointRadius(0.0008, true)->setEnabled(true);
+    pc_fine->addVectorQuantity("to_coarse", arrows, polyscope::VectorType::AMBIENT)
+           ->setVectorColor({1.0f, 0.8f, 0.1f})->setEnabled(true);
+
+    polyscope::registerPointCloud("vtx_coarse_pts", coarsePts)
+        ->setPointColor({1.0f, 0.35f, 0.1f})->setPointRadius(0.0008, true)->setEnabled(true);
 #endif
 }
 

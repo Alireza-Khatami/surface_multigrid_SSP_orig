@@ -575,6 +575,7 @@ void update_display()
     }
 
     sample_tracker_show();
+    sample_tracker_show_vertices();
 
     if (!gSnap.valid) return;
 
