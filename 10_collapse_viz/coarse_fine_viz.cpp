@@ -8,6 +8,7 @@
 #include <polyscope/pick.h>
 
 #include <igl/collapse_edge.h>       // IGL_COLLAPSE_EDGE_NULL
+#include <igl/writeOBJ.h>
 #include "face_dead.h"
 
 #include <query_coarse_to_fine.h>
@@ -751,6 +752,26 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
     std::cerr << "[bundle] Saved NC=" << NC << " FC=" << FC
               << " NF=" << NF << " FF=" << FF
               << " nDec=" << nDec << " → " << bundlePath << "\n";
+
+    // Export the coarse mesh as OBJ alongside the bundle.
+    {
+        std::string objPath = bundlePath;
+        size_t dot = objPath.rfind('.');
+        if (dot != std::string::npos) objPath = objPath.substr(0, dot);
+        objPath += ".obj";
+
+        MatrixXd Vc(NC, 3);
+        for (uint32_t i = 0; i < NC; i++)
+            Vc.row(i) << gV(newToOld[i],0), gV(newToOld[i],1), gV(newToOld[i],2);
+        MatrixXi Fc(FC, 3);
+        for (int f = 0; f < (int)FC; f++)
+            Fc.row(f) << oldToNew[fullF(f,0)], oldToNew[fullF(f,1)], oldToNew[fullF(f,2)];
+
+        if (!igl::writeOBJ(objPath, Vc, Fc))
+            std::cerr << "[bundle] writeOBJ failed: " << objPath << "\n";
+        else
+            std::cerr << "[bundle] coarse mesh OBJ → " << objPath << "\n";
+    }
 }
 
 void coarse_fine_clear()
