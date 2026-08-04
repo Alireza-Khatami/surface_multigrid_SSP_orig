@@ -6,6 +6,7 @@
 // v. 2.0. If a copy of the MPL was not distributed with this file, You can
 // obtain one at http://mozilla.org/MPL/2.0/.
 #include "SSP_qslim_optimal_collapse_edge_callbacks.h"
+#include "SSP_collapse_edge.h"  // SSP_rej_log_file()
 #include <igl/collapse_edge.h>  // IGL_COLLAPSE_EDGE_NULL
 #include <Eigen/LU>
 #include <cstdio>
@@ -16,10 +17,7 @@ static bool s_qslim_log_enabled = false;
 void SSP_qslim_enable_log(bool enable) { s_qslim_log_enabled = enable; }
 
 // ── Rejection diagnostics (always active, no macro gate) ─────────────────
-static FILE* rej_log() {
-    static FILE* fp = fopen("collapse_rejections_log.txt", "a");
-    return fp;
-}
+// File is owned by SSP_collapse_edge.cpp; opened via SSP_rej_log_open() in main.
 static int s_cost_n      = 0;  // total cost_fn calls
 static int s_finite_n    = 0;  // calls where cost was finite before validity checks
 static int s_flip_rej_n  = 0;  // rejected by Euclidean face flip
@@ -209,7 +207,7 @@ void SSP_qslim_optimal_collapse_edge_callbacks(
       if (reject)
       {
         if (reject_was_flip) ++s_flip_rej_n; else ++s_qual_rej_n;
-        FILE* lf = rej_log();
+        FILE* lf = SSP_rej_log_file();
         const int total_rej = s_flip_rej_n + s_qual_rej_n;
         if (lf && total_rej <= 200)  // cap file entries
           fprintf(lf, "[QSLIM-REJECT] reason=%-10s  e=%d  va=%d  vb=%d  fi=%d"

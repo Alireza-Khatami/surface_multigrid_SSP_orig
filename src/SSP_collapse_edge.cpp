@@ -18,6 +18,19 @@ void SSP_seam_log_open(const char * path) {
 void SSP_seam_log_close() {
   if (s_seam_log) { fclose(s_seam_log); s_seam_log = nullptr; }
 }
+
+// ---- Rejection log (UV + qslim cost rejections) ----
+// Call SSP_rej_log_open(path) once from main (after out_dir is known).
+// SSP_rej_log_file() is also used by SSP_qslim_optimal_collapse_edge_callbacks.
+static FILE * s_rej_log = nullptr;
+void SSP_rej_log_open(const char * path) {
+  if (s_rej_log) fclose(s_rej_log);
+  s_rej_log = path ? fopen(path, "w") : nullptr;
+}
+void SSP_rej_log_close() {
+  if (s_rej_log) { fclose(s_rej_log); s_rej_log = nullptr; }
+}
+FILE * SSP_rej_log_file() { return s_rej_log; }
 #define SEAM_LOG(fmt, ...) fprintf(s_seam_log ? s_seam_log : stderr, fmt, __VA_ARGS__)
 
 // ============================================================
@@ -579,8 +592,8 @@ bool SSP_collapse_edge(
       if (uv_flip) {
         fprintf(stderr, "[UV-REJECT] uv_face_flip  sid=%d  e=(%d,%d)\n",
                 sid, E(e,0), E(e,1));
-        if (FILE* lf = fopen("collapse_rejections_log.txt", "a"))
-        { fprintf(lf, "[UV-REJECT] uv_face_flip  sid=%d  e=(%d,%d)\n", sid, E(e,0), E(e,1)); fclose(lf); }
+        if (FILE* lf = SSP_rej_log_file())
+          fprintf(lf, "[UV-REJECT] uv_face_flip  sid=%d  e=(%d,%d)\n", sid, E(e,0), E(e,1));
         return false;
       }
     }
@@ -607,6 +620,7 @@ bool SSP_collapse_edge(
       bool bad_angle = false;
       int  bad_angle_v = -1;
       double bad_angle_sum = 0.0;
+      int  bad_angle_nfaces = 0;  // faces actually containing bad_v
       static constexpr double kTwoPi = 6.283185307179586;
       int n_interior = 0;
       for (int v = 0; v < nUV && !bad_angle; ++v) {
@@ -614,6 +628,7 @@ bool SSP_collapse_edge(
         ++n_interior;
         double angle_sum = 0.0;
         bool degenerate = false;
+        int nfaces_v = 0;  // how many faces in FUV_post_si reference this v
         for (int fi = 0; fi < nFuv; ++fi) {
           int vb_idx = -1, vc_idx = -1;
           for (int c = 0; c < 3; ++c) {
@@ -624,17 +639,19 @@ bool SSP_collapse_edge(
             }
           }
           if (vb_idx < 0) continue;
+          ++nfaces_v;
           Eigen::Vector2d pa(UV_post_si(v,0),      UV_post_si(v,1));
           Eigen::Vector2d pb(UV_post_si(vb_idx,0), UV_post_si(vb_idx,1));
           Eigen::Vector2d pc(UV_post_si(vc_idx,0), UV_post_si(vc_idx,1));
           Eigen::Vector2d e1 = pb - pa, e2 = pc - pa;
           double l1 = e1.norm(), l2 = e2.norm();
-          if (l1 < 1e-15 || l2 < 1e-15) { degenerate = true; bad_angle = true; bad_angle_v = v; break; }
+          if (l1 < 1e-15 || l2 < 1e-15) { degenerate = true; bad_angle = true; bad_angle_v = v; bad_angle_nfaces = nfaces_v; break; }
           double cos_a = std::max(-1.0, std::min(1.0, e1.dot(e2) / (l1*l2)));
           angle_sum += std::acos(cos_a);
         }
-        if (!degenerate && std::abs(angle_sum - kTwoPi) > 1e-15)
-        { bad_angle = true; bad_angle_v = v; bad_angle_sum = angle_sum; }
+        if (nfaces_v == 0) continue;  // orphaned UV vertex: not referenced by any face, skip
+        if (!degenerate && std::abs(angle_sum - kTwoPi) > 1e-3)
+        { bad_angle = true; bad_angle_v = v; bad_angle_sum = angle_sum; bad_angle_nfaces = nfaces_v; }
       }
       if (bad_angle) {
         static int s_angle_rej = 0;
@@ -643,20 +660,18 @@ bool SSP_collapse_edge(
           fprintf(stderr,
             "[UV-REJECT] uv_angle_sum  sid=%d  e=(%d,%d)"
             "  bad_v=%d  angle_sum=%.6f  diff_from_2pi=%.6f"
-            "  n_interior=%d  nUV=%d  nFuv=%d  (reject#%d)\n",
+            "  n_interior=%d  nUV=%d  nFuv=%d  nfaces_for_bad_v=%d  (reject#%d)\n",
             sid, E(e,0), E(e,1),
             bad_angle_v, bad_angle_sum, bad_angle_sum - kTwoPi,
-            n_interior, nUV, nFuv, s_angle_rej);
-          if (FILE* lf = fopen("collapse_rejections_log.txt", "a")) {
+            n_interior, nUV, nFuv, bad_angle_nfaces, s_angle_rej);
+          if (FILE* lf = SSP_rej_log_file())
             fprintf(lf,
               "[UV-REJECT] uv_angle_sum  sid=%d  e=(%d,%d)"
               "  bad_v=%d  angle_sum=%.6f  diff_from_2pi=%.6f"
-              "  n_interior=%d  nUV=%d  nFuv=%d\n",
+              "  n_interior=%d  nUV=%d  nFuv=%d  nfaces_for_bad_v=%d\n",
               sid, E(e,0), E(e,1),
               bad_angle_v, bad_angle_sum, bad_angle_sum - kTwoPi,
-              n_interior, nUV, nFuv);
-            fclose(lf);
-          }
+              n_interior, nUV, nFuv, bad_angle_nfaces);
         }
         return false;
       }

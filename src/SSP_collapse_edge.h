@@ -159,6 +159,10 @@ bool SSP_collapse_edge(
 void SSP_seam_log_open(const char * path);
 void SSP_seam_log_close();
 
+void SSP_rej_log_open(const char * path);
+void SSP_rej_log_close();
+FILE * SSP_rej_log_file();  // shared by SSP_collapse_edge and qslim callbacks
+
 bool SSP_collapse_edge(
     const decimate_cost_and_placement_func & cost_and_placement,
     const decimate_pre_collapse_func       & pre_collapse,

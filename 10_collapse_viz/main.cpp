@@ -442,6 +442,7 @@ int main(int argc, char * argv[])
 
     print_seam_edge_costs(out_dir + "seam_edge_costs_" + stem + ".txt");
     SSP_seam_log_open((out_dir + "seam_diag_" + stem + ".txt").c_str());
+    SSP_rej_log_open ((out_dir + "collapse_rejections_" + stem + ".txt").c_str());
 
 #ifdef C2F_VIZ_DIAGNOSTIC
     polyscope::init();
@@ -455,6 +456,7 @@ int main(int argc, char * argv[])
 #endif
 
     SSP_seam_log_close();
+    SSP_rej_log_close();
 
     // Export the simplified mesh regardless of how many collapses happened.
     save_simplified_mesh(out_dir + "simplified_" + stem + ".obj");
