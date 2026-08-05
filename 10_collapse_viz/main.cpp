@@ -88,7 +88,7 @@ static decimate_pre_collapse_func       gPreFn;
 static decimate_post_collapse_func      gPostFn;
 
 // ---- init ----
-static void init_ssp(const std::string & mesh_path, int tarF)
+static void init_ssp(const std::string & mesh_path, int tarF, const std::string & out_dir)
 {
     MatrixXd VO; MatrixXi FO;
     igl::read_triangle_mesh(mesh_path, VO, FO);
@@ -106,6 +106,17 @@ static void init_ssp(const std::string & mesh_path, int tarF)
         FO = FF;
         std::cout << "orient_faces_consistently: " << n_flipped
                   << " / " << FO.rows() << " faces re-wound\n";
+
+        // Export the consistently-oriented mesh so the re-winding can be inspected.
+        std::string stem = mesh_path;
+        { size_t sl = stem.find_last_of("/\\"); if (sl != std::string::npos) stem = stem.substr(sl+1); }
+        { size_t dot = stem.rfind('.'); if (dot != std::string::npos) stem = stem.substr(0, dot); }
+        const std::string oriented_path = out_dir + "oriented_" + stem + ".obj";
+        if (!igl::writeOBJ(oriented_path, VO, FO))
+            fprintf(stderr, "[ORIENT] writeOBJ failed: %s\n", oriented_path.c_str());
+        else
+            fprintf(stderr, "[ORIENT] oriented mesh -> %s  (%d faces re-wound)\n",
+                    oriented_path.c_str(), n_flipped);
     }
 
     partition_into_sheets(FO, gFaceSheetID, gNumSheets);
@@ -418,7 +429,7 @@ int main(int argc, char * argv[])
             std::cout << "meshlab_qem.ini not found — using defaults\n";
     }
 
-    init_ssp(meshPath.c_str(), targetFaces);
+    init_ssp(meshPath.c_str(), targetFaces, out_dir);
     SSP_qslim_enable_log(true);   // activate ML_QEM_LOG output now that init cost pass is done
     if (gDecType == 2)
         meshlab_enable_cost_logging();
