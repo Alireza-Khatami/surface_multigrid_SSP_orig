@@ -316,6 +316,19 @@ static void save_simplified_mesh(const std::string & path)
             (int)Fout.rows(), (int)Vout.rows(), path.c_str());
 }
 
+// ---- live face count (mirrors save_simplified_mesh: excludes dead + all-inf cap faces) ----
+static int count_live_faces()
+{
+    int live = 0;
+    for (int f = 0; f < gF.rows(); f++) {
+        if (is_face_dead(gF, f)) continue;
+        int v0 = gF(f,0), v1 = gF(f,1), v2 = gF(f,2);
+        if (std::isinf(gV(v0,0)) || std::isinf(gV(v1,0)) || std::isinf(gV(v2,0))) continue;
+        live++;
+    }
+    return live;
+}
+
 // ---- one step ----
 bool do_next_step()
 {
@@ -324,11 +337,7 @@ bool do_next_step()
     for (int tries = 0; tries < 1'000'000; tries++) {
         if (gQ.empty() || std::get<0>(gQ.top()) == std::numeric_limits<double>::infinity()) {
             gFinished = true;
-            int live = 0;
-            for (int f = 0; f < gF.rows(); f++)
-                if (!is_face_dead(gF, f) && !std::isinf(gV(gF(f,0), 0)))
-                    live++;
-            std::cerr << "[FINISHED] queue_exhausted  live_faces=" << live
+            std::cerr << "[FINISHED] queue_exhausted  live_faces=" << count_live_faces()
                       << "  target=" << gTargetFaces
                       << "  collapses=" << gCollapseCount
                       << "  seam_attempts=" << gSeamAttemptCount
@@ -350,10 +359,7 @@ bool do_next_step()
             std::cerr << "############## collapse ############ " << gCollapseCount
                       << "  seam=" << gSeamCollapseCount << "/" << gCollapseCount << "\n";
 
-            int live = 0;
-            for (int f = 0; f < gF.rows(); f++)
-                if (!is_face_dead(gF, f) && !std::isinf(gV(gF(f,0), 0)))
-                    live++;
+            int live = count_live_faces();
             if (live <= gTargetFaces) {
                 gFinished = true;
                 std::cerr << "[FINISHED] target_reached  live_faces=" << live
@@ -366,7 +372,7 @@ bool do_next_step()
         }
     }
     gFinished = true;
-    std::cerr << "[FINISHED] max_tries_exceeded"
+    std::cerr << "[FINISHED] max_tries_exceeded  live_faces=" << count_live_faces()
               << "  target=" << gTargetFaces
               << "  collapses=" << gCollapseCount
               << "  seam_attempts=" << gSeamAttemptCount
