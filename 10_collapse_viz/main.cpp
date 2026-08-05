@@ -429,6 +429,18 @@ int main(int argc, char * argv[])
             std::cout << "meshlab_qem.ini not found — using defaults\n";
     }
 
+    // Build output paths before init_ssp so out_dir is available inside it.
+    std::string stem = meshPath;
+    {
+        size_t slash = stem.find_last_of("/\\");
+        if (slash != std::string::npos) stem = stem.substr(slash + 1);
+        size_t dot = stem.rfind('.');
+        if (dot != std::string::npos) stem = stem.substr(0, dot);
+    }
+    std::string out_dir = namedOutDir.empty() ? "." : namedOutDir;
+    if (!out_dir.empty() && out_dir.back() != '/' && out_dir.back() != '\\')
+        out_dir += '/';
+
     init_ssp(meshPath.c_str(), targetFaces, out_dir);
     SSP_qslim_enable_log(true);   // activate ML_QEM_LOG output now that init cost pass is done
     if (gDecType == 2)
@@ -463,18 +475,6 @@ int main(int argc, char * argv[])
             return result;
         };
     }
-
-    // Build output file names from mesh stem: c2f_<stem>.txt, correspondence_<stem>.c2f
-    std::string stem = meshPath;
-    {
-        size_t slash = stem.find_last_of("/\\");
-        if (slash != std::string::npos) stem = stem.substr(slash + 1);
-        size_t dot = stem.rfind('.');
-        if (dot != std::string::npos) stem = stem.substr(0, dot);
-    }
-    std::string out_dir = namedOutDir.empty() ? "." : namedOutDir;
-    if (!out_dir.empty() && out_dir.back() != '/' && out_dir.back() != '\\')
-        out_dir += '/';
     const std::string c2f_path              = out_dir + "c2f_"               + stem + ".txt";
     const std::string bundle_path           = out_dir + "correspondence_"     + stem + ".c2f";
     const std::string samples_fine_path     = out_dir + "samples_fine_"       + stem + ".txt";
