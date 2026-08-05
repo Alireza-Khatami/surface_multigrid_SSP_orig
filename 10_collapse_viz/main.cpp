@@ -452,15 +452,6 @@ int main(int argc, char * argv[])
     if (!out_dir.empty() && out_dir.back() != '/' && out_dir.back() != '\\')
         out_dir += '/';
 
-    {
-        const std::string initial_path = out_dir + "initial_" + stem + ".obj";
-        if (!igl::writeOBJ(initial_path, gVO, gFO))
-            fprintf(stderr, "[INITIAL] writeOBJ failed: %s\n", initial_path.c_str());
-        else
-            fprintf(stderr, "[INITIAL] initial mesh -> %s  (%d verts, %d faces)\n",
-                    initial_path.c_str(), (int)gVO.rows(), (int)gFO.rows());
-    }
-
     init_ssp(meshPath.c_str(), targetFaces, out_dir);
 
 
