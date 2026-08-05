@@ -501,6 +501,7 @@ int main(int argc, char * argv[])
     }
 
     sample_tracker_save(samples_fine_path, samples_coarse_path, samples_vertices_path);
+    sample_tracker_export_deformed_mesh(out_dir + "deformed_fine_mesh_" + stem + ".obj");
 
     return 0;
 }

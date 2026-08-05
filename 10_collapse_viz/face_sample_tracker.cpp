@@ -9,6 +9,7 @@
 #include <polyscope/point_cloud.h>
 #endif
 
+#include <igl/writeOBJ.h>
 #include <Eigen/Dense>
 #include <fstream>
 #include <iostream>
@@ -310,6 +311,32 @@ void sample_tracker_save(const std::string& fine_path,
                     vtx_samples.size(), vertices_path.c_str());
         }
     }
+}
+
+void sample_tracker_export_deformed_mesh(const std::string& path)
+{
+    if (gSamples.empty() || gVO.rows() == 0) {
+        fprintf(stderr, "[sample_tracker] no data to export deformed mesh\n");
+        return;
+    }
+
+    Eigen::MatrixXd deformed = gVO;
+    int count = 0;
+    for (const Sample& s : gSamples) {
+        if (!s.is_vertex) continue;
+        Eigen::RowVector3d cp =
+            s.cur_BC(0) * gV.row(s.cur_BF(0)).leftCols(3)
+          + s.cur_BC(1) * gV.row(s.cur_BF(1)).leftCols(3)
+          + s.cur_BC(2) * gV.row(s.cur_BF(2)).leftCols(3);
+        deformed.row(s.fine_vertex_id) = cp;
+        count++;
+    }
+
+    if (!igl::writeOBJ(path, deformed, gFO))
+        fprintf(stderr, "[sample_tracker] writeOBJ failed: %s\n", path.c_str());
+    else
+        fprintf(stderr, "[sample_tracker] deformed fine mesh -> %s  (%d verts deformed, %d total, %d faces)\n",
+            path.c_str(), count, (int)deformed.rows(), (int)gFO.rows());
 }
 
 // Shared helper: compute fine and coarse 3D positions for all samples.

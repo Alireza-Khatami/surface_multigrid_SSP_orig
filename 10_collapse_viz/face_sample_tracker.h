@@ -27,6 +27,11 @@ void sample_tracker_show();
 // No-op when C2F_VIZ_DIAGNOSTIC is not defined.
 void sample_tracker_show_vertices();
 
+// Export a deformed fine mesh: original topology (gFO), but each vertex position is
+// replaced by its coarse correspondence (interpolated via cur_BC / cur_BF).
+// Vertices with no vertex-sample entry keep their original gVO position.
+void sample_tracker_export_deformed_mesh(const std::string& path);
+
 // Register per-collapse ring sample points on their UV surfaces in the canonical frame.
 // uv_pre_3d / uv_post_3d are the already-rotated UV mesh vertex positions (from
 // compute_ring_geometry + rotation); FUV_pre / FUV_post are the face connectivity
