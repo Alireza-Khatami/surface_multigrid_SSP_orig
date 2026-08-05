@@ -98,6 +98,20 @@ static void init_ssp(const std::string & mesh_path, int tarF, const std::string 
 
     {
         MatrixXi FF; VectorXi C;
+
+        // Derive stem once for all exports in this block.
+        std::string stem = mesh_path;
+        { size_t sl = stem.find_last_of("/\\"); if (sl != std::string::npos) stem = stem.substr(sl+1); }
+        { size_t dot = stem.rfind('.'); if (dot != std::string::npos) stem = stem.substr(0, dot); }
+
+        // Export raw mesh before any re-winding.
+        const std::string raw_path = out_dir + "raw_" + stem + ".obj";
+        if (!igl::writeOBJ(raw_path, VO, FO))
+            fprintf(stderr, "[RAW] writeOBJ failed: %s\n", raw_path.c_str());
+        else
+            fprintf(stderr, "[RAW] raw mesh -> %s  (%d verts, %d faces)\n",
+                    raw_path.c_str(), (int)VO.rows(), (int)FO.rows());
+
         int n_flipped = orient_faces_consistently(VO, FO, FF, C);
         // Record which faces were re-wound (CW → CCW) before overwriting FO
         gFaceFlipped.resize(FO.rows());
@@ -108,9 +122,6 @@ static void init_ssp(const std::string & mesh_path, int tarF, const std::string 
                   << " / " << FO.rows() << " faces re-wound\n";
 
         // Export the consistently-oriented mesh so the re-winding can be inspected.
-        std::string stem = mesh_path;
-        { size_t sl = stem.find_last_of("/\\"); if (sl != std::string::npos) stem = stem.substr(sl+1); }
-        { size_t dot = stem.rfind('.'); if (dot != std::string::npos) stem = stem.substr(0, dot); }
         const std::string oriented_path = out_dir + "oriented_" + stem + ".obj";
         if (!igl::writeOBJ(oriented_path, VO, FO))
             fprintf(stderr, "[ORIENT] writeOBJ failed: %s\n", oriented_path.c_str());
@@ -441,8 +452,6 @@ int main(int argc, char * argv[])
     if (!out_dir.empty() && out_dir.back() != '/' && out_dir.back() != '\\')
         out_dir += '/';
 
-    init_ssp(meshPath.c_str(), targetFaces, out_dir);
-
     {
         const std::string initial_path = out_dir + "initial_" + stem + ".obj";
         if (!igl::writeOBJ(initial_path, gVO, gFO))
@@ -451,6 +460,9 @@ int main(int argc, char * argv[])
             fprintf(stderr, "[INITIAL] initial mesh -> %s  (%d verts, %d faces)\n",
                     initial_path.c_str(), (int)gVO.rows(), (int)gFO.rows());
     }
+
+    init_ssp(meshPath.c_str(), targetFaces, out_dir);
+
 
     SSP_qslim_enable_log(true);   // activate ML_QEM_LOG output now that init cost pass is done
     if (gDecType == 2)
