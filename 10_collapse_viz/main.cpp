@@ -442,6 +442,16 @@ int main(int argc, char * argv[])
         out_dir += '/';
 
     init_ssp(meshPath.c_str(), targetFaces, out_dir);
+
+    {
+        const std::string initial_path = out_dir + "initial_" + stem + ".obj";
+        if (!igl::writeOBJ(initial_path, gVO, gFO))
+            fprintf(stderr, "[INITIAL] writeOBJ failed: %s\n", initial_path.c_str());
+        else
+            fprintf(stderr, "[INITIAL] initial mesh -> %s  (%d verts, %d faces)\n",
+                    initial_path.c_str(), (int)gVO.rows(), (int)gFO.rows());
+    }
+
     SSP_qslim_enable_log(true);   // activate ML_QEM_LOG output now that init cost pass is done
     if (gDecType == 2)
         meshlab_enable_cost_logging();
