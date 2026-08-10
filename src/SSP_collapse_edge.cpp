@@ -736,53 +736,118 @@ bool SSP_collapse_edge(
     return false;
   }
 
-  // Build combined FIdx_onering_pre (sorted union of all sheets)
-  FIdx_onering_pre.resize((int)FIdx_combined.size());
-  { int fi = 0; for (int f : FIdx_combined) FIdx_onering_pre(fi++) = f; }
-
-  // [NON-ACTIVE-SHEET] Log real faces of d that Pass 2 will remap (d→s in gF)
-  // but that are NOT in any active sheet's one-ring → no decIM entry will be written.
-  // These faces will have stale gF entries when the backward walk queries them.
+  // [NON-ACTIVE-SHEET] Real faces of d that Pass 2 will remap (d→s in gF)
+  // but that are NOT in any active sheet's one-ring.
+  // Build a minimal SheetData for each so they get decIM entries and proper
+  // UV-based BC remap in sample_tracker_update / query_coarse_to_fine.
   {
     const vector<int> & nV2Fd_check = (!eflip ? Nsf : Ndf);
     int nas_count = 0;
 #ifdef SSP_LSCM_LOG
     static int nas_log = 0;
 #endif
+
+    // Local helper: flat 2D embedding of a triangle (q0→origin, q1 along x).
+    auto embed_tri = [](const Vector3d& q0,
+                        const Vector3d& q1,
+                        const Vector3d& q2) -> MatrixXd {
+      MatrixXd UV(3, 2);
+      Vector3d e1 = q1 - q0;
+      double len = e1.norm();
+      if (len < 1e-12) { UV.setZero(); return UV; }
+      e1 /= len;
+      Vector3d n  = (q1 - q0).cross(q2 - q0);
+      Vector3d e2 = n.cross(e1);
+      double e2n  = e2.norm();
+      if (e2n < 1e-12) { UV.setZero(); return UV; }
+      e2 /= e2n;
+      UV.row(0) = RowVector2d(0.0, 0.0);
+      UV.row(1) = RowVector2d((q1-q0).dot(e1), (q1-q0).dot(e2));
+      UV.row(2) = RowVector2d((q2-q0).dot(e1), (q2-q0).dot(e2));
+      return UV;
+    };
+
     for (int f : nV2Fd_check) {
       if (null_face(f) || f >= numOrigFaces) continue;
-      if (FIdx_combined.find(f) == FIdx_combined.end()) {
-        nas_count++;
+      if (FIdx_combined.find(f) != FIdx_combined.end()) continue;
+      nas_count++;
 
-        NonActiveSheetFace naf;
-        naf.face_idx  = f;
-        naf.sheet_id  = (int)faceSheetID(f);
+      NonActiveSheetFace naf;
+      naf.face_idx  = f;
+      naf.sheet_id  = (int)faceSheetID(f);
+      for (int c = 0; c < 3; c++)
+        if (std::isinf(V(F(f,c), 0))) { naf.is_infinity_face = true; break; }
+      naf.p0 = V.row(F(f,0)).head<3>().transpose();
+      naf.p1 = V.row(F(f,1)).head<3>().transpose();
+      naf.p2 = V.row(F(f,2)).head<3>().transpose();
+      data.non_active_faces.push_back(naf);
+
+      if (!naf.is_infinity_face) {
+        // Find which corner holds the absorbed vertex d.
+        int d_local = -1;
         for (int c = 0; c < 3; c++)
-          if (std::isinf(V(F(f,c), 0))) { naf.is_infinity_face = true; break; }
-        naf.p0 = V.row(F(f,0)).head<3>().transpose();
-        naf.p1 = V.row(F(f,1)).head<3>().transpose();
-        naf.p2 = V.row(F(f,2)).head<3>().transpose();
-        data.non_active_faces.push_back(naf);
+          if (F(f, c) == d) { d_local = c; break; }
+
+        if (d_local >= 0) {
+          // UV_pre: face with d at its original position.
+          MatrixXd UV_pre = embed_tri(naf.p0, naf.p1, naf.p2);
+
+          // UV_post: same face but d's corner moved to the collapse placement p.
+          Vector3d post_p0 = naf.p0, post_p1 = naf.p1, post_p2 = naf.p2;
+          Vector3d pp = p.head<3>();
+          if      (d_local == 0) post_p0 = pp;
+          else if (d_local == 1) post_p1 = pp;
+          else                   post_p2 = pp;
+          MatrixXd UV_post = embed_tri(post_p0, post_p1, post_p2);
+
+          SheetData sd_naf;
+          sd_naf.global_sheet_id = naf.sheet_id;
+
+          // subsetVIdx: the 3 face vertices + s appended at index 3.
+          // Index 3 (= s) is only used by the vertex-fixup loop in
+          // sample_tracker_update to patch cur_BF entries d→s.
+          sd_naf.subsetVIdx.resize(4);
+          sd_naf.subsetVIdx(0) = F(f, 0);
+          sd_naf.subsetVIdx(1) = F(f, 1);
+          sd_naf.subsetVIdx(2) = F(f, 2);
+          sd_naf.subsetVIdx(3) = s;
+
+          // Single-triangle connectivity (local indices 0,1,2).
+          sd_naf.FUV_pre.resize(1, 3);  sd_naf.FUV_pre  << 0, 1, 2;
+          sd_naf.FUV_post.resize(1, 3); sd_naf.FUV_post << 0, 1, 2;
+          sd_naf.FIdx_pre.resize(1);    sd_naf.FIdx_pre(0)  = f;
+          sd_naf.FIdx_post.resize(1);   sd_naf.FIdx_post(0) = f;
+          sd_naf.UV_pre  = UV_pre;
+          sd_naf.UV_post = UV_post;
+
+          // b: [local_s_idx, local_d_idx] in subsetVIdx — used by vertex fixup.
+          sd_naf.b.resize(2);
+          sd_naf.b(0) = 3;       // subsetVIdx(3) = s (survivor)
+          sd_naf.b(1) = d_local; // subsetVIdx(d_local) = d (absorbed)
+
+          data.sheets.push_back(sd_naf);
+          FIdx_combined.insert(f);
+        }
+      }
 
 #ifdef SSP_LSCM_LOG
-        if (nas_log < 30) {
-          nas_log++;
-          if (naf.is_infinity_face) {
-            fprintf(stderr,
-              "[NON-ACTIVE-SHEET-FACE] collapse=%zu  face=%d  sheet=%d"
-              "  → infinity face, not a geometry sheet\n",
-              decInfo.size(), f, naf.sheet_id);
-          } else {
-            fprintf(stderr,
-              "[NON-ACTIVE-SHEET-FACE] collapse=%zu  face=%d  sheet=%d  "
-              "d=%d s=%d  active_sheets=[",
-              decInfo.size(), f, naf.sheet_id, d, s);
-            for (int sid : active_sheets) fprintf(stderr, "%d ", sid);
-            fprintf(stderr, "]  → gF will get d→s remap but NO decIM entry\n");
-          }
+      if (nas_log < 30) {
+        nas_log++;
+        if (naf.is_infinity_face) {
+          fprintf(stderr,
+            "[NON-ACTIVE-SHEET-FACE] collapse=%zu  face=%d  sheet=%d"
+            "  → infinity face, skipped\n",
+            decInfo.size(), f, naf.sheet_id);
+        } else {
+          fprintf(stderr,
+            "[NON-ACTIVE-SHEET-FACE] collapse=%zu  face=%d  sheet=%d  "
+            "d=%d s=%d  active_sheets=[",
+            decInfo.size(), f, naf.sheet_id, d, s);
+          for (int sid : active_sheets) fprintf(stderr, "%d ", sid);
+          fprintf(stderr, "]  → SheetData + decIM entry added\n");
         }
-#endif
       }
+#endif
     }
 #ifdef SSP_LSCM_LOG
     if (nas_count > 0) {
@@ -790,12 +855,16 @@ bool SSP_collapse_edge(
       if (nas_summary < 10) {
         nas_summary++;
         fprintf(stderr,
-          "[NON-ACTIVE-SHEET-SUMMARY] collapse=%zu  %d face(s) remapped without decIM entry\n",
+          "[NON-ACTIVE-SHEET-SUMMARY] collapse=%zu  %d face(s) got SheetData+decIM\n",
           decInfo.size(), nas_count);
       }
     }
 #endif
   }
+
+  // Build combined FIdx_onering_pre AFTER non-active faces are folded in.
+  FIdx_onering_pre.resize((int)FIdx_combined.size());
+  { int fi = 0; for (int f : FIdx_combined) FIdx_onering_pre(fi++) = f; }
 
   // ================================================================
   // VF-based two-pass topology update

@@ -240,9 +240,10 @@ void sample_tracker_update()
         }
     }
 
-    // Vertex fixup: samples on non-active-sheet faces are not remapped above,
-    // but gF still gets d→s for those faces.  Update any cur_BF entry that
-    // still references the absorbed vertex so gV lookups remain correct.
+    // Vertex fixup: after UV remap, cur_BF may still reference the absorbed
+    // vertex d (subsetVIdx was captured pre-collapse).  Patch d→s across all
+    // samples so gV lookups stay correct.  For non-active SheetData entries,
+    // b(0)=3 → subsetVIdx(3)=s and b(1)=d_local → subsetVIdx(d_local)=d.
     for (const SheetData& sd : d.sheets) {
         if (sd.b.size() < 2) continue;
         int global_d = sd.subsetVIdx(sd.b(1)); // absorbed
