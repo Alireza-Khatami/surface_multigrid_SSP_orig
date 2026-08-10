@@ -19,6 +19,7 @@
 
 #ifdef C2F_VIZ_DIAGNOSTIC
 #include <polyscope/polyscope.h>
+#include <polyscope/point_cloud.h>
 #endif
 
 #include <SSP_collapse_edge.h>
@@ -36,6 +37,7 @@
 #include <limits>
 #include <string>
 #include <cmath>
+#include <cstdint>
 
 #ifdef C2F_VIZ_DIAGNOSTIC
 #include "visualizer.h"
@@ -46,6 +48,7 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
 #endif
 
 #include "face_sample_tracker.h"
+#include "load_matstruct.h"
 
 using namespace Eigen;
 
@@ -65,6 +68,7 @@ std::vector<std::vector<int>> gDecIM;
 VectorXi gFaceSheetID;
 int gNumSheets    = 1;
 std::vector<std::vector<int>> gVF;
+std::vector<std::set<int>> gVertexStructIDs;  // per-vertex struct ID sets from .ma_struct file
 std::vector<std::pair<int,int>> gSeamEdgeList;  // vertex pairs of seam (non-manifold) edges
 std::vector<double> gInitCosts;               // initial cost per edge (index = gE row)
 int gTargetFaces  = 100;
@@ -384,12 +388,14 @@ bool do_next_step()
 int main(int argc, char * argv[])
 {
     // Parse all named arguments; every arg has a default so none are required.
-    std::string meshPath       = "bunny.obj";
-    int         targetFaces    = 285;
+    std::string meshPath         = "bunny.obj";
+    int         targetFaces      = 285;
     std::string namedMode;
-    int         gNSamplesTotal = 2000;
+    int         gNSamplesTotal   = 2000;
     std::string namedOutDir;
-    bool        validityChecks = false;
+    bool        validityChecks   = false;
+    std::string matstructPath;      // optional: path to .ma_struct file for struct-ID collapse gating
+    bool        matStructCheck = false;  // --mat_struct_check: enable struct-ID collapse gate
 
 
     //usage    
@@ -406,12 +412,15 @@ int main(int argc, char * argv[])
         std::string a = argv[i];
         if (a == "--validity-checks") {
             validityChecks = true;
+        } else if (a == "--mat_struct_check") {
+            matStructCheck = true;
         } else if (i + 1 < argc) {
             if      (a == "--mesh_path")       meshPath       = argv[i+1];
             else if (a == "--target_faces")    targetFaces    = std::stoi(argv[i+1]);
             else if (a == "--mode")            namedMode      = argv[i+1];
             else if (a == "--n_samples_total") gNSamplesTotal = std::stoi(argv[i+1]);
             else if (a == "--output_dir")      namedOutDir    = argv[i+1];
+            else if (a == "--matstruct_path")  matstructPath  = argv[i+1];
             else { continue; }
             ++i;
         }
@@ -460,6 +469,59 @@ int main(int argc, char * argv[])
 
     init_ssp(meshPath.c_str(), targetFaces, out_dir);
 
+    // Load per-vertex struct IDs from .ma_struct file (optional).
+    if (!matstructPath.empty()) {
+        if (load_matstruct(matstructPath, gVertexStructIDs)) {
+            std::cout << "Struct IDs loaded from " << matstructPath << "\n";
+            if (matStructCheck)
+                std::cout << "  --mat_struct_check ON: collapses blocked when struct ID sets differ\n";
+            else
+                std::cout << "  --mat_struct_check OFF: struct ID gate inactive\n";
+        } else {
+            std::cerr << "[WARN] load_matstruct failed — struct ID gating disabled\n";
+        }
+    }
+
+#ifdef C2F_VIZ_DIAGNOSTIC
+    // Polyscope point cloud: one point per original MAT vertex, coloured by struct ID set.
+    // Each unique set<int> combination maps to a unique scalar via FNV-1a hash, giving
+    // a consistent arbitrary colour per combination in Polyscope's colormap.
+    if (!gVertexStructIDs.empty()) {
+        const int nVO = (int)gVO.rows();
+        Eigen::VectorXd structScalar(nVO);
+        for (int i = 0; i < nVO; ++i) {
+            // FNV-1a hash over the sorted struct IDs in the set
+            uint32_t h = 2166136261u;
+            for (int id : gVertexStructIDs[i]) {
+                h ^= (uint32_t)id;
+                h *= 16777619u;
+            }
+            structScalar(i) = (double)h;
+        }
+        auto* pc = polyscope::registerPointCloud("mat_struct_ids", gVO);
+        pc->setPointRadius(0.004, true);
+        pc->addScalarQuantity("struct_hash", structScalar)->setEnabled(true);
+    }
+#endif
+
+    // Struct ID gate: block collapse (v0, v1) when their struct ID sets differ.
+    // Only active when both --matstruct_path and --mat_struct_check are provided.
+    // Skips the infinity cap vertex (index >= gVertexStructIDs.size()).
+    if (!gVertexStructIDs.empty() && matStructCheck) {
+        auto orig_pre = gPreFn;
+        gPreFn = [orig_pre](
+            const MatrixXd & V, const MatrixXi & F, const MatrixXi & E,
+            const VectorXi & EMAP, const MatrixXi & EF, const MatrixXi & EI,
+            const igl::min_heap<std::tuple<double,int,int>> & Q,
+            const VectorXi & EQ, const MatrixXd & C, const int e) -> bool
+        {
+            if (!orig_pre(V, F, E, EMAP, EF, EI, Q, EQ, C, e)) return false;
+            const int u = E(e,0), v = E(e,1);
+            const int nStruct = (int)gVertexStructIDs.size();
+            if (u >= nStruct || v >= nStruct) return true;  // infinity cap vertex — always allow
+            return gVertexStructIDs[u] == gVertexStructIDs[v];
+        };
+    }
 
     SSP_qslim_enable_log(true);   // activate ML_QEM_LOG output now that init cost pass is done
     if (gDecType == 2)

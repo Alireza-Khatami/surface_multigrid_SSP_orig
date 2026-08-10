@@ -26,6 +26,7 @@ include_directories("../src/")
 # visualizer.cpp and sheet_seam_viz.cpp are added below only when C2F_VIZ_DIAGNOSTIC is ON.
 set(APP_SRCS
     main.cpp
+    load_matstruct.cpp
     coarse_fine_viz.cpp
     face_sample_tracker.cpp
     orient_faces_consistently.cpp
