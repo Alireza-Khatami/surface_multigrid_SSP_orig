@@ -11,9 +11,9 @@
         // "C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\meshes\\bunny.obj",
         "C:\\Users\\alirz\\Projects\\Graphics\\QMAT_old working version  exe file\\qmat_x64\\qmat\\output\\01_00040057_f8f78dbd17414efda75bc437_trimesh_000\\01_00040057_f8f78dbd17414efda75bc437_trimesh_000_mat_initial.off"
         // "C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\latest_snapshot.obj",
-        ,"--target_faces", "285"
+        ,"--target_faces", "400"
         ,"--mode", "qslim"//qslim , midpoint, meshlab/
-        ,"--n_samples_total", "2000"
+        ,"--n_samples_total", "1000000"
         ,"--output_dir", "./"
         ,"--validity-checks"
       ],
@@ -34,6 +34,8 @@
         // "C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\latest_snapshot.obj",
         ,"--target_faces", "285"
         ,"--mode", "qslim"//qslim , midpoint, meshlab/
+        ,"--n_samples_total", "1000000"
+        ,"--output_dir", "./"
         ,"--validity-checks"
       ],
       "cwd": "${workspaceFolder}",
