@@ -36,6 +36,10 @@ DEFORM_PC     = "deformed_fine_verts"
 ARROWS_PC     = "fine_to_deformed"
 SEL_ARROWS_PC = "sel_fine_to_deformed"
 FLIPPED_PC    = "flipped_face_verts"
+TRACKED_VTX_PC = "tracked_vtx"
+TRAJ_CURVE     = "vtx_trajectory"
+UV_SHEET_MESH  = "uv_sheet"
+UV_TRACKED_PC  = "uv_tracked_vtx"
 
 # ---- mutable state ----
 _bundle        = None
@@ -56,6 +60,13 @@ _selected_deform_face   = -1
 _face_highlight_active  = False
 _show_flipped           = True
 _flipped_highlight_active = False
+
+# collapse-trace state
+_selected_vtx       = -1
+_vtx_collapse_steps = []   # list of (collapse_idx, SheetData, local_vtx_idx)
+_current_step_idx   = 0
+_uv_plane_z         = -1.5  # Z position of UV flat-mesh in 3D viewport
+_uv_scale           = 3.0   # scale applied to normalised UV coords
 
 
 # ---------------------------------------------------------------------------
@@ -318,12 +329,132 @@ def _rebuild_flipped_viz():
                            color=(1.0, 0.30, 0.30))
 
 
+def _find_vtx_collapse_steps(v: int):
+    """
+    Walk decIM forward and collect every collapse step that touches vertex v.
+    Returns list stored in _vtx_collapse_steps:
+        (collapse_idx, SheetData, local_idx_of_v_in_sheet)
+    """
+    global _vtx_collapse_steps
+    fineF = _bundle.fineF
+
+    # all fine faces that contain v
+    faces_of_v = np.where(np.any(fineF == v, axis=1))[0]
+
+    # union of collapse indices from decIM for those faces
+    seen: set = set()
+    for f in faces_of_v:
+        fi = int(f)
+        if fi < len(_bundle.decIM):
+            for ci in _bundle.decIM[fi]:
+                seen.add(ci)
+
+    steps = []
+    for ci in sorted(seen):
+        cd = _bundle.decInfo[ci]
+        for sheet in cd.sheets:
+            hits = np.where(sheet.subsetVIdx == v)[0]
+            if len(hits):
+                steps.append((ci, sheet, int(hits[0])))
+                break   # v appears in at most one sheet per collapse
+    _vtx_collapse_steps = steps
+    print(f"[trace] vertex {v}: {len(steps)} collapse steps "
+          f"(from {len(faces_of_v)} incident fine faces)")
+
+
+def _rebuild_vtx_trajectory():
+    """
+    3D view: green dot at clicked fine vertex + green curve to its coarse
+    correspondence (if it's a tracked vertex in samples_vertices_*.txt).
+    """
+    try:
+        if ps.has_curve_network(TRAJ_CURVE):
+            ps.remove_curve_network(TRAJ_CURVE)
+    except Exception:
+        pass
+    if ps.has_point_cloud(TRACKED_VTX_PC):
+        ps.remove_point_cloud(TRACKED_VTX_PC)
+
+    if _selected_vtx < 0:
+        return
+
+    fine_pos = _bundle.fineV[_selected_vtx]
+    pc = ps.register_point_cloud(TRACKED_VTX_PC, fine_pos[np.newaxis])
+    pc.set_color((0.1, 1.0, 0.3))
+    pc.set_radius(0.012, relative=True)
+
+    if _fine_id_to_row is not None and _selected_vtx in _fine_id_to_row:
+        row  = _fine_id_to_row[_selected_vtx]
+        corr = _deform_pts[row].copy()
+        corr[2] += _z_offset
+        nodes = np.array([fine_pos, corr])
+        edges = np.array([[0, 1]], dtype=np.int32)
+        try:
+            cn = ps.register_curve_network(TRAJ_CURVE, nodes, edges)
+            cn.set_color((0.1, 1.0, 0.3))
+            cn.set_radius(0.003, relative=True)
+        except Exception:
+            pass
+
+
+def _rebuild_uv_sheet_viz():
+    """
+    UV canonical view: render the sheet's UV_pre triangulation as a flat mesh
+    at Z = _uv_plane_z.  Orange dot marks the tracked vertex's UV_pre position;
+    a yellow arrow points to its UV_post position (the UV displacement caused by
+    this collapse step).
+    """
+    if ps.has_surface_mesh(UV_SHEET_MESH):
+        ps.remove_surface_mesh(UV_SHEET_MESH)
+    if ps.has_point_cloud(UV_TRACKED_PC):
+        ps.remove_point_cloud(UV_TRACKED_PC)
+
+    if _selected_vtx < 0 or not _vtx_collapse_steps:
+        return
+
+    step_idx = max(0, min(_current_step_idx, len(_vtx_collapse_steps) - 1))
+    ci, sheet, local_v = _vtx_collapse_steps[step_idx]
+
+    uv     = sheet.UV_pre          # (uvRows, 2)
+    center = uv.mean(axis=0)
+    span   = (uv.max(axis=0) - uv.min(axis=0)).max()
+    if span < 1e-10:
+        span = 1.0
+    norm   = (uv - center) / span  # ~ [-0.5, 0.5]
+
+    verts3d = np.column_stack([
+        norm[:, 0] * _uv_scale,
+        norm[:, 1] * _uv_scale,
+        np.full(len(uv), _uv_plane_z),
+    ])
+    sm = ps.register_surface_mesh(UV_SHEET_MESH, verts3d, sheet.FUV_pre)
+    sm.set_color((0.4, 0.6, 1.0))
+    sm.set_edge_width(1.0)
+    sm.set_smooth_shade(False)
+    sm.set_transparency(0.5)
+
+    # tracked vertex: orange dot + yellow arrow (UV_pre → UV_post)
+    uv_pre_n  = (uv[local_v]             - center) / span * _uv_scale
+    uv_post_n = (sheet.UV_post[local_v]  - center) / span * _uv_scale
+    pt3d  = np.array([[uv_pre_n[0], uv_pre_n[1], _uv_plane_z]])
+    arrow = np.array([[uv_post_n[0] - uv_pre_n[0],
+                       uv_post_n[1] - uv_pre_n[1],
+                       0.0]])
+    pc = ps.register_point_cloud(UV_TRACKED_PC, pt3d)
+    pc.set_color((1.0, 0.3, 0.0))
+    pc.set_radius(0.010, relative=True)
+    pc.add_vector_quantity("uv_disp", arrow, vectortype="ambient",
+                           enabled=True, color=(1.0, 0.85, 0.0))
+
+
 def _rebuild_all():
     _rebuild_meshes()
     _rebuild_deform_pc()
     _rebuild_arrows()
     _rebuild_selection()
     _rebuild_flipped_viz()
+    _rebuild_vtx_trajectory()
+    _rebuild_uv_sheet_viz()
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +463,7 @@ def _rebuild_all():
 
 def ui_callback():
     global _z_offset, _sample_step, _show_arrows, _selected_deform_face, _show_flipped
+    global _selected_vtx, _current_step_idx, _uv_scale, _uv_plane_z
 
     changed = False
 
@@ -393,6 +525,47 @@ def ui_callback():
         n_flipped = int((np.sum(orig_n * deform_n, axis=1) < 0).sum())
         psim.TextUnformatted(f"Flipped: {n_flipped} / {fineF.shape[0]} faces")
 
+    psim.Separator()
+    psim.TextUnformatted("Collapse Trace  (click fine mesh vertex)")
+
+    c, v = psim.SliderFloat("UV scale", _uv_scale, 0.5, 10.0)
+    if c:
+        _uv_scale = v
+        _rebuild_uv_sheet_viz()
+
+    c, v = psim.SliderFloat("UV plane Z", _uv_plane_z, -5.0, 5.0)
+    if c:
+        _uv_plane_z = v
+        _rebuild_uv_sheet_viz()
+
+    if _selected_vtx >= 0:
+        n_steps = len(_vtx_collapse_steps)
+        psim.TextUnformatted(f"Vertex {_selected_vtx}  |  {n_steps} collapse steps")
+        if n_steps > 0:
+            ci_cur = _vtx_collapse_steps[_current_step_idx][0]
+            psim.TextUnformatted(
+                f"Step {_current_step_idx + 1} / {n_steps}  "
+                f"(collapse #{ci_cur})")
+            if psim.Button("< Prev"):
+                if _current_step_idx > 0:
+                    _current_step_idx -= 1
+                    _rebuild_uv_sheet_viz()
+            psim.SameLine()
+            if psim.Button("Next >"):
+                if _current_step_idx < n_steps - 1:
+                    _current_step_idx += 1
+                    _rebuild_uv_sheet_viz()
+        else:
+            psim.TextUnformatted("(vertex not involved in any collapse)")
+        if psim.Button("Clear vertex"):
+            _selected_vtx = -1
+            _vtx_collapse_steps.clear()
+            _current_step_idx = 0
+            _rebuild_vtx_trajectory()
+            _rebuild_uv_sheet_viz()
+    else:
+        psim.TextUnformatted("No vertex selected")
+
     psim.End()
 
     if changed:
@@ -417,6 +590,17 @@ def ui_callback():
                     _selected_deform_face = fidx
                     _rebuild_arrows()
                     _rebuild_selection()
+
+            elif sname == FINE_MESH:
+                etype = sdata.get('element_type', None)
+                vidx  = int(sdata.get('index', -1))
+                nV    = _bundle.fineV.shape[0]
+                if etype == 'vertex' and 0 <= vidx < nV:
+                    _selected_vtx     = vidx
+                    _current_step_idx = 0
+                    _find_vtx_collapse_steps(vidx)
+                    _rebuild_vtx_trajectory()
+                    _rebuild_uv_sheet_viz()
 
 
 # ---------------------------------------------------------------------------
