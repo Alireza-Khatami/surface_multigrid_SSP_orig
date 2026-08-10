@@ -625,7 +625,6 @@ def _rebuild_all():
     _rebuild_fine_vtx_pc()
     _rebuild_vtx_trajectory()
     _rebuild_uv_sheet_viz()
-    _rebuild_canonical_view()
 
 
 # ---------------------------------------------------------------------------
@@ -712,33 +711,39 @@ def ui_callback():
             if psim.Button("< Prev"):
                 if _current_step_idx > 0:
                     _current_step_idx -= 1
-                    _rebuild_uv_sheet_viz()
-                    _rebuild_canonical_view()
+                    if _canonical_view:
+                        _rebuild_canonical_view()
+                    else:
+                        _rebuild_uv_sheet_viz()
             psim.SameLine()
             if psim.Button("Next >"):
                 if _current_step_idx < n_steps - 1:
                     _current_step_idx += 1
-                    _rebuild_uv_sheet_viz()
-                    _rebuild_canonical_view()
+                    if _canonical_view:
+                        _rebuild_canonical_view()
+                    else:
+                        _rebuild_uv_sheet_viz()
         else:
             psim.TextUnformatted("(vertex not involved in any collapse)")
 
-        # ---- canonical view toggle ----
+        # ---- canonical / main view switch (mirrors visualizer.cpp) ----
         psim.Separator()
-        c, v = psim.Checkbox("Canonical View", _canonical_view)
-        if c:
-            _canonical_view = v
-            _rebuild_canonical_view()
-
-        if _canonical_view:
-            psim.TextDisabled("Blue = ring + UV_pre   Orange = UV_post")
-            c, v = psim.SliderFloat("UV panel elev", _uv_elev, 0.0, 5.0)
-            if c:
-                _uv_elev = v
-                _rebuild_canonical_view()
-
-        # ---- flat UV sheet controls (non-canonical) ----
         if not _canonical_view:
+            if psim.Button("Canonical View"):
+                _canonical_view = True
+                try:
+                    ps.remove_all_structures()
+                except Exception:
+                    pass
+                _rebuild_canonical_view()
+                try:
+                    ps.reset_camera_to_home_view()
+                except Exception:
+                    pass
+            psim.SameLine()
+            psim.TextUnformatted("(ring + UV panels only)")
+
+            # flat UV sheet controls shown only in main view
             c, v = psim.SliderFloat("UV scale", _uv_scale, 0.5, 10.0)
             if c:
                 _uv_scale = v
@@ -747,22 +752,43 @@ def ui_callback():
             if c:
                 _uv_plane_z = v
                 _rebuild_uv_sheet_viz()
+        else:
+            if psim.Button("Back to Main View"):
+                _canonical_view = False
+                try:
+                    ps.remove_all_structures()
+                except Exception:
+                    pass
+                _rebuild_all()
+            psim.TextDisabled("Blue = ring + UV_pre   Orange = UV_post")
+            c, v = psim.SliderFloat("UV panel elev", _uv_elev, 0.0, 5.0)
+            if c:
+                _uv_elev = v
+                _rebuild_canonical_view()
 
         psim.Separator()
         if psim.Button("Clear vertex"):
+            was_canonical = _canonical_view
             _selected_vtx = -1
             _vtx_collapse_steps.clear()
             _current_step_idx = 0
             _canonical_view   = False
-            _rebuild_vtx_trajectory()
-            _rebuild_uv_sheet_viz()
-            _clear_canonical()
+            if was_canonical:
+                try:
+                    ps.remove_all_structures()
+                except Exception:
+                    pass
+                _rebuild_all()
+            else:
+                _rebuild_vtx_trajectory()
+                _rebuild_uv_sheet_viz()
+                _clear_canonical()
     else:
         psim.TextUnformatted("No vertex selected — click fine_mesh_verts")
 
     psim.End()
 
-    if changed:
+    if changed and not _canonical_view:
         _rebuild_all()
 
     # ---- pick detection ----
