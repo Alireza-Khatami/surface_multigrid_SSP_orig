@@ -23,6 +23,7 @@ Dependencies:
 import sys
 import glob
 import os
+import math
 import numpy as np
 import polyscope as ps
 import polyscope.imgui as psim
@@ -40,6 +41,12 @@ TRACKED_VTX_PC = "tracked_vtx"
 TRAJ_CURVE     = "vtx_trajectory"
 UV_SHEET_MESH  = "uv_sheet"
 UV_TRACKED_PC  = "uv_tracked_vtx"
+FINE_VTX_PC    = "fine_mesh_verts"   # selectable point cloud over fine mesh
+CV_RING_MESH   = "cv_ring"           # canonical: 3D one-ring (blue)
+CV_UV_PRE      = "cv_uv_pre"         # canonical: UV_pre panel (blue)
+CV_UV_POST     = "cv_uv_post"        # canonical: UV_post panel (orange)
+CV_TRACKED     = "cv_tracked_vtx"    # canonical: tracked vertex dot + arrow
+_CV_NAMES      = [CV_RING_MESH, CV_UV_PRE, CV_UV_POST, CV_TRACKED]
 
 # ---- mutable state ----
 _bundle        = None
@@ -67,6 +74,8 @@ _vtx_collapse_steps = []   # list of (collapse_idx, SheetData, local_vtx_idx)
 _current_step_idx   = 0
 _uv_plane_z         = -1.5  # Z position of UV flat-mesh in 3D viewport
 _uv_scale           = 3.0   # scale applied to normalised UV coords
+_canonical_view     = False
+_uv_elev            = 1.5   # UV panel elevation above ring (× ring_span), like gUVOffset
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +338,166 @@ def _rebuild_flipped_viz():
                            color=(1.0, 0.30, 0.30))
 
 
+def _rebuild_fine_vtx_pc():
+    """Selectable point cloud over all fine mesh vertices."""
+    if ps.has_point_cloud(FINE_VTX_PC):
+        ps.remove_point_cloud(FINE_VTX_PC)
+    pc = ps.register_point_cloud(FINE_VTX_PC, _bundle.fineV)
+    pc.set_color((0.75, 0.75, 0.75))
+    pc.set_radius(0.003, relative=True)
+
+
+def _compute_canonical(sheet, local_v: int) -> dict:
+    """
+    Port of compute_ring_geometry() + show_canonical_view() from visualizer.cpp.
+
+    3D ring  : fineV[subsetVIdx]  (original fine-mesh positions; approximation
+               of the true intermediate one-ring, which is not stored in the bundle)
+    UV panels: UV_pre / UV_post from SheetData  (exact)
+
+    Returns a dict with everything needed to register the canonical structures.
+    """
+    subV      = np.clip(sheet.subsetVIdx, 0, len(_bundle.fineV) - 1)
+    verts     = _bundle.fineV[subV]   # (N, 3)
+    uv_pre    = sheet.UV_pre          # (N, 2)
+    uv_post   = sheet.UV_post         # (N, 2)
+    F         = sheet.FUV_pre         # (M, 3)
+
+    # ---- centroid and span ----
+    centroid = verts.mean(axis=0)
+    span     = (verts.max(axis=0) - verts.min(axis=0)).max()
+    if span < 1e-10:
+        span = 1.0
+
+    # ---- average face normal (vectorised) ----
+    v0 = verts[F[:, 0]]; v1 = verts[F[:, 1]]; v2 = verts[F[:, 2]]
+    nrm = np.cross(v1 - v0, v2 - v0).sum(axis=0)
+    n   = np.linalg.norm(nrm)
+    nrm = nrm / n if n > 1e-10 else np.array([0.0, 0.0, 1.0])
+
+    # ---- initial tangent frame (t1, t2) ----
+    arb = np.array([1.0, 0.0, 0.0]) if abs(nrm[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    t1  = arb - nrm * nrm.dot(arb);  t1 /= np.linalg.norm(t1)
+    t2  = np.cross(nrm, t1);          t2 /= np.linalg.norm(t2)
+
+    # ---- 2-D Procrustes: rotate (t1,t2) to align UV panel with ring projection ----
+    # (β = atan2(Σ(y·u − x·v),  Σ(x·u + y·v))  as in visualizer.cpp §"Rotate (t1,t2) by β")
+    uc    = (uv_pre[:, 0].max() + uv_pre[:, 0].min()) * 0.5
+    vc    = (uv_pre[:, 1].max() + uv_pre[:, 1].min()) * 0.5
+    pv    = verts - centroid
+    xu    = pv @ t1;   yu    = pv @ t2
+    du    = uv_pre[:, 0] - uc;  dv = uv_pre[:, 1] - vc
+    A_sum = float((xu * du + yu * dv).sum())
+    B_sum = float((yu * du - xu * dv).sum())
+    beta  = math.atan2(B_sum, A_sum)
+    cb, sb = math.cos(beta), math.sin(beta)
+    t1_old = t1.copy()
+    t1 =  cb * t1_old + sb * t2
+    t2 = -sb * t1_old + cb * t2
+
+    # ---- UV scale: map UV extent → ring_span ----
+    uv_span = max(uv_pre[:, 0].max() - uv_pre[:, 0].min(),
+                  uv_pre[:, 1].max() - uv_pre[:, 1].min())
+    uv_scale = span / uv_span if uv_span > 1e-10 else 1.0
+
+    # ---- UV panels → 3D, floating above ring along nrm by _uv_elev * span ----
+    panel_c = centroid + nrm * _uv_elev * span
+
+    def to3d(UV):
+        dU = (UV[:, 0:1] - uc) * uv_scale
+        dV = (UV[:, 1:2] - vc) * uv_scale
+        return panel_c + dU * t1 + dV * t2
+
+    uv_pre_3d  = to3d(uv_pre)
+    uv_post_3d = to3d(uv_post)
+
+    # ---- canonical rotation: nrm → world Y-up ----
+    world_up = np.array([0.0, 1.0, 0.0])
+    ax       = np.cross(nrm, world_up)
+    sin_a    = np.linalg.norm(ax)
+    cos_a    = float(nrm.dot(world_up))
+    if sin_a < 1e-6:
+        R = np.eye(3) if cos_a > 0 else np.diag([-1.0, -1.0, 1.0])
+    else:
+        ax    /= sin_a
+        theta  = math.atan2(sin_a, cos_a)
+        K      = np.array([[   0.0, -ax[2],  ax[1]],
+                            [ ax[2],    0.0, -ax[0]],
+                            [-ax[1],  ax[0],    0.0]])
+        R = np.eye(3) + math.sin(theta) * K + (1.0 - math.cos(theta)) * (K @ K)
+
+    def rot(P):
+        return (R @ (P - centroid).T).T
+
+    vr   = rot(verts)
+    upr  = rot(uv_pre_3d)
+    upor = rot(uv_post_3d)
+
+    return {
+        'V_ring':       vr,
+        'uv_pre':       upr,
+        'uv_post':      upor,
+        'F':            F,
+        'tracked_pre':  upr[local_v],
+        'tracked_post': upor[local_v],
+        'span':         span,
+    }
+
+
+def _clear_canonical():
+    for name in _CV_NAMES:
+        if ps.has_surface_mesh(name):
+            ps.remove_surface_mesh(name)
+        if ps.has_point_cloud(name):
+            ps.remove_point_cloud(name)
+
+
+def _rebuild_canonical_view():
+    """
+    Canonical view matching visualizer.cpp show_canonical_view():
+      Blue  = 3D one-ring (approx) + UV_pre panel
+      Orange = UV_post panel
+      Orange dot + yellow arrow = tracked vertex UV_pre → UV_post displacement
+    """
+    _clear_canonical()
+    if not _canonical_view or _selected_vtx < 0 or not _vtx_collapse_steps:
+        return
+
+    step_idx = max(0, min(_current_step_idx, len(_vtx_collapse_steps) - 1))
+    _ci, sheet, local_v = _vtx_collapse_steps[step_idx]
+
+    geo = _compute_canonical(sheet, local_v)
+
+    # Blue — 3D one-ring (approximate from original fine mesh)
+    rm = ps.register_surface_mesh(CV_RING_MESH, geo['V_ring'], geo['F'])
+    rm.set_color((0.3, 0.55, 1.0))
+    rm.set_edge_width(1.5)
+    rm.set_smooth_shade(False)
+    rm.set_transparency(0.5)
+
+    # Blue — UV_pre flat panel
+    pm = ps.register_surface_mesh(CV_UV_PRE, geo['uv_pre'], geo['F'])
+    pm.set_color((0.3, 0.55, 1.0))
+    pm.set_edge_width(1.5)
+    pm.set_smooth_shade(False)
+
+    # Orange — UV_post flat panel
+    qm = ps.register_surface_mesh(CV_UV_POST, geo['uv_post'], geo['F'])
+    qm.set_color((1.0, 0.5, 0.15))
+    qm.set_edge_width(1.5)
+    qm.set_smooth_shade(False)
+    qm.set_transparency(0.35)
+
+    # Tracked vertex: orange dot at UV_pre position + yellow arrow → UV_post
+    pt3d  = geo['tracked_pre'][np.newaxis]
+    arrow = (geo['tracked_post'] - geo['tracked_pre'])[np.newaxis]
+    pc = ps.register_point_cloud(CV_TRACKED, pt3d)
+    pc.set_color((1.0, 0.3, 0.0))
+    pc.set_radius(0.015, relative=True)
+    pc.add_vector_quantity("uv_disp", arrow, vectortype="ambient",
+                           enabled=True, color=(1.0, 0.85, 0.0))
+
+
 def _find_vtx_collapse_steps(v: int):
     """
     Walk decIM forward and collect every collapse step that touches vertex v.
@@ -453,8 +622,10 @@ def _rebuild_all():
     _rebuild_arrows()
     _rebuild_selection()
     _rebuild_flipped_viz()
+    _rebuild_fine_vtx_pc()
     _rebuild_vtx_trajectory()
     _rebuild_uv_sheet_viz()
+    _rebuild_canonical_view()
 
 
 # ---------------------------------------------------------------------------
@@ -463,7 +634,7 @@ def _rebuild_all():
 
 def ui_callback():
     global _z_offset, _sample_step, _show_arrows, _selected_deform_face, _show_flipped
-    global _selected_vtx, _current_step_idx, _uv_scale, _uv_plane_z
+    global _selected_vtx, _current_step_idx, _uv_scale, _uv_plane_z, _canonical_view, _uv_elev
 
     changed = False
 
@@ -526,45 +697,68 @@ def ui_callback():
         psim.TextUnformatted(f"Flipped: {n_flipped} / {fineF.shape[0]} faces")
 
     psim.Separator()
-    psim.TextUnformatted("Collapse Trace  (click fine mesh vertex)")
-
-    c, v = psim.SliderFloat("UV scale", _uv_scale, 0.5, 10.0)
-    if c:
-        _uv_scale = v
-        _rebuild_uv_sheet_viz()
-
-    c, v = psim.SliderFloat("UV plane Z", _uv_plane_z, -5.0, 5.0)
-    if c:
-        _uv_plane_z = v
-        _rebuild_uv_sheet_viz()
+    psim.TextUnformatted("Collapse Trace  (click fine_mesh_verts point cloud)")
 
     if _selected_vtx >= 0:
         n_steps = len(_vtx_collapse_steps)
         psim.TextUnformatted(f"Vertex {_selected_vtx}  |  {n_steps} collapse steps")
+
         if n_steps > 0:
             ci_cur = _vtx_collapse_steps[_current_step_idx][0]
             psim.TextUnformatted(
                 f"Step {_current_step_idx + 1} / {n_steps}  "
                 f"(collapse #{ci_cur})")
+
             if psim.Button("< Prev"):
                 if _current_step_idx > 0:
                     _current_step_idx -= 1
                     _rebuild_uv_sheet_viz()
+                    _rebuild_canonical_view()
             psim.SameLine()
             if psim.Button("Next >"):
                 if _current_step_idx < n_steps - 1:
                     _current_step_idx += 1
                     _rebuild_uv_sheet_viz()
+                    _rebuild_canonical_view()
         else:
             psim.TextUnformatted("(vertex not involved in any collapse)")
+
+        # ---- canonical view toggle ----
+        psim.Separator()
+        c, v = psim.Checkbox("Canonical View", _canonical_view)
+        if c:
+            _canonical_view = v
+            _rebuild_canonical_view()
+
+        if _canonical_view:
+            psim.TextDisabled("Blue = ring + UV_pre   Orange = UV_post")
+            c, v = psim.SliderFloat("UV panel elev", _uv_elev, 0.0, 5.0)
+            if c:
+                _uv_elev = v
+                _rebuild_canonical_view()
+
+        # ---- flat UV sheet controls (non-canonical) ----
+        if not _canonical_view:
+            c, v = psim.SliderFloat("UV scale", _uv_scale, 0.5, 10.0)
+            if c:
+                _uv_scale = v
+                _rebuild_uv_sheet_viz()
+            c, v = psim.SliderFloat("UV plane Z", _uv_plane_z, -5.0, 5.0)
+            if c:
+                _uv_plane_z = v
+                _rebuild_uv_sheet_viz()
+
+        psim.Separator()
         if psim.Button("Clear vertex"):
             _selected_vtx = -1
             _vtx_collapse_steps.clear()
             _current_step_idx = 0
+            _canonical_view   = False
             _rebuild_vtx_trajectory()
             _rebuild_uv_sheet_viz()
+            _clear_canonical()
     else:
-        psim.TextUnformatted("No vertex selected")
+        psim.TextUnformatted("No vertex selected — click fine_mesh_verts")
 
     psim.End()
 
@@ -601,6 +795,19 @@ def ui_callback():
                     _find_vtx_collapse_steps(vidx)
                     _rebuild_vtx_trajectory()
                     _rebuild_uv_sheet_viz()
+                    _rebuild_canonical_view()
+
+            elif sname == FINE_VTX_PC:
+                etype = sdata.get('element_type', None)
+                vidx  = int(sdata.get('index', -1))
+                nV    = _bundle.fineV.shape[0]
+                if etype == 'point' and 0 <= vidx < nV:
+                    _selected_vtx     = vidx
+                    _current_step_idx = 0
+                    _find_vtx_collapse_steps(vidx)
+                    _rebuild_vtx_trajectory()
+                    _rebuild_uv_sheet_viz()
+                    _rebuild_canonical_view()
 
 
 # ---------------------------------------------------------------------------
