@@ -358,6 +358,100 @@ def query_coarse_to_fine(
 
 
 # ---------------------------------------------------------------------------
+# query_point_with_intermediates
+# ---------------------------------------------------------------------------
+
+def query_point_with_intermediates(
+    decInfo, decIM, faceSheetID,
+    BC_init, BF_init, FIdx_init,
+    fineV,
+):
+    """
+    Like query_coarse_to_fine for a single point, but returns a list of
+    3-D positions — one per collapse step visited — so callers can display
+    the actual intermediate results of the C2F query walk.
+
+    The first entry is the initial (coarse) position; each subsequent entry
+    is the position after that collapse step has been applied.
+
+    Parameters
+    ----------
+    BC_init  : (3,) float64  — initial barycentric weights
+    BF_init  : list of 3 ints — initial global vertex indices
+    FIdx_init: int — initial global face index
+    fineV    : (NF, 3) fine-mesh vertex positions
+
+    Returns
+    -------
+    List[np.ndarray]  — 3-D positions at each query step
+    """
+    BC   = np.array(BC_init, dtype=np.float64)
+    BF   = list(BF_init)
+    face = int(FIdx_init)
+    nDec = len(decInfo)
+    nFO  = len(faceSheetID)
+    d_idx = nDec
+
+    def pos3d():
+        return (BC[0] * fineV[BF[0]] +
+                BC[1] * fineV[BF[1]] +
+                BC[2] * fineV[BF[2]])
+
+    positions = [pos3d()]   # position[0] = coarse start
+
+    while True:
+        d_list = decIM[face]
+        found  = False
+        for ii in range(len(d_list) - 1, -1, -1):
+            if d_idx > d_list[ii]:
+                d_idx = d_list[ii]
+                found = True
+                break
+        if not found:
+            break
+
+        sid = int(faceSheetID[face]) if face < nFO else 0
+        cd  = decInfo[d_idx]
+        sd  = None
+        for s in cd.sheets:
+            if s.global_sheet_id == sid:
+                sd = s
+                break
+        if sd is None and cd.sheets:
+            if len(cd.sheets) == 1:
+                sd = cd.sheets[0]
+        if sd is None:
+            continue
+
+        pre_row = -1
+        for r in range(len(sd.FIdx_pre)):
+            if sd.FIdx_pre[r] == face:
+                pre_row = r
+                break
+        if pre_row < 0:
+            continue
+
+        v0, v1, v2 = sd.FUV_pre[pre_row]
+        uv_q = (BC[0] * sd.UV_post[v0] +
+                BC[1] * sd.UV_post[v1] +
+                BC[2] * sd.UV_post[v2])
+
+        B            = compute_barycentric_2d(uv_q, sd.UV_pre, sd.FUV_pre)
+        best         = int(np.argmax(B.min(axis=1)))
+        b_row        = np.maximum(0.0, B[best])
+        s_row        = b_row.sum()
+        BC           = b_row / s_row if s_row > 0 else np.full(3, 1.0 / 3)
+        BF           = [int(sd.subsetVIdx[sd.FUV_pre[best, 0]]),
+                        int(sd.subsetVIdx[sd.FUV_pre[best, 1]]),
+                        int(sd.subsetVIdx[sd.FUV_pre[best, 2]])]
+        face         = int(sd.FIdx_pre[best])
+
+        positions.append(pos3d())
+
+    return positions
+
+
+# ---------------------------------------------------------------------------
 # sample_face_correspondence
 # ---------------------------------------------------------------------------
 

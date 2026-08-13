@@ -28,7 +28,7 @@ import polyscope as ps
 import polyscope.imgui as psim
 from scipy.spatial import cKDTree
 
-from c2f_query import load_bundle
+from c2f_query import load_bundle, query_point_with_intermediates
 
 # ---- structure names ----
 FINE_MESH     = "fine_mesh"
@@ -79,9 +79,10 @@ _flipped_vtx_colors       = None     # cached (NV,3) color array for the quantit
 _flipped_vtx_arrows       = None     # cached (NV,3) arrow vectors for the quantity
 
 # collapse-trace state
-_selected_vtx       = -1
-_vtx_collapse_steps = []   # list of (collapse_idx, SheetData, local_vtx_idx)
-_current_step_idx   = 0
+_selected_vtx         = -1
+_vtx_collapse_steps   = []   # list of (collapse_idx, SheetData, local_vtx_idx)
+_vtx_query_positions  = []   # list of np.ndarray(3,) — actual C2F query intermediates
+_current_step_idx     = 0
 _uv_plane_z         = -1.5  # Z position of UV flat-mesh in 3D viewport
 _uv_scale           = 3.0   # scale applied to normalised UV coords
 _canonical_view     = False
@@ -431,16 +432,12 @@ def _rebuild_step_viz():
     step_idx = max(0, min(_current_step_idx, len(_vtx_collapse_steps) - 1))
     _ci, sheet, _local_v = _vtx_collapse_steps[step_idx]
 
-    # Interpolate between fine position (t=0) and coarse correspondence (t=1)
-    fine_pos = _bundle.fineV[_selected_vtx]
-    n_steps  = len(_vtx_collapse_steps)
-    t = step_idx / max(1, n_steps - 1)
-
-    if _fine_id_to_row is not None and _selected_vtx in _fine_id_to_row:
-        coarse_pos = _deform_pts[_fine_id_to_row[_selected_vtx]]
-        current_pos = fine_pos + t * (coarse_pos - fine_pos)
+    # Use the actual C2F query intermediate position for this step.
+    if _vtx_query_positions:
+        qi = min(step_idx, len(_vtx_query_positions) - 1)
+        current_pos = _vtx_query_positions[qi]
     else:
-        current_pos = fine_pos
+        current_pos = _bundle.fineV[_selected_vtx]
 
     pc = ps.register_point_cloud(STEP_POS_PC, current_pos[np.newaxis])
     pc.set_color((1.0, 0.35, 0.0))
@@ -452,6 +449,56 @@ def _rebuild_step_viz():
     # pc_ring  = ps.register_point_cloud(STEP_RING_PC, ring_pts)
     # pc_ring.set_color((0.3, 0.85, 1.0))
     # pc_ring.set_radius(0.006, relative=True)
+    # pc_ring.set_radius(0.006, relative=True)
+
+
+def _vtx_world_pos_after_collapse(sheet, local_v: int) -> np.ndarray:
+    """
+    Returns the 3-D world-space position of the tracked vertex after the
+    collapse described by `sheet`, by projecting UV_post[local_v] through
+    the ring's local tangent frame.  This is the actual intermediate result
+    of the F2C mapping at this collapse step.
+    """
+    subV    = np.clip(sheet.subsetVIdx, 0, len(_bundle.fineV) - 1)
+    verts   = _bundle.fineV[subV]
+    uv_pre  = sheet.UV_pre
+    F       = sheet.FUV_pre
+
+    centroid = verts.mean(axis=0)
+    span     = (verts.max(axis=0) - verts.min(axis=0)).max()
+    if span < 1e-10:
+        span = 1.0
+
+    v0 = verts[F[:, 0]]; v1 = verts[F[:, 1]]; v2 = verts[F[:, 2]]
+    nrm = np.cross(v1 - v0, v2 - v0).sum(axis=0)
+    n   = np.linalg.norm(nrm)
+    nrm = nrm / n if n > 1e-10 else np.array([0., 0., 1.])
+
+    arb = np.array([1., 0., 0.]) if abs(nrm[0]) < 0.9 else np.array([0., 1., 0.])
+    t1  = arb - nrm * nrm.dot(arb); t1 /= np.linalg.norm(t1)
+    t2  = np.cross(nrm, t1);        t2 /= np.linalg.norm(t2)
+
+    uc     = (uv_pre[:, 0].max() + uv_pre[:, 0].min()) * 0.5
+    vc     = (uv_pre[:, 1].max() + uv_pre[:, 1].min()) * 0.5
+    pv     = verts - centroid
+    xu     = pv @ t1;  yu  = pv @ t2
+    du     = uv_pre[:, 0] - uc;  dv = uv_pre[:, 1] - vc
+    A_sum  = float((xu * du + yu * dv).sum())
+    B_sum  = float((yu * du - xu * dv).sum())
+    beta   = math.atan2(B_sum, A_sum)
+    cb, sb = math.cos(beta), math.sin(beta)
+    t1_old = t1.copy()
+    t1 =  cb * t1_old + sb * t2
+    t2 = -sb * t1_old + cb * t2
+
+    uv_span  = max(uv_pre[:, 0].max() - uv_pre[:, 0].min(),
+                   uv_pre[:, 1].max() - uv_pre[:, 1].min())
+    uv_scale = (1.0 / uv_span) if uv_span > 1e-10 else 1.0
+
+    uv = sheet.UV_post[local_v]
+    dU = (uv[0] - uc) * uv_scale * span
+    dV = (uv[1] - vc) * uv_scale * span
+    return centroid + dU * t1 + dV * t2
 
 
 def _compute_canonical(sheet, local_v: int) -> dict:
@@ -647,6 +694,53 @@ def _find_vtx_collapse_steps(v: int):
           f"(from {len(faces_of_v)} incident fine faces)")
 
 
+def _run_query_intermediates(v: int):
+    """
+    Run query_point_with_intermediates starting from the coarse vertex that
+    corresponds to fine vertex v, and store the resulting 3-D positions in
+    _vtx_query_positions.
+    """
+    global _vtx_query_positions
+    _vtx_query_positions = []
+
+    if _fine_id_to_row is None or v not in _fine_id_to_row:
+        return
+
+    row = _fine_id_to_row[v]          # compact coarse index
+    gvi = int(_bundle.vtxMap[row])    # global SSP vertex index
+
+    # find a coarse face that has this compact vertex as a corner
+    coarse_face_idx = -1
+    corner_local    = -1
+    for fi, face in enumerate(_bundle.coarseF):
+        for ci in range(3):
+            if int(face[ci]) == row:
+                coarse_face_idx = fi
+                corner_local    = ci
+                break
+        if coarse_face_idx >= 0:
+            break
+
+    if coarse_face_idx < 0:
+        print(f"[query_intermediates] no coarse face found for vertex {v}")
+        return
+
+    cf       = _bundle.coarseF[coarse_face_idx]
+    BC_init  = np.zeros(3)
+    BC_init[corner_local] = 1.0
+    BF_init  = [int(_bundle.vtxMap[cf[0]]),
+                int(_bundle.vtxMap[cf[1]]),
+                int(_bundle.vtxMap[cf[2]])]
+    FIdx_init = int(_bundle.faceMap[coarse_face_idx])
+
+    _vtx_query_positions = query_point_with_intermediates(
+        _bundle.decInfo, _bundle.decIM, _bundle.faceSheetID,
+        BC_init, BF_init, FIdx_init,
+        _bundle.fineV,
+    )
+    print(f"[query_intermediates] vertex {v}: {len(_vtx_query_positions)} intermediate positions")
+
+
 def _rebuild_vtx_trajectory():
     """
     3D view: green dot at clicked fine vertex + green curve to its coarse
@@ -751,7 +845,7 @@ def _rebuild_all():
 def ui_callback():
     global _z_offset, _sample_step, _show_arrows, _selected_deform_face, _show_flipped
     global _show_flipped_verts, _show_flipped_arrows, _selected_flipped_face, _flipped_vtx_colors, _flipped_vtx_arrows
-    global _selected_vtx, _current_step_idx, _uv_scale, _uv_plane_z, _canonical_view, _uv_post_offset, _canonical_domain
+    global _selected_vtx, _current_step_idx, _uv_scale, _uv_plane_z, _canonical_view, _uv_post_offset, _canonical_domain, _vtx_query_positions
 
     changed = False
 
@@ -931,6 +1025,7 @@ def ui_callback():
             was_canonical = _canonical_view
             _selected_vtx = -1
             _vtx_collapse_steps.clear()
+            _vtx_query_positions.clear()
             _current_step_idx = 0
             _canonical_view   = False
             if was_canonical:
@@ -969,6 +1064,7 @@ def ui_callback():
                     _selected_vtx     = vidx
                     _current_step_idx = 0
                     _find_vtx_collapse_steps(vidx)
+                    _run_query_intermediates(vidx)
                     _rebuild_vtx_trajectory()
                     _rebuild_step_viz()
                     _rebuild_canonical_view()
