@@ -301,7 +301,7 @@ def query_coarse_to_fine(
             # Determine the sheet this face belongs to
             sid = int(faceSheetID[face]) if face < nFO else 0
 
-            # Find the matching SheetData; fall back to sheet[0] if not found
+            # Find the matching SheetData for this face's sheet.
             cd  = decInfo[d_idx]
             sd  = None
             for s in cd.sheets:
@@ -309,7 +309,11 @@ def query_coarse_to_fine(
                     sd = s
                     break
             if sd is None and cd.sheets:
-                sd = cd.sheets[0]   # best-effort fallback (see assumption §3)
+                if len(cd.sheets) == 1:
+                    # Manifold collapse: single sheet, [0] is always correct.
+                    sd = cd.sheets[0]
+                # else: seam collapse — no matching sheet found.
+                # Using a different sheet's UV would corrupt the sample; skip.
             if sd is None:
                 continue
 
