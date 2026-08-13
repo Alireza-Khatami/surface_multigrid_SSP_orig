@@ -763,32 +763,35 @@ def _find_vtx_collapse_steps(v: int):
           f"(from {len(faces_of_v)} incident fine faces)")
 
 
+def _load_vtx_collapse_steps(v: int):
+    """
+    Populate _vtx_collapse_steps for vertex v.
+    Prefers _bundle._f2c_vtx_steps (batch map) when available — it finds all
+    collapses where v is in the one-ring, not just faces incident to v.
+    Falls back to _find_vtx_collapse_steps otherwise.
+    """
+    global _vtx_collapse_steps
+    batch_map = getattr(_bundle, '_f2c_vtx_steps', None)
+    if batch_map is not None and v in batch_map:
+        _vtx_collapse_steps = batch_map[v]
+        print(f"[trace] vertex {v}: {len(_vtx_collapse_steps)} collapse steps (batch map)")
+    else:
+        _find_vtx_collapse_steps(v)
+
+
 def _run_query_intermediates(v: int):
     """
     Track fine vertex v forward through F2C collapse steps (fine→coarse direction).
-    Uses _bundle._f2c_vtx_steps (built by compute_f2c_correspondences) when available
-    so the interactive tracker uses exactly the same sheet selection as the batch.
-    Falls back to _vtx_collapse_steps from _find_vtx_collapse_steps otherwise.
+    _vtx_collapse_steps must already be populated by _load_vtx_collapse_steps(v).
     """
     global _vtx_query_positions
-    _vtx_query_positions = []
-
-    batch_map = getattr(_bundle, '_f2c_vtx_steps', None)
-    if batch_map is not None and v in batch_map:
-        steps = batch_map[v]
-        source = "batch map"
-    else:
-        steps = _vtx_collapse_steps
-        source = "collapse trace"
-
-    start_pos = _bundle.fineV[v]
     _vtx_query_positions = query_vertex_f2c_intermediates(
-        steps,
+        _vtx_collapse_steps,
         _bundle.fineV,
-        start_pos,
+        _bundle.fineV[v],
     )
     print(f"[f2c_intermediates] vertex {v}: {len(_vtx_query_positions)} positions "
-          f"({len(steps)} steps, source={source})")
+          f"({len(_vtx_collapse_steps)} steps)")
 
 
 def _rebuild_vtx_trajectory():
@@ -1127,7 +1130,7 @@ def ui_callback():
                 if 0 <= vidx < nV:
                     _selected_vtx     = vidx
                     _current_step_idx = 0
-                    _find_vtx_collapse_steps(vidx)
+                    _load_vtx_collapse_steps(vidx)
                     _run_query_intermediates(vidx)
                     _rebuild_vtx_trajectory()
                     _rebuild_step_viz()
@@ -1196,7 +1199,7 @@ def ui_callback():
                 if etype == 'vertex' and 0 <= vidx < nV:
                     _selected_vtx     = vidx
                     _current_step_idx = 0
-                    _find_vtx_collapse_steps(vidx)
+                    _load_vtx_collapse_steps(vidx)
                     _rebuild_vtx_trajectory()
                     _rebuild_uv_sheet_viz()
                     _rebuild_canonical_view()
