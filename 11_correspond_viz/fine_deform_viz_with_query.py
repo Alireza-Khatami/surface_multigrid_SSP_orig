@@ -28,7 +28,7 @@ import polyscope as ps
 import polyscope.imgui as psim
 from scipy.spatial import cKDTree
 
-from c2f_query import load_bundle, query_vertex_f2c_intermediates
+from c2f_query import load_bundle, query_vertex_f2c_intermediates, compute_f2c_correspondences
 
 # ---- structure names ----
 FINE_MESH     = "fine_mesh"
@@ -45,6 +45,8 @@ UV_TRACKED_PC  = "uv_tracked_vtx"
 FINE_VTX_PC    = "fine_mesh_verts"   # selectable point cloud over fine mesh
 STEP_POS_PC    = "step_tracked_pos"  # main view: single dot at tracked vertex (current step)
 STEP_RING_PC   = "step_ring_pts"     # main view: one-ring vertices for current step
+F2C_DEFORM_MESH = "f2c_deformed_fine_mesh"   # F2C-query-based deformed mesh (green)
+F2C_DEFORM_PC   = "f2c_deformed_fine_verts"  # F2C tracked vertex positions
 CV_RING_MESH   = "cv_ring"           # canonical: 3D one-ring (blue)
 CV_UV_PRE      = "cv_uv_pre"         # canonical: UV_pre panel (blue)
 CV_UV_POST     = "cv_uv_post"        # canonical: UV_post panel (orange)
@@ -77,6 +79,10 @@ _selected_flipped_face    = -1       # local index into FLIPPED_MESH / _flipped_
 _flipped_faces_glob       = None     # (K,3) global fine vertex IDs per flipped face
 _flipped_vtx_colors       = None     # cached (NV,3) color array for the quantity
 _flipped_vtx_arrows       = None     # cached (NV,3) arrow vectors for the quantity
+
+# F2C batch deformed mesh
+_f2c_deform_mesh_v  = None   # (NF, 3) fineV with F2C-tracked verts moved
+_f2c_tracked_mask   = None   # (NF,) bool
 
 # collapse-trace state
 _selected_vtx         = -1
@@ -129,6 +135,16 @@ def _compute_vertex_correspondences():
     return True
 
 
+def _compute_f2c_deformed_mesh():
+    """
+    Run F2C query for every fine vertex (batch), store the result as a
+    deformed vertex array — fine vertices replaced by their F2C final position.
+    """
+    global _f2c_deform_mesh_v, _f2c_tracked_mask
+    print("[f2c] computing F2C correspondences for all fine vertices...")
+    _f2c_deform_mesh_v, _f2c_tracked_mask = compute_f2c_correspondences(_bundle)
+
+
 # ---------------------------------------------------------------------------
 # Rebuild helpers
 # ---------------------------------------------------------------------------
@@ -148,6 +164,22 @@ def _rebuild_meshes():
         dm.set_edge_width(0.7)
         dm.set_smooth_shade(False)
         dm.set_transparency(0.7)
+
+    if _f2c_deform_mesh_v is not None:
+        fv = _f2c_deform_mesh_v.copy()
+        fv[:, 2] += _z_offset * 2
+        fm2 = ps.register_surface_mesh(F2C_DEFORM_MESH, fv, _bundle.fineF)
+        fm2.set_color((0.20, 0.80, 0.40))
+        fm2.set_edge_width(0.7)
+        fm2.set_smooth_shade(False)
+        fm2.set_transparency(0.7)
+
+        # point cloud of only the tracked (moved) vertices
+        if _f2c_tracked_mask is not None:
+            tracked_pts = fv[_f2c_tracked_mask]
+            pc = ps.register_point_cloud(F2C_DEFORM_PC, tracked_pts)
+            pc.set_color((0.20, 0.80, 0.40))
+            pc.set_radius(0.004, relative=True)
 
 
 def _rebuild_deform_pc():
@@ -1177,6 +1209,8 @@ def main():
     if not ok:
         print("ERROR: could not compute vertex correspondences — exiting.")
         sys.exit(1)
+
+    _compute_f2c_deformed_mesh()
 
     _log_decim_stats()
 

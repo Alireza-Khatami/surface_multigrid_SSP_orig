@@ -501,6 +501,62 @@ def query_vertex_f2c_intermediates(
 
 
 # ---------------------------------------------------------------------------
+# compute_f2c_correspondences  (batch F2C for every fine vertex)
+# ---------------------------------------------------------------------------
+
+def compute_f2c_correspondences(bundle):
+    """
+    For every fine vertex that appears in at least one collapse sheet, compute
+    its final F2C position (where it ends up after all collapse steps that
+    touch it, i.e. its coarse-mesh equivalent in fine-mesh space).
+
+    Parameters
+    ----------
+    bundle : Bundle  (must have v2 SSP data)
+
+    Returns
+    -------
+    f2c_v        : (NF, 3) float64
+        Copy of fineV with tracked vertices moved to their F2C final position.
+        Untracked vertices keep their original fineV position.
+    tracked_mask : (NF,) bool
+        True for vertices that went through at least one collapse step.
+    """
+    if not bundle.has_ssp_data:
+        raise RuntimeError('Bundle has no SSP data (need a v2 .c2f file)')
+
+    NF    = bundle.fineV.shape[0]
+    fineV = bundle.fineV
+
+    # Build map: global fine vertex index -> [(ci, SheetData, local_v_idx), ...]
+    vtx_steps = {}
+    for ci, cd in enumerate(bundle.decInfo):
+        for sheet in cd.sheets:
+            for local_v, gv in enumerate(sheet.subsetVIdx):
+                v = int(gv)
+                if 0 <= v < NF:
+                    if v not in vtx_steps:
+                        vtx_steps[v] = []
+                    vtx_steps[v].append((ci, sheet, local_v))
+
+    # Sort each vertex's steps ascending (fine→coarse)
+    for v in vtx_steps:
+        vtx_steps[v].sort(key=lambda x: x[0])
+
+    f2c_v        = fineV.copy()
+    tracked_mask = np.zeros(NF, dtype=bool)
+
+    for v, steps in vtx_steps.items():
+        positions = query_vertex_f2c_intermediates(steps, fineV, fineV[v])
+        f2c_v[v]        = positions[-1]
+        tracked_mask[v] = True
+
+    n_tracked = int(tracked_mask.sum())
+    print(f'[f2c_batch] {n_tracked} / {NF} fine vertices tracked through collapse steps')
+    return f2c_v, tracked_mask
+
+
+# ---------------------------------------------------------------------------
 # sample_face_correspondence
 # ---------------------------------------------------------------------------
 
