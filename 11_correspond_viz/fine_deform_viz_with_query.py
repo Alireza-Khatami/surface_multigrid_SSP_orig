@@ -448,7 +448,7 @@ def _log_step_info():
 
     # intermediate position from F2C query
     if _vtx_query_positions:
-        qi  = min(step_idx, len(_vtx_query_positions) - 1)
+        qi  = min(step_idx + 1, len(_vtx_query_positions) - 1)
         pos = _vtx_query_positions[qi]
     else:
         pos = _bundle.fineV[_selected_vtx]
@@ -489,7 +489,7 @@ def _rebuild_step_viz():
 
     # Use the actual C2F query intermediate position for this step.
     if _vtx_query_positions:
-        qi = min(step_idx, len(_vtx_query_positions) - 1)
+        qi = min(step_idx + 1, len(_vtx_query_positions) - 1)
         current_pos = _vtx_query_positions[qi]
     else:
         current_pos = _bundle.fineV[_selected_vtx]
