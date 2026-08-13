@@ -481,6 +481,8 @@ def query_vertex_f2c_intermediates(
     positions = [np.array(start_pos, dtype=np.float64)]
 
     for _ci, sheet, local_v in collapse_steps:
+        if local_v >= len(sheet.UV_post):
+            continue   # vertex has no UV slot in this sheet (boundary/seam case)
         # UV position of this vertex after the collapse
         uv_post = sheet.UV_post[local_v]
 
@@ -529,15 +531,28 @@ def compute_f2c_correspondences(bundle):
     fineV = bundle.fineV
 
     # Build map: global fine vertex index -> [(ci, SheetData, local_v_idx), ...]
+    # Guard: local_v must be < uvRows (len(UV_post)) — subsetVIdx can be larger
+    # than the UV arrays for boundary/seam vertices that have no UV slot here.
+    # Dedup by (ci, v): seam collapses have multiple sheets; we use the first
+    # sheet where the vertex has a valid UV position.
     vtx_steps = {}
+    recorded  = set()   # (ci, v) pairs already committed
     for ci, cd in enumerate(bundle.decInfo):
         for sheet in cd.sheets:
+            uvRows = len(sheet.UV_post)
             for local_v, gv in enumerate(sheet.subsetVIdx):
+                if local_v >= uvRows:
+                    continue   # no UV slot for this vertex in this sheet
                 v = int(gv)
-                if 0 <= v < NF:
-                    if v not in vtx_steps:
-                        vtx_steps[v] = []
-                    vtx_steps[v].append((ci, sheet, local_v))
+                if not (0 <= v < NF):
+                    continue
+                key = (ci, v)
+                if key in recorded:
+                    continue   # already have a sheet for this (collapse, vertex)
+                recorded.add(key)
+                if v not in vtx_steps:
+                    vtx_steps[v] = []
+                vtx_steps[v].append((ci, sheet, local_v))
 
     # Sort each vertex's steps ascending (fine→coarse)
     for v in vtx_steps:
