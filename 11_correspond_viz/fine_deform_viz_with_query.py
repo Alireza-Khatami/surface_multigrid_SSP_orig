@@ -80,7 +80,7 @@ _current_step_idx   = 0
 _uv_plane_z         = -1.5  # Z position of UV flat-mesh in 3D viewport
 _uv_scale           = 3.0   # scale applied to normalised UV coords
 _canonical_view     = False
-_uv_elev            = 1.5   # UV panel elevation above ring (in normalised units)
+_uv_post_offset     = 1.5   # normalised separation: UV_post sits this far above UV_pre
 _canonical_domain   = 'uv'  # 'uv' = show UV_pre/post panels  |  'ring' = show 3D one-ring
 
 
@@ -421,16 +421,15 @@ def _compute_canonical(sheet, local_v: int) -> dict:
                   uv_pre[:, 1].max() - uv_pre[:, 1].min())
     uv_scale = (1.0 / uv_span) if uv_span > 1e-10 else 1.0
 
-    # ---- UV panels → 3D, floating above ring by _uv_elev (normalised units) ----
-    panel_c = centroid + nrm * _uv_elev * span   # world-space; div by span in rot_norm
-
-    def to3d(UV):
-        dU = (UV[:, 0:1] - uc) * uv_scale * span   # kept in world-space; div by span later
+    # UV_pre at ring level (centroid); UV_post offset above by _uv_post_offset normalised units.
+    # Both panels use the same tangent frame so they're visually aligned.
+    def to3d(UV, panel_origin):
+        dU = (UV[:, 0:1] - uc) * uv_scale * span
         dV = (UV[:, 1:2] - vc) * uv_scale * span
-        return panel_c + dU * t1 + dV * t2
+        return panel_origin + dU * t1 + dV * t2
 
-    uv_pre_3d  = to3d(uv_pre)
-    uv_post_3d = to3d(uv_post)
+    uv_pre_3d  = to3d(uv_pre,  centroid)
+    uv_post_3d = to3d(uv_post, centroid + nrm * _uv_post_offset * span)
 
     # ---- canonical rotation: nrm → world Y-up ----
     world_up = np.array([0.0, 1.0, 0.0])
@@ -658,7 +657,7 @@ def _rebuild_all():
 def ui_callback():
     global _z_offset, _sample_step, _show_arrows, _selected_deform_face, _show_flipped
     global _show_flipped_verts, _show_flipped_arrows, _selected_flipped_face
-    global _selected_vtx, _current_step_idx, _uv_scale, _uv_plane_z, _canonical_view, _uv_elev, _canonical_domain
+    global _selected_vtx, _current_step_idx, _uv_scale, _uv_plane_z, _canonical_view, _uv_post_offset, _canonical_domain
 
     changed = False
 
@@ -819,10 +818,10 @@ def ui_callback():
                 _rebuild_canonical_view()
 
             if _canonical_domain == 'uv':
-                psim.TextDisabled("Blue = UV_pre   Orange = UV_post")
-                c, v = psim.SliderFloat("UV panel elev", _uv_elev, 0.0, 5.0)
+                psim.TextDisabled("Blue = UV_pre (down)   Orange = UV_post (offset above)")
+                c, v = psim.SliderFloat("Pre/Post offset", _uv_post_offset, 0.0, 5.0)
                 if c:
-                    _uv_elev = v
+                    _uv_post_offset = v
                     _rebuild_canonical_view()
             else:
                 psim.TextDisabled("Blue = 3-D one-ring")
