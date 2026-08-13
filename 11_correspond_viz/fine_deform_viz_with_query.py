@@ -43,10 +43,13 @@ TRAJ_CURVE     = "vtx_trajectory"
 UV_SHEET_MESH  = "uv_sheet"
 UV_TRACKED_PC  = "uv_tracked_vtx"
 FINE_VTX_PC    = "fine_mesh_verts"   # selectable point cloud over fine mesh
+STEP_POS_PC    = "step_tracked_pos"  # main view: single dot at tracked vertex (current step)
+STEP_RING_PC   = "step_ring_pts"     # main view: one-ring vertices for current step
 CV_RING_MESH   = "cv_ring"           # canonical: 3D one-ring (blue)
 CV_UV_PRE      = "cv_uv_pre"         # canonical: UV_pre panel (blue)
 CV_UV_POST     = "cv_uv_post"        # canonical: UV_post panel (orange)
 CV_TRACKED     = "cv_tracked_vtx"    # canonical: tracked vertex dot + arrow
+CV_TRACKED_POST = "cv_tracked_post"  # canonical: tracked vertex dot at UV_post
 _CV_NAMES      = [CV_RING_MESH, CV_UV_PRE, CV_UV_POST, CV_TRACKED]
 
 # ---- mutable state ----
@@ -72,6 +75,8 @@ _show_flipped_arrows      = True
 _flipped_highlight_active = False
 _selected_flipped_face    = -1       # local index into FLIPPED_MESH / _flipped_faces_glob
 _flipped_faces_glob       = None     # (K,3) global fine vertex IDs per flipped face
+_flipped_vtx_colors       = None     # cached (NV,3) color array for the quantity
+_flipped_vtx_arrows       = None     # cached (NV,3) arrow vectors for the quantity
 
 # collapse-trace state
 _selected_vtx       = -1
@@ -258,18 +263,16 @@ def _rebuild_flipped_viz():
     """
     global _flipped_highlight_active, _flipped_faces_glob, _selected_flipped_face
 
-    if ps.has_point_cloud(FLIPPED_PC):
-        ps.remove_point_cloud(FLIPPED_PC)
     if ps.has_surface_mesh(FLIPPED_MESH):
         ps.remove_surface_mesh(FLIPPED_MESH)
     if ps.has_surface_mesh(DEFORM_MESH):
-        dm = ps.get_surface_mesh(DEFORM_MESH)
         if _flipped_highlight_active:
             _flipped_highlight_active = False
         if not _show_flipped:
-            dm.set_transparency(0.7)
+            ps.get_surface_mesh(DEFORM_MESH).set_transparency(0.7)
 
     if not _show_flipped or _deform_mesh_v is None:
+        _rebuild_flipped_vtx_colors()
         return
 
     fineF = _bundle.fineF
@@ -326,37 +329,76 @@ def _rebuild_flipped_viz():
 
     _flipped_faces_glob    = flip_faces_glob   # store for per-face pick lookup
     _selected_flipped_face = -1                # reset selection on full rebuild
-    _rebuild_flipped_pc()
+    _rebuild_flipped_vtx_colors()
+    _rebuild_flipped_arrows()
 
 
-def _rebuild_flipped_pc():
-    """Rebuild FLIPPED_PC for either a single selected flipped face or all flipped faces."""
-    global _selected_flipped_face, _flipped_faces_glob
+def _rebuild_flipped_vtx_colors():
+    """
+    Paint a color quantity on the FINE_VTX_PC point cloud:
+      - Flipped-face vertices → red
+      - All others            → default grey
+    When a single flipped face is selected, only its 3 corners go red.
+    Colors are cached in _flipped_vtx_colors so the checkbox can re-upload
+    with enabled=True/False without recomputing.
+    """
+    global _flipped_vtx_colors
+    if not ps.has_point_cloud(FINE_VTX_PC):
+        return
+    pc = ps.get_point_cloud(FINE_VTX_PC)
 
-    if ps.has_point_cloud(FLIPPED_PC):
-        ps.remove_point_cloud(FLIPPED_PC)
-
-    if (not _show_flipped or not _show_flipped_verts
-            or _flipped_faces_glob is None or _deform_mesh_v is None):
+    if not _show_flipped or _flipped_faces_glob is None:
+        try:
+            pc.remove_quantity("flipped_verts")
+        except Exception:
+            pass
+        _flipped_vtx_colors = None
         return
 
-    dv = _deform_mesh_v.copy()
+    NV     = _bundle.fineV.shape[0]
+    colors = np.tile(np.array([0.75, 0.75, 0.75], dtype=np.float32), (NV, 1))
+
+    if _selected_flipped_face >= 0 and _selected_flipped_face < len(_flipped_faces_glob):
+        vids = _flipped_faces_glob[_selected_flipped_face]
+        colors[vids] = [1.0, 0.1, 0.1]
+    else:
+        for face_vids in _flipped_faces_glob:
+            colors[face_vids] = [1.0, 0.1, 0.1]
+
+    _flipped_vtx_colors = colors
+    pc.add_color_quantity("flipped_verts", colors, enabled=_show_flipped_verts)
+    print ("dfaaf")
+
+
+def _rebuild_flipped_arrows():
+    """Vector quantity on FINE_VTX_PC: fine → deformed position for flipped vertices."""
+    global _flipped_vtx_arrows
+    if not ps.has_point_cloud(FINE_VTX_PC):
+        return
+    pc = ps.get_point_cloud(FINE_VTX_PC)
+
+    if not _show_flipped or _flipped_faces_glob is None or _deform_mesh_v is None:
+        try:
+            pc.remove_quantity("flipped_arrows")
+        except Exception:
+            pass
+        _flipped_vtx_arrows = None
+        return
+
+    NV   = _bundle.fineV.shape[0]
+    vecs = np.zeros((NV, 3), dtype=np.float32)
+    dv   = _deform_mesh_v.copy()
     dv[:, 2] += _z_offset
 
     if _selected_flipped_face >= 0 and _selected_flipped_face < len(_flipped_faces_glob):
-        vids = _flipped_faces_glob[_selected_flipped_face]   # exactly 3 global vertex IDs
+        vids = _flipped_faces_glob[_selected_flipped_face]
     else:
         vids = np.unique(_flipped_faces_glob)
 
-    src  = _bundle.fineV[vids]
-    dst  = dv[vids]
-    vecs = dst - src
-    pc = ps.register_point_cloud(FLIPPED_PC, src)
-    pc.set_color((1.0, 0.10, 0.10))
-    pc.set_radius(0.005, relative=True)
-    pc.add_vector_quantity("to_deformed", vecs,
-                           vectortype="ambient", enabled=_show_flipped_arrows,
-                           color=(1.0, 0.30, 0.30))
+    vecs[vids] = (dv[vids] - _bundle.fineV[vids]).astype(np.float32)
+    _flipped_vtx_arrows = vecs
+    pc.add_vector_quantity("flipped_arrows", vecs, vectortype="ambient",
+                           enabled=_show_flipped_arrows, color=(1.0, 0.30, 0.30))
 
 
 def _rebuild_fine_vtx_pc():
@@ -366,6 +408,40 @@ def _rebuild_fine_vtx_pc():
     pc = ps.register_point_cloud(FINE_VTX_PC, _bundle.fineV)
     pc.set_color((0.75, 0.75, 0.75))
     pc.set_radius(0.003, relative=True)
+    _rebuild_flipped_vtx_colors()
+    _rebuild_flipped_arrows()
+
+
+def _rebuild_step_viz():
+    """
+    Main-view (non-canonical) overlay for the current collapse step:
+      STEP_POS_PC  — single orange dot at the tracked vertex's fine-mesh position.
+      STEP_RING_PC — one-ring vertices for the current step's sheet (cyan), so you
+                     can see which neighbourhood on the full mesh is being processed.
+    Both are cleared when no vertex is selected or in canonical mode.
+    """
+    for name in (STEP_POS_PC, STEP_RING_PC):
+        if ps.has_point_cloud(name):
+            ps.remove_point_cloud(name)
+
+    if _selected_vtx < 0 or not _vtx_collapse_steps:
+        return
+
+    step_idx = max(0, min(_current_step_idx, len(_vtx_collapse_steps) - 1))
+    _ci, sheet, _local_v = _vtx_collapse_steps[step_idx]
+
+    # Single point: tracked vertex in 3D space
+    fine_pos = _bundle.fineV[_selected_vtx]
+    pc = ps.register_point_cloud(STEP_POS_PC, fine_pos[np.newaxis])
+    pc.set_color((1.0, 0.35, 0.0))
+    pc.set_radius(0.016, relative=True)
+
+    # # Ring point cloud: all subsetVIdx vertices for this step
+    # subV     = np.clip(sheet.subsetVIdx, 0, _bundle.fineV.shape[0] - 1)
+    # ring_pts = _bundle.fineV[subV]
+    # pc_ring  = ps.register_point_cloud(STEP_RING_PC, ring_pts)
+    # pc_ring.set_color((0.3, 0.85, 1.0))
+    # pc_ring.set_radius(0.006, relative=True)
 
 
 def _compute_canonical(sheet, local_v: int) -> dict:
@@ -504,12 +580,13 @@ def _rebuild_canonical_view():
         pm.set_color((0.3, 0.55, 1.0))
         pm.set_edge_width(1.5)
         pm.set_smooth_shade(False)
+        pm.set_transparency(1.0)
 
         qm = ps.register_surface_mesh(CV_UV_POST, geo['uv_post'], geo['F'])
         qm.set_color((1.0, 0.5, 0.15))
         qm.set_edge_width(1.5)
         qm.set_smooth_shade(False)
-        qm.set_transparency(0.35)
+        qm.set_transparency(1.0)
 
         # Tracked vertex: orange dot at UV_pre position + yellow arrow → UV_post
         pt3d  = geo['tracked_pre'][np.newaxis]
@@ -519,6 +596,12 @@ def _rebuild_canonical_view():
         pc.set_radius(0.015, relative=True)
         pc.add_vector_quantity("uv_disp", arrow, vectortype="ambient",
                                enabled=True, color=(1.0, 0.85, 0.0))
+
+        # Tracked vertex: red  dot at UV_post  position  
+        pt3d  = geo['tracked_post'][np.newaxis]
+        pc    = ps.register_point_cloud(CV_TRACKED_POST, pt3d)
+        pc.set_color((1.0, 0.0, 0.0))
+        pc.set_radius(0.015, relative=True)
 
 
 def _find_vtx_collapse_steps(v: int):
@@ -647,7 +730,8 @@ def _rebuild_all():
     _rebuild_flipped_viz()
     _rebuild_fine_vtx_pc()
     _rebuild_vtx_trajectory()
-    _rebuild_uv_sheet_viz()
+    _rebuild_step_viz()
+    # _rebuild_uv_sheet_viz()
 
 
 # ---------------------------------------------------------------------------
@@ -656,7 +740,7 @@ def _rebuild_all():
 
 def ui_callback():
     global _z_offset, _sample_step, _show_arrows, _selected_deform_face, _show_flipped
-    global _show_flipped_verts, _show_flipped_arrows, _selected_flipped_face
+    global _show_flipped_verts, _show_flipped_arrows, _selected_flipped_face, _flipped_vtx_colors, _flipped_vtx_arrows
     global _selected_vtx, _current_step_idx, _uv_scale, _uv_plane_z, _canonical_view, _uv_post_offset, _canonical_domain
 
     changed = False
@@ -711,14 +795,19 @@ def ui_callback():
 
     if _show_flipped:
         psim.Indent()
-        c, v = psim.Checkbox("Show flipped vertices", _show_flipped_verts)
+        c, v = psim.Checkbox("Highlight flipped vertices on fine mesh", _show_flipped_verts)
         if c:
             _show_flipped_verts = v
-            _rebuild_flipped_viz()
+            if _flipped_vtx_colors is not None and ps.has_point_cloud(FINE_VTX_PC):
+                ps.get_point_cloud(FINE_VTX_PC).add_color_quantity(
+                    "flipped_verts", _flipped_vtx_colors, enabled=v)
         c, v = psim.Checkbox("Show flipped arrows", _show_flipped_arrows)
         if c:
             _show_flipped_arrows = v
-            _rebuild_flipped_viz()
+            if _flipped_vtx_arrows is not None and ps.has_point_cloud(FINE_VTX_PC):
+                ps.get_point_cloud(FINE_VTX_PC).add_vector_quantity(
+                    "flipped_arrows", _flipped_vtx_arrows, vectortype="ambient",
+                    enabled=v, color=(1.0, 0.30, 0.30))
         psim.Unindent()
 
     if _show_flipped and _deform_mesh_v is not None:
@@ -737,7 +826,8 @@ def ui_callback():
                 f"(verts {vids[0]}, {vids[1]}, {vids[2]})")
             if psim.Button("Clear flipped face selection"):
                 _selected_flipped_face = -1
-                _rebuild_flipped_pc()
+                _rebuild_flipped_vtx_colors()
+                _rebuild_flipped_arrows()
         else:
             psim.TextDisabled("Click a flipped face to isolate its vertices")
 
@@ -760,7 +850,7 @@ def ui_callback():
                     if _canonical_view:
                         _rebuild_canonical_view()
                     else:
-                        _rebuild_uv_sheet_viz()
+                        _rebuild_step_viz()
             psim.SameLine()
             if psim.Button("Next >"):
                 if _current_step_idx < n_steps - 1:
@@ -768,7 +858,7 @@ def ui_callback():
                     if _canonical_view:
                         _rebuild_canonical_view()
                     else:
-                        _rebuild_uv_sheet_viz()
+                        _rebuild_step_viz()
         else:
             psim.TextUnformatted("(vertex not involved in any collapse)")
 
@@ -841,7 +931,7 @@ def ui_callback():
                 _rebuild_all()
             else:
                 _rebuild_vtx_trajectory()
-                _rebuild_uv_sheet_viz()
+                _rebuild_step_viz()
                 _clear_canonical()
     else:
         psim.TextUnformatted("No vertex selected — click fine_mesh_verts")
@@ -870,7 +960,7 @@ def ui_callback():
                     _current_step_idx = 0
                     _find_vtx_collapse_steps(vidx)
                     _rebuild_vtx_trajectory()
-                    _rebuild_uv_sheet_viz()
+                    _rebuild_step_viz()
                     _rebuild_canonical_view()
 
             elif sname == DEFORM_MESH:
@@ -888,7 +978,8 @@ def ui_callback():
                 if (etype == 'face' and _flipped_faces_glob is not None
                         and 0 <= fidx < len(_flipped_faces_glob)):
                     _selected_flipped_face = -1 if fidx == _selected_flipped_face else fidx
-                    _rebuild_flipped_pc()
+                    _rebuild_flipped_vtx_colors()
+                    _rebuild_flipped_arrows()
 
             elif sname == FINE_MESH:
                 etype = sdata.get('element_type', None)
