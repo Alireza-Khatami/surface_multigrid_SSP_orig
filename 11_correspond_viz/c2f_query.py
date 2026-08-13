@@ -561,13 +561,45 @@ def compute_f2c_correspondences(bundle):
     f2c_v        = fineV.copy()
     tracked_mask = np.zeros(NF, dtype=bool)
 
+    # per-vertex stats
+    n_zero_steps      = NF - len(vtx_steps)   # never appeared in any valid UV slot
+    n_all_skipped     = 0   # had steps in map but query_vertex_f2c_intermediates skipped all
+    n_moved           = 0   # actually displaced (positions[-1] != fineV[v])
+    n_stationary      = 0   # had steps but ended exactly at start (degenerate UV)
+    step_counts       = []  # valid step counts for vertices that had any
+
     for v, steps in vtx_steps.items():
         positions = query_vertex_f2c_intermediates(steps, fineV, fineV[v])
-        f2c_v[v]        = positions[-1]
+        step_counts.append(len(positions) - 1)   # excludes start
+        final = positions[-1]
+        f2c_v[v]        = final
         tracked_mask[v] = True
 
-    n_tracked = int(tracked_mask.sum())
-    print(f'[f2c_batch] {n_tracked} / {NF} fine vertices tracked through collapse steps')
+        if len(positions) == 1:
+            # every step was skipped inside query_vertex_f2c_intermediates
+            n_all_skipped += 1
+        elif np.allclose(final, fineV[v], atol=1e-10):
+            n_stationary += 1
+        else:
+            n_moved += 1
+
+    n_in_map   = len(vtx_steps)
+    n_tracked  = int(tracked_mask.sum())
+    sc         = np.array(step_counts, dtype=np.int32) if step_counts else np.array([0])
+
+    print(f'\n[f2c_batch] ---- F2C batch stats ----')
+    print(f'[f2c_batch] Fine vertices total          : {NF}')
+    print(f'[f2c_batch] Zero steps (never in map)   : {n_zero_steps} / {NF}  ({100*n_zero_steps/NF:.1f}%)')
+    print(f'[f2c_batch] In map (≥1 valid UV step)   : {n_in_map} / {NF}  ({100*n_in_map/NF:.1f}%)')
+    print(f'[f2c_batch]   of those — all skipped    : {n_all_skipped}  (local_v >= uvRows for every step)')
+    print(f'[f2c_batch]   of those — stationary     : {n_stationary}  (steps ran but final == start)')
+    print(f'[f2c_batch]   of those — moved          : {n_moved}')
+    if len(sc) > 0 and sc.max() > 0:
+        nz = sc[sc > 0]
+        print(f'[f2c_batch] Steps per vertex (moved): '
+              f'min={nz.min()}  median={int(np.median(nz))}  max={nz.max()}  mean={nz.mean():.1f}')
+    print(f'[f2c_batch] ---------------------------\n')
+
     return f2c_v, tracked_mask
 
 
