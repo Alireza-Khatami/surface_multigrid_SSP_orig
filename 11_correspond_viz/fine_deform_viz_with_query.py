@@ -156,8 +156,8 @@ def _rebuild_meshes():
     fm.set_smooth_shade(False)
     fm.set_transparency(0.4)
 
-    if _deform_mesh_v is not None:
-        dv = _deform_mesh_v.copy()
+    if _f2c_deform_mesh_v is not None:
+        dv = _f2c_deform_mesh_v.copy()
         dv[:, 2] += _z_offset
         dm = ps.register_surface_mesh(DEFORM_MESH, dv, _bundle.fineF)
         dm.set_color((0.95, 0.50, 0.10))
@@ -165,21 +165,14 @@ def _rebuild_meshes():
         dm.set_smooth_shade(False)
         dm.set_transparency(0.7)
 
-    if _f2c_deform_mesh_v is not None:
-        fv = _f2c_deform_mesh_v.copy()
+    if _deform_mesh_v is not None:
+        fv = _deform_mesh_v.copy()
         fv[:, 2] += _z_offset * 2
         fm2 = ps.register_surface_mesh(F2C_DEFORM_MESH, fv, _bundle.fineF)
         fm2.set_color((0.20, 0.80, 0.40))
         fm2.set_edge_width(0.7)
         fm2.set_smooth_shade(False)
         fm2.set_transparency(0.7)
-
-        # point cloud of only the tracked (moved) vertices
-        if _f2c_tracked_mask is not None:
-            tracked_pts = fv[_f2c_tracked_mask]
-            pc = ps.register_point_cloud(F2C_DEFORM_PC, tracked_pts)
-            pc.set_color((0.20, 0.80, 0.40))
-            pc.set_radius(0.004, relative=True)
 
 
 def _rebuild_deform_pc():
