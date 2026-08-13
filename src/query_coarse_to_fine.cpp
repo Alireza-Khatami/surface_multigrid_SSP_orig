@@ -25,6 +25,7 @@ void query_coarse_to_fine(
 
   std::atomic<int> cnt_early_exit{0};
   std::atomic<int> cnt_sheet_fallback{0};
+  std::atomic<int> cnt_sheet_miss{0};
   std::atomic<int> cnt_pre_row_miss{0};
 
 #ifdef SSP_LSCM_LOG
@@ -49,7 +50,7 @@ void query_coarse_to_fine(
   igl::parallel_for(
     numQuery,
     [&verbose, &FIdx, &BC, &BF, &decIM, &decInfo, &queryCounts, &faceSheetID,
-     &cnt_early_exit, &cnt_sheet_fallback, &cnt_pre_row_miss](const int qIdx)
+     &cnt_early_exit, &cnt_sheet_fallback, &cnt_sheet_miss, &cnt_pre_row_miss](const int qIdx)
   {
 #ifdef SSP_LSCM_LOG
     // Per-query log buffer — flushed atomically so parallel output doesn't interleave.
@@ -111,17 +112,33 @@ void query_coarse_to_fine(
         for (auto & sd : decInfo[dIdx].sheets)
           if (sd.global_sheet_id == sid) { sd_ptr = &sd; break; }
         if (!sd_ptr && !decInfo[dIdx].sheets.empty()) {
-          ++cnt_sheet_fallback;
+          if (decInfo[dIdx].sheets.size() == 1) {
+            // Manifold collapse: single sheet, [0] is always the right one.
+            ++cnt_sheet_fallback;
 #ifdef SSP_LSCM_LOG
-          log << "[SHEET-FALLBACK] qIdx=" << qIdx
-              << "  FIdx=" << (int)FIdx(qIdx)
-              << "  face_sheet=" << sid
-              << "  dIdx=" << dIdx
-              << "  available_sheets=[";
-          for (auto & s : decInfo[dIdx].sheets) log << s.global_sheet_id << " ";
-          log << "]\n";
+            log << "[SHEET-FALLBACK] qIdx=" << qIdx
+                << "  FIdx=" << (int)FIdx(qIdx)
+                << "  face_sheet=" << sid
+                << "  dIdx=" << dIdx
+                << "  available_sheets=[";
+            for (auto & s : decInfo[dIdx].sheets) log << s.global_sheet_id << " ";
+            log << "]\n";
 #endif
-          sd_ptr = &decInfo[dIdx].sheets[0];
+            sd_ptr = &decInfo[dIdx].sheets[0];
+          } else {
+            // Seam collapse: no SheetData matched this face's sheet.
+            // Using a different sheet's UV would corrupt the sample — skip.
+            ++cnt_sheet_miss;
+#ifdef SSP_LSCM_LOG
+            log << "[SHEET-MISS] qIdx=" << qIdx
+                << "  FIdx=" << (int)FIdx(qIdx)
+                << "  face_sheet=" << sid
+                << "  dIdx=" << dIdx
+                << "  available_sheets=[";
+            for (auto & s : decInfo[dIdx].sheets) log << s.global_sheet_id << " ";
+            log << "]\n";
+#endif
+          }
         }
       }
       if (!sd_ptr) continue;
@@ -219,8 +236,9 @@ void query_coarse_to_fine(
 #ifdef SSP_LSCM_LOG
   fprintf(stderr,
     "[query_coarse_to_fine SUMMARY]  queries=%d  early_exits=%d  "
-    "sheet_fallbacks=%d  pre_row_misses=%d\n",
-    numQuery, cnt_early_exit.load(), cnt_sheet_fallback.load(), cnt_pre_row_miss.load());
+    "sheet_fallbacks=%d  sheet_misses=%d  pre_row_misses=%d\n",
+    numQuery, cnt_early_exit.load(), cnt_sheet_fallback.load(),
+    cnt_sheet_miss.load(), cnt_pre_row_miss.load());
 #endif
 
   if (verbose)
