@@ -415,10 +415,11 @@ def _rebuild_fine_vtx_pc():
 def _rebuild_step_viz():
     """
     Main-view (non-canonical) overlay for the current collapse step:
-      STEP_POS_PC  — single orange dot at the tracked vertex's fine-mesh position.
-      STEP_RING_PC — one-ring vertices for the current step's sheet (cyan), so you
-                     can see which neighbourhood on the full mesh is being processed.
-    Both are cleared when no vertex is selected or in canonical mode.
+      STEP_POS_PC  — single dot that interpolates between the fine-mesh position
+                     (step 0) and the coarse correspondence position (last step),
+                     so it slides along the F2C mapping as you press Prev/Next.
+      STEP_RING_PC — one-ring vertices for the current step's sheet (cyan).
+    Both are cleared when no vertex is selected.
     """
     for name in (STEP_POS_PC, STEP_RING_PC):
         if ps.has_point_cloud(name):
@@ -430,13 +431,22 @@ def _rebuild_step_viz():
     step_idx = max(0, min(_current_step_idx, len(_vtx_collapse_steps) - 1))
     _ci, sheet, _local_v = _vtx_collapse_steps[step_idx]
 
-    # Single point: tracked vertex in 3D space
+    # Interpolate between fine position (t=0) and coarse correspondence (t=1)
     fine_pos = _bundle.fineV[_selected_vtx]
-    pc = ps.register_point_cloud(STEP_POS_PC, fine_pos[np.newaxis])
-    pc.set_color((1.0, 0.35, 0.0))
-    pc.set_radius(0.016, relative=True)
+    n_steps  = len(_vtx_collapse_steps)
+    t = step_idx / max(1, n_steps - 1)
 
-    # # Ring point cloud: all subsetVIdx vertices for this step
+    if _fine_id_to_row is not None and _selected_vtx in _fine_id_to_row:
+        coarse_pos = _deform_pts[_fine_id_to_row[_selected_vtx]]
+        current_pos = fine_pos + t * (coarse_pos - fine_pos)
+    else:
+        current_pos = fine_pos
+
+    pc = ps.register_point_cloud(STEP_POS_PC, current_pos[np.newaxis])
+    pc.set_color((1.0, 0.35, 0.0))
+    pc.set_radius(0.009, relative=True)
+
+    # Ring point cloud: all subsetVIdx vertices for this step
     # subV     = np.clip(sheet.subsetVIdx, 0, _bundle.fineV.shape[0] - 1)
     # ring_pts = _bundle.fineV[subV]
     # pc_ring  = ps.register_point_cloud(STEP_RING_PC, ring_pts)
@@ -656,20 +666,20 @@ def _rebuild_vtx_trajectory():
     fine_pos = _bundle.fineV[_selected_vtx]
     pc = ps.register_point_cloud(TRACKED_VTX_PC, fine_pos[np.newaxis])
     pc.set_color((0.1, 1.0, 0.3))
-    pc.set_radius(0.012, relative=True)
+    pc.set_radius(0.0035, relative=True)
 
-    if _fine_id_to_row is not None and _selected_vtx in _fine_id_to_row:
-        row  = _fine_id_to_row[_selected_vtx]
-        corr = _deform_pts[row].copy()
-        corr[2] += _z_offset
-        nodes = np.array([fine_pos, corr])
-        edges = np.array([[0, 1]], dtype=np.int32)
-        try:
-            cn = ps.register_curve_network(TRAJ_CURVE, nodes, edges)
-            cn.set_color((0.1, 1.0, 0.3))
-            cn.set_radius(0.003, relative=True)
-        except Exception:
-            pass
+    # if _fine_id_to_row is not None and _selected_vtx in _fine_id_to_row:
+    #     row  = _fine_id_to_row[_selected_vtx]
+    #     corr = _deform_pts[row].copy()
+    #     corr[2] += _z_offset
+    #     nodes = np.array([fine_pos, corr])
+    #     edges = np.array([[0, 1]], dtype=np.int32)
+    #     try:
+    #         cn = ps.register_curve_network(TRAJ_CURVE, nodes, edges)
+    #         cn.set_color((0.1, 1.0, 0.3))
+    #         cn.set_radius(0.003, relative=True)
+    #     except Exception:
+    #         pass
 
 
 def _rebuild_uv_sheet_viz():
@@ -962,6 +972,9 @@ def ui_callback():
                     _rebuild_vtx_trajectory()
                     _rebuild_step_viz()
                     _rebuild_canonical_view()
+                    # Re-register to clear Polyscope's built-in selection indicator
+                    # (picked point is rendered at larger radius by default)
+                    _rebuild_fine_vtx_pc()
 
             elif sname == DEFORM_MESH:
                 etype = sdata.get('element_type', None)
