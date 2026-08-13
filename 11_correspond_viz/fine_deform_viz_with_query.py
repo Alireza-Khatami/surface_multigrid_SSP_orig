@@ -83,6 +83,7 @@ _flipped_vtx_arrows       = None     # cached (NV,3) arrow vectors for the quant
 # F2C batch deformed mesh
 _f2c_deform_mesh_v  = None   # (NF, 3) fineV with F2C-tracked verts moved
 _f2c_tracked_mask   = None   # (NF,) bool
+_use_f2c_deform     = False  # True = F2C mode, False = bundle mode
 
 # collapse-trace state
 _selected_vtx         = -1
@@ -149,6 +150,13 @@ def _compute_f2c_deformed_mesh():
 # Rebuild helpers
 # ---------------------------------------------------------------------------
 
+def _active_deform_mesh_v():
+    """Return the deformed vertex array for whichever mode is active."""
+    if _use_f2c_deform and _f2c_deform_mesh_v is not None:
+        return _f2c_deform_mesh_v
+    return _deform_mesh_v
+
+
 def _rebuild_meshes():
     fm = ps.register_surface_mesh(FINE_MESH, _bundle.fineV, _bundle.fineF)
     fm.set_color((0.55, 0.55, 0.55))
@@ -156,23 +164,15 @@ def _rebuild_meshes():
     fm.set_smooth_shade(False)
     fm.set_transparency(0.4)
 
-    if _f2c_deform_mesh_v is not None:
-        dv = _f2c_deform_mesh_v.copy()
+    active_v = _active_deform_mesh_v()
+    if active_v is not None:
+        dv = active_v.copy()
         dv[:, 2] += _z_offset
         dm = ps.register_surface_mesh(DEFORM_MESH, dv, _bundle.fineF)
         dm.set_color((0.95, 0.50, 0.10))
         dm.set_edge_width(0.7)
         dm.set_smooth_shade(False)
         dm.set_transparency(0.7)
-
-    # if _deform_mesh_v is not None:
-    #     fv = _deform_mesh_v.copy()
-    #     fv[:, 2] += _z_offset * 2
-    #     fm2 = ps.register_surface_mesh(F2C_DEFORM_MESH, fv, _bundle.fineF)
-    #     fm2.set_color((0.20, 0.80, 0.40))
-    #     fm2.set_edge_width(0.7)
-    #     fm2.set_smooth_shade(False)
-    #     fm2.set_transparency(0.7)
 
 
 def _rebuild_deform_pc():
@@ -297,7 +297,8 @@ def _rebuild_flipped_viz():
         if not _show_flipped:
             ps.get_surface_mesh(DEFORM_MESH).set_transparency(0.7)
 
-    if not _show_flipped or _deform_mesh_v is None:
+    active_v = _active_deform_mesh_v()
+    if not _show_flipped or active_v is None:
         _rebuild_flipped_vtx_colors()
         return
 
@@ -307,7 +308,7 @@ def _rebuild_flipped_viz():
 
     v0o = fineV[fineF[:, 0]];  v1o = fineV[fineF[:, 1]];  v2o = fineV[fineF[:, 2]]
     orig_n = np.cross(v1o - v0o, v2o - v0o)
-    v0d = _deform_mesh_v[fineF[:, 0]];  v1d = _deform_mesh_v[fineF[:, 1]];  v2d = _deform_mesh_v[fineF[:, 2]]
+    v0d = active_v[fineF[:, 0]];  v1d = active_v[fineF[:, 1]];  v2d = active_v[fineF[:, 2]]
     deform_n = np.cross(v1d - v0d, v2d - v0d)
 
     flipped   = np.sum(orig_n * deform_n, axis=1) < 0
@@ -322,7 +323,7 @@ def _rebuild_flipped_viz():
         ps.get_surface_mesh(DEFORM_MESH).set_transparency(0.4)
 
     # build flipped sub-mesh at the deformed mesh Z level
-    dv = _deform_mesh_v.copy()
+    dv = active_v.copy()
     dv[:, 2] += _z_offset
 
     flip_face_idx   = np.where(flipped)[0]
@@ -403,7 +404,8 @@ def _rebuild_flipped_arrows():
         return
     pc = ps.get_point_cloud(FINE_VTX_PC)
 
-    if not _show_flipped or _flipped_faces_glob is None or _deform_mesh_v is None:
+    active_v = _active_deform_mesh_v()
+    if not _show_flipped or _flipped_faces_glob is None or active_v is None:
         try:
             pc.remove_quantity("flipped_arrows")
         except Exception:
@@ -413,7 +415,7 @@ def _rebuild_flipped_arrows():
 
     NV   = _bundle.fineV.shape[0]
     vecs = np.zeros((NV, 3), dtype=np.float32)
-    dv   = _deform_mesh_v.copy()
+    dv   = active_v.copy()
     dv[:, 2] += _z_offset
 
     if _selected_flipped_face >= 0 and _selected_flipped_face < len(_flipped_faces_glob):
@@ -871,6 +873,7 @@ def ui_callback():
     global _z_offset, _sample_step, _show_arrows, _selected_deform_face, _show_flipped
     global _show_flipped_verts, _show_flipped_arrows, _selected_flipped_face, _flipped_vtx_colors, _flipped_vtx_arrows
     global _selected_vtx, _current_step_idx, _uv_scale, _uv_plane_z, _canonical_view, _uv_post_offset, _canonical_domain, _vtx_query_positions
+    global _use_f2c_deform
 
     changed = False
 
@@ -879,6 +882,16 @@ def ui_callback():
     except Exception:
         pass
     psim.Begin("Fine -> Deformed", True)
+
+    c, v = psim.Checkbox("Use F2C query", _use_f2c_deform)
+    if c:
+        _use_f2c_deform = v
+        _rebuild_all()
+    psim.SameLine()
+    label = "[ F2C query ]" if _use_f2c_deform else "[ Bundle ]"
+    psim.TextUnformatted(label)
+
+    psim.Separator()
 
     c, v = psim.SliderFloat("Z offset (deformed)", _z_offset, -2.0, 2.0)
     if c:
@@ -939,11 +952,12 @@ def ui_callback():
                     enabled=v, color=(1.0, 0.30, 0.30))
         psim.Unindent()
 
-    if _show_flipped and _deform_mesh_v is not None:
+    if _show_flipped and _active_deform_mesh_v() is not None:
         fineF    = _bundle.fineF
         fineV    = _bundle.fineV
         v0o = fineV[fineF[:, 0]];  v1o = fineV[fineF[:, 1]];  v2o = fineV[fineF[:, 2]]
-        v0d = _deform_mesh_v[fineF[:, 0]];  v1d = _deform_mesh_v[fineF[:, 1]];  v2d = _deform_mesh_v[fineF[:, 2]]
+        _av = _active_deform_mesh_v()
+        v0d = _av[fineF[:, 0]];  v1d = _av[fineF[:, 1]];  v2d = _av[fineF[:, 2]]
         orig_n   = np.cross(v1o - v0o, v2o - v0o)
         deform_n = np.cross(v1d - v0d, v2d - v0d)
         n_flipped = int((np.sum(orig_n * deform_n, axis=1) < 0).sum())
