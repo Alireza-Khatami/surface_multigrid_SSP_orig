@@ -1130,6 +1130,18 @@ def ui_callback():
                     _selected_flipped_face = -1 if fidx == _selected_flipped_face else fidx
                     _rebuild_flipped_vtx_colors()
                     _rebuild_flipped_arrows()
+                    # log vertex info for the clicked flipped face
+                    if _selected_flipped_face >= 0:
+                        vids = _flipped_faces_glob[_selected_flipped_face]  # fine mesh vertex IDs
+                        active_v = _active_deform_mesh_v()
+                        mode_str = "F2C" if _use_f2c_deform else "Bundle"
+                        print(f"\n[flipped face {_selected_flipped_face}]  mode={mode_str}")
+                        for k, vid in enumerate(vids):
+                            fine_pos   = _bundle.fineV[vid]
+                            deform_pos = active_v[vid] if active_v is not None else fine_pos
+                            print(f"  v{k}: fine_id={vid}"
+                                  f"  fine=({fine_pos[0]:.6f}, {fine_pos[1]:.6f}, {fine_pos[2]:.6f})"
+                                  f"  deformed=({deform_pos[0]:.6f}, {deform_pos[1]:.6f}, {deform_pos[2]:.6f})")
 
             elif sname == FINE_MESH:
                 etype = sdata.get('element_type', None)
