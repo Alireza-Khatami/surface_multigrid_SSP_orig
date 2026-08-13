@@ -452,6 +452,55 @@ def query_point_with_intermediates(
 
 
 # ---------------------------------------------------------------------------
+# query_vertex_f2c_intermediates
+# ---------------------------------------------------------------------------
+
+def query_vertex_f2c_intermediates(
+    collapse_steps,
+    fineV,
+    start_pos,
+):
+    """
+    Track a fine vertex forward through F2C collapse steps and return the 3D
+    position at each stage (fine → coarse direction).
+
+    Parameters
+    ----------
+    collapse_steps : list of (collapse_idx, SheetData, local_v_idx)
+                     sorted ascending by collapse_idx (as produced by
+                     _find_vtx_collapse_steps in the viz script)
+    fineV          : (NF, 3) fine mesh vertex positions
+    start_pos      : (3,) starting 3D position (the selected fine vertex)
+
+    Returns
+    -------
+    List[np.ndarray(3,)]
+        positions[0]   = start_pos (fine mesh vertex)
+        positions[i+1] = 3D position after the i-th collapse step
+    """
+    positions = [np.array(start_pos, dtype=np.float64)]
+
+    for _ci, sheet, local_v in collapse_steps:
+        # UV position of this vertex after the collapse
+        uv_post = sheet.UV_post[local_v]
+
+        # Express uv_post in barycentric coords within the UV_pre triangulation
+        B    = compute_barycentric_2d(uv_post, sheet.UV_pre, sheet.FUV_pre)
+        best = int(np.argmax(B.min(axis=1)))
+        b_row = np.maximum(0.0, B[best])
+        s_row = b_row.sum()
+        BC    = b_row / s_row if s_row > 0 else np.full(3, 1.0 / 3)
+
+        p0 = int(sheet.subsetVIdx[sheet.FUV_pre[best, 0]])
+        p1 = int(sheet.subsetVIdx[sheet.FUV_pre[best, 1]])
+        p2 = int(sheet.subsetVIdx[sheet.FUV_pre[best, 2]])
+        pos = BC[0] * fineV[p0] + BC[1] * fineV[p1] + BC[2] * fineV[p2]
+        positions.append(pos)
+
+    return positions
+
+
+# ---------------------------------------------------------------------------
 # sample_face_correspondence
 # ---------------------------------------------------------------------------
 

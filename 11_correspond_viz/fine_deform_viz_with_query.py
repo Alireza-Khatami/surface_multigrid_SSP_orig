@@ -28,7 +28,7 @@ import polyscope as ps
 import polyscope.imgui as psim
 from scipy.spatial import cKDTree
 
-from c2f_query import load_bundle, query_point_with_intermediates
+from c2f_query import load_bundle, query_vertex_f2c_intermediates
 
 # ---- structure names ----
 FINE_MESH     = "fine_mesh"
@@ -696,49 +696,21 @@ def _find_vtx_collapse_steps(v: int):
 
 def _run_query_intermediates(v: int):
     """
-    Run query_point_with_intermediates starting from the coarse vertex that
-    corresponds to fine vertex v, and store the resulting 3-D positions in
-    _vtx_query_positions.
+    Track fine vertex v forward through F2C collapse steps (fine→coarse direction).
+    Stores actual intermediate 3D positions in _vtx_query_positions.
+    positions[0] = fineV[v] (the selected fine vertex itself).
     """
     global _vtx_query_positions
     _vtx_query_positions = []
 
-    if _fine_id_to_row is None or v not in _fine_id_to_row:
-        return
-
-    row = _fine_id_to_row[v]          # compact coarse index
-    gvi = int(_bundle.vtxMap[row])    # global SSP vertex index
-
-    # find a coarse face that has this compact vertex as a corner
-    coarse_face_idx = -1
-    corner_local    = -1
-    for fi, face in enumerate(_bundle.coarseF):
-        for ci in range(3):
-            if int(face[ci]) == row:
-                coarse_face_idx = fi
-                corner_local    = ci
-                break
-        if coarse_face_idx >= 0:
-            break
-
-    if coarse_face_idx < 0:
-        print(f"[query_intermediates] no coarse face found for vertex {v}")
-        return
-
-    cf       = _bundle.coarseF[coarse_face_idx]
-    BC_init  = np.zeros(3)
-    BC_init[corner_local] = 1.0
-    BF_init  = [int(_bundle.vtxMap[cf[0]]),
-                int(_bundle.vtxMap[cf[1]]),
-                int(_bundle.vtxMap[cf[2]])]
-    FIdx_init = int(_bundle.faceMap[coarse_face_idx])
-
-    _vtx_query_positions = query_point_with_intermediates(
-        _bundle.decInfo, _bundle.decIM, _bundle.faceSheetID,
-        BC_init, BF_init, FIdx_init,
+    start_pos = _bundle.fineV[v]
+    _vtx_query_positions = query_vertex_f2c_intermediates(
+        _vtx_collapse_steps,
         _bundle.fineV,
+        start_pos,
     )
-    print(f"[query_intermediates] vertex {v}: {len(_vtx_query_positions)} intermediate positions")
+    print(f"[f2c_intermediates] vertex {v}: {len(_vtx_query_positions)} positions "
+          f"({len(_vtx_collapse_steps)} collapse steps)")
 
 
 def _rebuild_vtx_trajectory():
