@@ -47,6 +47,7 @@ STEP_POS_PC    = "step_tracked_pos"  # main view: single dot at tracked vertex (
 STEP_RING_PC   = "step_ring_pts"     # main view: one-ring vertices for current step
 F2C_DEFORM_MESH = "f2c_deformed_fine_mesh"   # F2C-query-based deformed mesh (green)
 F2C_DEFORM_PC   = "f2c_deformed_fine_verts"  # F2C tracked vertex positions
+FLIPPED_F2C_PC  = "flipped_face_f2c_query"  # on-the-fly F2C final positions for clicked flipped face
 CV_RING_MESH   = "cv_ring"           # canonical: 3D one-ring (blue)
 CV_UV_PRE      = "cv_uv_pre"         # canonical: UV_pre panel (blue)
 CV_UV_POST     = "cv_uv_post"        # canonical: UV_post panel (orange)
@@ -1152,18 +1153,41 @@ def ui_callback():
                     _selected_flipped_face = -1 if fidx == _selected_flipped_face else fidx
                     _rebuild_flipped_vtx_colors()
                     _rebuild_flipped_arrows()
-                    # log vertex info for the clicked flipped face
+                    # clear previous on-the-fly query points
+                    if ps.has_point_cloud(FLIPPED_F2C_PC):
+                        ps.remove_point_cloud(FLIPPED_F2C_PC)
                     if _selected_flipped_face >= 0:
-                        vids = _flipped_faces_glob[_selected_flipped_face]  # fine mesh vertex IDs
+                        vids     = _flipped_faces_glob[_selected_flipped_face]
                         active_v = _active_deform_mesh_v()
-                        mode_str = "F2C" if _use_f2c_deform else "Bundle"
+                        batch_map = getattr(_bundle, '_f2c_vtx_steps', None)
+                        mode_str  = "F2C" if _use_f2c_deform else "Bundle"
                         print(f"\n[flipped face {_selected_flipped_face}]  mode={mode_str}")
+                        query_pts = []
                         for k, vid in enumerate(vids):
                             fine_pos   = _bundle.fineV[vid]
                             deform_pos = active_v[vid] if active_v is not None else fine_pos
-                            print(f"  v{k}: fine_id={vid}"
-                                  f"  fine=({fine_pos[0]:.6f}, {fine_pos[1]:.6f}, {fine_pos[2]:.6f})"
-                                  f"  deformed=({deform_pos[0]:.6f}, {deform_pos[1]:.6f}, {deform_pos[2]:.6f})")
+                            # run f2c query fresh for this vertex
+                            if batch_map is not None and vid in batch_map:
+                                steps = batch_map[vid]
+                                positions = query_vertex_f2c_intermediates(
+                                    steps, _bundle.fineV, fine_pos)
+                                query_final = positions[-1]
+                                n_steps = len(steps)
+                            else:
+                                query_final = fine_pos
+                                n_steps = 0
+                            query_pts.append(query_final)
+                            print(f"  v{k}: fine_id={vid}  n_steps={n_steps}")
+                            print(f"        fine       =({fine_pos[0]:.6f}, {fine_pos[1]:.6f}, {fine_pos[2]:.6f})")
+                            print(f"        deformed   =({deform_pos[0]:.6f}, {deform_pos[1]:.6f}, {deform_pos[2]:.6f})")
+                            print(f"        query_final=({query_final[0]:.6f}, {query_final[1]:.6f}, {query_final[2]:.6f})")
+                            print(f"        deformed==query: {np.allclose(deform_pos, query_final, atol=1e-6)}")
+                        # visualize the 3 on-the-fly query positions at deformed Z
+                        pts = np.array(query_pts)
+                        pts[:, 2] += _z_offset
+                        pc = ps.register_point_cloud(FLIPPED_F2C_PC, pts)
+                        pc.set_color((1.0, 1.0, 0.0))   # yellow — distinct from everything else
+                        pc.set_radius(0.012, relative=True)
 
             elif sname == FINE_MESH:
                 etype = sdata.get('element_type', None)
