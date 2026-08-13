@@ -21,12 +21,12 @@ Dependencies:
 """
 
 import sys
-import glob
 import os
 import math
 import numpy as np
 import polyscope as ps
 import polyscope.imgui as psim
+from scipy.spatial import cKDTree
 
 from c2f_query import load_bundle
 
@@ -80,70 +80,46 @@ _current_step_idx   = 0
 _uv_plane_z         = -1.5  # Z position of UV flat-mesh in 3D viewport
 _uv_scale           = 3.0   # scale applied to normalised UV coords
 _canonical_view     = False
-_uv_elev            = 1.5   # UV panel elevation above ring (× ring_span), like gUVOffset
+_uv_elev            = 1.5   # UV panel elevation above ring (in normalised units)
+_canonical_domain   = 'uv'  # 'uv' = show UV_pre/post panels  |  'ring' = show 3D one-ring
 
 
 # ---------------------------------------------------------------------------
 
-def _load_vertex_tracker(bundle_path: str):
+def _compute_vertex_correspondences():
+    """
+    For each compact coarse vertex i, its fine-mesh correspondent is at
+    coarseV[i] + corrVec[i].  A KD-tree search on fineV snaps that position
+    to the nearest fine vertex, giving us the full fine→coarse mapping without
+    any external txt files.
+    """
     global _fine_ids, _fine_pts, _deform_pts, _deform_mesh_v, _fine_id_to_row
 
-    bundle_dir = os.path.dirname(os.path.abspath(bundle_path))
-    vtx_files  = sorted(glob.glob(os.path.join(bundle_dir, "samples_vertices_*.txt")))
-
-    if not vtx_files:
-        print("[vtx] No samples_vertices_*.txt found in", bundle_dir)
-        return False
-
-    print(f"[vtx] Loading {os.path.basename(vtx_files[0])}")
-
-    rows = []
-    with open(vtx_files[0]) as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            parts = line.split()
-            if len(parts) < 8:
-                continue
-            rows.append([float(x) for x in parts[:8]])
-
-    if not rows:
-        print("[vtx] Empty file — aborting.")
-        return False
-
-    data = np.array(rows, dtype=np.float64)
-    N    = len(data)
-    print(f"[vtx] {N} tracked fine vertices")
-
-    fine_ids = data[:, 0].astype(np.int32)
-
     if not _bundle.has_ssp_data or _bundle.vtxMap is None:
-        print("[vtx] Bundle has no vtxMap — cannot compute coarse positions.")
+        print("[vtx_corr] Bundle has no SSP data — cannot compute correspondences.")
         return False
 
-    gv_to_cv = {int(_bundle.vtxMap[i]): i for i in range(len(_bundle.vtxMap))}
-    coarseV  = _bundle.coarseV
-    bc       = data[:, 2:5]
-    bv0      = data[:, 5].astype(np.int32)
-    bv1      = data[:, 6].astype(np.int32)
-    bv2      = data[:, 7].astype(np.int32)
-    cv0 = np.array([gv_to_cv.get(int(v), 0) for v in bv0], dtype=np.int32)
-    cv1 = np.array([gv_to_cv.get(int(v), 0) for v in bv1], dtype=np.int32)
-    cv2 = np.array([gv_to_cv.get(int(v), 0) for v in bv2], dtype=np.int32)
-    coarse_corr = (bc[:, 0:1] * coarseV[cv0]
-                 + bc[:, 1:2] * coarseV[cv1]
-                 + bc[:, 2:3] * coarseV[cv2])
+    NC = _bundle.coarseV.shape[0]
 
-    _fine_ids       = fine_ids
-    _fine_pts       = _bundle.fineV[fine_ids]
-    _deform_pts     = coarse_corr
-    _fine_id_to_row = {int(vid): row for row, vid in enumerate(fine_ids)}
+    # fine-mesh position of each compact coarse vertex's correspondent
+    fine_pos_of_coarse = _bundle.coarseV + _bundle.corrVec   # (NC, 3)
+
+    # snap to nearest fine vertex
+    tree = cKDTree(_bundle.fineV)
+    _, fine_indices = tree.query(fine_pos_of_coarse, k=1)    # (NC,)
+    fine_indices = fine_indices.astype(np.int32)
+
+    _fine_ids       = fine_indices
+    _fine_pts       = _bundle.fineV[fine_indices]            # (NC, 3) original fine positions
+    _deform_pts     = _bundle.coarseV.copy()                 # (NC, 3) coarse positions (no Z offset)
+    _fine_id_to_row = {int(fine_indices[i]): i for i in range(NC)}
 
     deform_v = _bundle.fineV.copy()
-    deform_v[fine_ids] = coarse_corr
+    deform_v[fine_indices] = _bundle.coarseV
     _deform_mesh_v = deform_v
 
+    n_unique = len(np.unique(fine_indices))
+    print(f"[vtx_corr] {NC} coarse verts → {n_unique} unique fine verts mapped")
     return True
 
 
@@ -440,17 +416,17 @@ def _compute_canonical(sheet, local_v: int) -> dict:
     t1 =  cb * t1_old + sb * t2
     t2 = -sb * t1_old + cb * t2
 
-    # ---- UV scale: map UV extent → ring_span ----
+    # ---- UV scale: map UV extent → 1 unit (in normalised space) ----
     uv_span = max(uv_pre[:, 0].max() - uv_pre[:, 0].min(),
                   uv_pre[:, 1].max() - uv_pre[:, 1].min())
-    uv_scale = span / uv_span if uv_span > 1e-10 else 1.0
+    uv_scale = (1.0 / uv_span) if uv_span > 1e-10 else 1.0
 
-    # ---- UV panels → 3D, floating above ring along nrm by _uv_elev * span ----
-    panel_c = centroid + nrm * _uv_elev * span
+    # ---- UV panels → 3D, floating above ring by _uv_elev (normalised units) ----
+    panel_c = centroid + nrm * _uv_elev * span   # world-space; div by span in rot_norm
 
     def to3d(UV):
-        dU = (UV[:, 0:1] - uc) * uv_scale
-        dV = (UV[:, 1:2] - vc) * uv_scale
+        dU = (UV[:, 0:1] - uc) * uv_scale * span   # kept in world-space; div by span later
+        dV = (UV[:, 1:2] - vc) * uv_scale * span
         return panel_c + dU * t1 + dV * t2
 
     uv_pre_3d  = to3d(uv_pre)
@@ -471,18 +447,21 @@ def _compute_canonical(sheet, local_v: int) -> dict:
                             [-ax[1],  ax[0],    0.0]])
         R = np.eye(3) + math.sin(theta) * K + (1.0 - math.cos(theta)) * (K @ K)
 
-    def rot(P):
-        return (R @ (P - centroid).T).T
+    # Normalise by span so every collapse step renders at unit scale — prevents
+    # UV panels jumping to wildly different heights between steps.
+    def rot_norm(P):
+        return (R @ ((P - centroid) / span).T).T
 
-    vr   = rot(verts)
-    upr  = rot(uv_pre_3d)
-    upor = rot(uv_post_3d)
+    vr   = rot_norm(verts)
+    upr  = rot_norm(uv_pre_3d)
+    upor = rot_norm(uv_post_3d)
 
     return {
         'V_ring':       vr,
         'uv_pre':       upr,
         'uv_post':      upor,
         'F':            F,
+        'tracked_ring': vr[local_v],
         'tracked_pre':  upr[local_v],
         'tracked_post': upor[local_v],
         'span':         span,
@@ -498,12 +477,6 @@ def _clear_canonical():
 
 
 def _rebuild_canonical_view():
-    """
-    Canonical view matching visualizer.cpp show_canonical_view():
-      Blue  = 3D one-ring (approx) + UV_pre panel
-      Orange = UV_post panel
-      Orange dot + yellow arrow = tracked vertex UV_pre → UV_post displacement
-    """
     _clear_canonical()
     if not _canonical_view or _selected_vtx < 0 or not _vtx_collapse_steps:
         return
@@ -513,34 +486,40 @@ def _rebuild_canonical_view():
 
     geo = _compute_canonical(sheet, local_v)
 
-    # Blue — 3D one-ring (approximate from original fine mesh)
-    rm = ps.register_surface_mesh(CV_RING_MESH, geo['V_ring'], geo['F'])
-    rm.set_color((0.3, 0.55, 1.0))
-    rm.set_edge_width(1.5)
-    rm.set_smooth_shade(False)
-    rm.set_transparency(0.5)
+    if _canonical_domain == 'ring':
+        # Spatial domain — show the 3D one-ring only
+        rm = ps.register_surface_mesh(CV_RING_MESH, geo['V_ring'], geo['F'])
+        rm.set_color((0.3, 0.55, 1.0))
+        rm.set_edge_width(1.5)
+        rm.set_smooth_shade(False)
+        rm.set_transparency(0.5)
 
-    # Blue — UV_pre flat panel
-    pm = ps.register_surface_mesh(CV_UV_PRE, geo['uv_pre'], geo['F'])
-    pm.set_color((0.3, 0.55, 1.0))
-    pm.set_edge_width(1.5)
-    pm.set_smooth_shade(False)
+        pt3d = geo['tracked_ring'][np.newaxis]
+        pc   = ps.register_point_cloud(CV_TRACKED, pt3d)
+        pc.set_color((1.0, 0.3, 0.0))
+        pc.set_radius(0.025, relative=True)
 
-    # Orange — UV_post flat panel
-    qm = ps.register_surface_mesh(CV_UV_POST, geo['uv_post'], geo['F'])
-    qm.set_color((1.0, 0.5, 0.15))
-    qm.set_edge_width(1.5)
-    qm.set_smooth_shade(False)
-    qm.set_transparency(0.35)
+    else:
+        # UV domain — show UV_pre (blue) and UV_post (orange) panels
+        pm = ps.register_surface_mesh(CV_UV_PRE, geo['uv_pre'], geo['F'])
+        pm.set_color((0.3, 0.55, 1.0))
+        pm.set_edge_width(1.5)
+        pm.set_smooth_shade(False)
 
-    # Tracked vertex: orange dot at UV_pre position + yellow arrow → UV_post
-    pt3d  = geo['tracked_pre'][np.newaxis]
-    arrow = (geo['tracked_post'] - geo['tracked_pre'])[np.newaxis]
-    pc = ps.register_point_cloud(CV_TRACKED, pt3d)
-    pc.set_color((1.0, 0.3, 0.0))
-    pc.set_radius(0.015, relative=True)
-    pc.add_vector_quantity("uv_disp", arrow, vectortype="ambient",
-                           enabled=True, color=(1.0, 0.85, 0.0))
+        qm = ps.register_surface_mesh(CV_UV_POST, geo['uv_post'], geo['F'])
+        qm.set_color((1.0, 0.5, 0.15))
+        qm.set_edge_width(1.5)
+        qm.set_smooth_shade(False)
+        qm.set_transparency(0.35)
+
+        # Tracked vertex: orange dot at UV_pre position + yellow arrow → UV_post
+        pt3d  = geo['tracked_pre'][np.newaxis]
+        arrow = (geo['tracked_post'] - geo['tracked_pre'])[np.newaxis]
+        pc    = ps.register_point_cloud(CV_TRACKED, pt3d)
+        pc.set_color((1.0, 0.3, 0.0))
+        pc.set_radius(0.015, relative=True)
+        pc.add_vector_quantity("uv_disp", arrow, vectortype="ambient",
+                               enabled=True, color=(1.0, 0.85, 0.0))
 
 
 def _find_vtx_collapse_steps(v: int):
@@ -679,7 +658,7 @@ def _rebuild_all():
 def ui_callback():
     global _z_offset, _sample_step, _show_arrows, _selected_deform_face, _show_flipped
     global _show_flipped_verts, _show_flipped_arrows, _selected_flipped_face
-    global _selected_vtx, _current_step_idx, _uv_scale, _uv_plane_z, _canonical_view, _uv_elev
+    global _selected_vtx, _current_step_idx, _uv_scale, _uv_plane_z, _canonical_view, _uv_elev, _canonical_domain
 
     changed = False
 
@@ -828,11 +807,25 @@ def ui_callback():
                 except Exception:
                     pass
                 _rebuild_all()
-            psim.TextDisabled("Blue = ring + UV_pre   Orange = UV_post")
-            c, v = psim.SliderFloat("UV panel elev", _uv_elev, 0.0, 5.0)
-            if c:
-                _uv_elev = v
+            # Domain toggle — only one active at a time
+            c, chk = psim.Checkbox("UV domain (pre/post panels)", _canonical_domain == 'uv')
+            if c and chk:
+                _canonical_domain = 'uv'
                 _rebuild_canonical_view()
+            psim.SameLine()
+            c, chk = psim.Checkbox("Spatial domain (ring)", _canonical_domain == 'ring')
+            if c and chk:
+                _canonical_domain = 'ring'
+                _rebuild_canonical_view()
+
+            if _canonical_domain == 'uv':
+                psim.TextDisabled("Blue = UV_pre   Orange = UV_post")
+                c, v = psim.SliderFloat("UV panel elev", _uv_elev, 0.0, 5.0)
+                if c:
+                    _uv_elev = v
+                    _rebuild_canonical_view()
+            else:
+                psim.TextDisabled("Blue = 3-D one-ring")
 
         psim.Separator()
         if psim.Button("Clear vertex"):
@@ -870,7 +863,18 @@ def ui_callback():
             sname = getattr(pr, 'structure_name', None)
             sdata = getattr(pr, 'structure_data', None) or {}
 
-            if sname == DEFORM_MESH:
+            if sname == FINE_VTX_PC:
+                vidx = int(sdata.get('index', -1))
+                nV   = _bundle.fineV.shape[0]
+                if 0 <= vidx < nV:
+                    _selected_vtx     = vidx
+                    _current_step_idx = 0
+                    _find_vtx_collapse_steps(vidx)
+                    _rebuild_vtx_trajectory()
+                    _rebuild_uv_sheet_viz()
+                    _rebuild_canonical_view()
+
+            elif sname == DEFORM_MESH:
                 etype = sdata.get('element_type', None)
                 fidx  = int(sdata.get('index', -1))
                 nF    = _bundle.fineF.shape[0]
@@ -899,17 +903,88 @@ def ui_callback():
                     _rebuild_uv_sheet_viz()
                     _rebuild_canonical_view()
 
-            elif sname == FINE_VTX_PC:
-                etype = sdata.get('element_type', None)
-                vidx  = int(sdata.get('index', -1))
-                nV    = _bundle.fineV.shape[0]
-                if etype == 'point' and 0 <= vidx < nV:
-                    _selected_vtx     = vidx
-                    _current_step_idx = 0
-                    _find_vtx_collapse_steps(vidx)
-                    _rebuild_vtx_trajectory()
-                    _rebuild_uv_sheet_viz()
-                    _rebuild_canonical_view()
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic: decIM / subsetVIdx coverage
+# ---------------------------------------------------------------------------
+
+def _log_decim_stats():
+    if not _bundle.has_ssp_data:
+        return
+
+    fineF = _bundle.fineF
+    NV    = _bundle.fineV.shape[0]
+    NF    = fineF.shape[0]
+    nFO   = len(_bundle.decIM)
+
+    # ---- face-level: how many original faces have any collapse entry ----
+    nonempty_faces = sum(1 for d in _bundle.decIM if len(d) > 0)
+    print(f"\n[decIM] ---- decIM coverage ----")
+    print(f"[decIM] decIM entries  : {nFO}  (fine faces: {NF})")
+    print(f"[decIM] non-empty rows : {nonempty_faces} / {nFO}  "
+          f"({100*nonempty_faces/nFO:.1f}%)" if nFO > 0 else "")
+
+    # ---- vertex-level: which fine verts have at least one incident face with decIM ----
+    vtx_face_covered = np.zeros(NV, dtype=bool)
+    for fi in range(min(NF, nFO)):
+        if len(_bundle.decIM[fi]) > 0:
+            vtx_face_covered[fineF[fi, 0]] = True
+            vtx_face_covered[fineF[fi, 1]] = True
+            vtx_face_covered[fineF[fi, 2]] = True
+    n_face_covered = int(vtx_face_covered.sum())
+    print(f"[decIM] fine verts with ≥1 incident non-empty decIM face : "
+          f"{n_face_covered} / {NV}  ({100*n_face_covered/NV:.1f}%)")
+    print(f"[decIM] fine verts with NO  incident non-empty decIM face : "
+          f"{NV - n_face_covered} / {NV}  ({100*(NV-n_face_covered)/NV:.1f}%)")
+
+    # ---- vertex-level: which fine verts appear in any sheet's subsetVIdx ----
+    vtx_in_sheet = np.zeros(NV, dtype=bool)
+    for cd in _bundle.decInfo:
+        for sheet in cd.sheets:
+            for v in sheet.subsetVIdx:
+                if 0 <= v < NV:
+                    vtx_in_sheet[v] = True
+    n_in_sheet = int(vtx_in_sheet.sum())
+    print(f"[decIM] fine verts appearing in ≥1 sheet subsetVIdx       : "
+          f"{n_in_sheet} / {NV}  ({100*n_in_sheet/NV:.1f}%)")
+    print(f"[decIM] fine verts never in any sheet subsetVIdx           : "
+          f"{NV - n_in_sheet} / {NV}  ({100*(NV-n_in_sheet)/NV:.1f}%)")
+
+    # ---- total collapse-step count across all vertices ----
+    total_entries = sum(len(d) for d in _bundle.decIM)
+    print(f"[decIM] total (face, collapse) pairs in decIM              : {total_entries}")
+    print(f"[decIM] SSP collapses recorded                             : {len(_bundle.decInfo)}")
+
+    # ---- simulate _find_vtx_collapse_steps for every fine vertex ----
+    # A face in decIM[fi] for collapse ci doesn't mean v is in ci's one-ring;
+    # this sweep finds how many vertices actually get ≥1 step.
+    print(f"[decIM] sweeping all {NV} fine vertices for reachable steps …")
+    step_counts = np.zeros(NV, dtype=np.int32)
+    for v in range(NV):
+        faces_of_v = np.where(np.any(fineF == v, axis=1))[0]
+        seen: set = set()
+        for f in faces_of_v:
+            fi = int(f)
+            if fi < nFO:
+                for ci in _bundle.decIM[fi]:
+                    seen.add(ci)
+        count = 0
+        for ci in seen:
+            cd = _bundle.decInfo[ci]
+            for sheet in cd.sheets:
+                if np.any(sheet.subsetVIdx == v):
+                    count += 1
+                    break
+        step_counts[v] = count
+
+    zero_steps = int((step_counts == 0).sum())
+    print(f"[decIM] fine verts with 0 reachable collapse steps         : {zero_steps} / {NV}  ({100*zero_steps/NV:.1f}%)")
+    print(f"[decIM] fine verts with ≥1 reachable collapse steps        : {NV-zero_steps} / {NV}  ({100*(NV-zero_steps)/NV:.1f}%)")
+    if NV > zero_steps:
+        nz = step_counts[step_counts > 0]
+        print(f"[decIM] steps per vertex (non-zero): min={nz.min()}  median={int(np.median(nz))}  max={nz.max()}  mean={nz.mean():.1f}")
+    print(f"[decIM] --------------------------------\n")
 
 
 # ---------------------------------------------------------------------------
@@ -927,10 +1002,12 @@ def main():
     if _bundle.has_ssp_data:
         print(f"SSP:    {len(_bundle.decInfo)} collapses")
 
-    ok = _load_vertex_tracker(c2f_path)
+    ok = _compute_vertex_correspondences()
     if not ok:
-        print("ERROR: could not load vertex tracker — exiting.")
+        print("ERROR: could not compute vertex correspondences — exiting.")
         sys.exit(1)
+
+    _log_decim_stats()
 
     ps.init()
     ps.set_program_name("Fine -> Deformed Fine")
