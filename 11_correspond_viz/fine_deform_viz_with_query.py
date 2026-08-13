@@ -165,14 +165,14 @@ def _rebuild_meshes():
         dm.set_smooth_shade(False)
         dm.set_transparency(0.7)
 
-    if _deform_mesh_v is not None:
-        fv = _deform_mesh_v.copy()
-        fv[:, 2] += _z_offset * 2
-        fm2 = ps.register_surface_mesh(F2C_DEFORM_MESH, fv, _bundle.fineF)
-        fm2.set_color((0.20, 0.80, 0.40))
-        fm2.set_edge_width(0.7)
-        fm2.set_smooth_shade(False)
-        fm2.set_transparency(0.7)
+    # if _deform_mesh_v is not None:
+    #     fv = _deform_mesh_v.copy()
+    #     fv[:, 2] += _z_offset * 2
+    #     fm2 = ps.register_surface_mesh(F2C_DEFORM_MESH, fv, _bundle.fineF)
+    #     fm2.set_color((0.20, 0.80, 0.40))
+    #     fm2.set_edge_width(0.7)
+    #     fm2.set_smooth_shade(False)
+    #     fm2.set_transparency(0.7)
 
 
 def _rebuild_deform_pc():
@@ -436,6 +436,34 @@ def _rebuild_fine_vtx_pc():
     pc.set_radius(0.003, relative=True)
     _rebuild_flipped_vtx_colors()
     _rebuild_flipped_arrows()
+
+
+def _log_step_info():
+    n_steps = len(_vtx_collapse_steps)
+    if _selected_vtx < 0 or n_steps == 0:
+        return
+    step_idx = max(0, min(_current_step_idx, n_steps - 1))
+
+    # intermediate position from F2C query
+    if _vtx_query_positions:
+        qi  = min(step_idx, len(_vtx_query_positions) - 1)
+        pos = _vtx_query_positions[qi]
+    else:
+        pos = _bundle.fineV[_selected_vtx]
+
+    # final deformed position (no Z offset)
+    if _f2c_deform_mesh_v is not None:
+        final_pos = _f2c_deform_mesh_v[_selected_vtx]
+    elif _fine_id_to_row is not None and _selected_vtx in _fine_id_to_row:
+        final_pos = _deform_pts[_fine_id_to_row[_selected_vtx]]
+    else:
+        final_pos = None
+
+    print(f"[step] {step_idx + 1}/{n_steps}  "
+          f"pos=({pos[0]:.6f}, {pos[1]:.6f}, {pos[2]:.6f})", end="")
+    if final_pos is not None:
+        print(f"  |  final=({final_pos[0]:.6f}, {final_pos[1]:.6f}, {final_pos[2]:.6f})", end="")
+    print()
 
 
 def _rebuild_step_viz():
@@ -952,6 +980,7 @@ def ui_callback():
                         _rebuild_canonical_view()
                     else:
                         _rebuild_step_viz()
+                    _log_step_info()
             psim.SameLine()
             if psim.Button("Next >"):
                 if _current_step_idx < n_steps - 1:
@@ -960,6 +989,7 @@ def ui_callback():
                         _rebuild_canonical_view()
                     else:
                         _rebuild_step_viz()
+                    _log_step_info()
         else:
             psim.TextUnformatted("(vertex not involved in any collapse)")
 
