@@ -739,11 +739,24 @@ def _find_vtx_collapse_steps(v: int):
     steps = []
     for ci in sorted(seen):
         cd = _bundle.decInfo[ci]
+        # Prefer the first sheet where v has a valid UV slot (local_v < uvRows).
+        # This matches the sheet-selection logic in compute_f2c_correspondences.
+        chosen = None
         for sheet in cd.sheets:
+            uvRows = len(sheet.UV_post)
             hits = np.where(sheet.subsetVIdx == v)[0]
-            if len(hits):
-                steps.append((ci, sheet, int(hits[0])))
-                break   # v appears in at most one sheet per collapse
+            if len(hits) and int(hits[0]) < uvRows:
+                chosen = (ci, sheet, int(hits[0]))
+                break
+        if chosen is None:
+            # fallback: record even if no valid UV slot (will be skipped in query)
+            for sheet in cd.sheets:
+                hits = np.where(sheet.subsetVIdx == v)[0]
+                if len(hits):
+                    chosen = (ci, sheet, int(hits[0]))
+                    break
+        if chosen is not None:
+            steps.append(chosen)
     _vtx_collapse_steps = steps
     print(f"[trace] vertex {v}: {len(steps)} collapse steps "
           f"(from {len(faces_of_v)} incident fine faces)")
@@ -752,20 +765,29 @@ def _find_vtx_collapse_steps(v: int):
 def _run_query_intermediates(v: int):
     """
     Track fine vertex v forward through F2C collapse steps (fine→coarse direction).
-    Stores actual intermediate 3D positions in _vtx_query_positions.
-    positions[0] = fineV[v] (the selected fine vertex itself).
+    Uses _bundle._f2c_vtx_steps (built by compute_f2c_correspondences) when available
+    so the interactive tracker uses exactly the same sheet selection as the batch.
+    Falls back to _vtx_collapse_steps from _find_vtx_collapse_steps otherwise.
     """
     global _vtx_query_positions
     _vtx_query_positions = []
 
+    batch_map = getattr(_bundle, '_f2c_vtx_steps', None)
+    if batch_map is not None and v in batch_map:
+        steps = batch_map[v]
+        source = "batch map"
+    else:
+        steps = _vtx_collapse_steps
+        source = "collapse trace"
+
     start_pos = _bundle.fineV[v]
     _vtx_query_positions = query_vertex_f2c_intermediates(
-        _vtx_collapse_steps,
+        steps,
         _bundle.fineV,
         start_pos,
     )
     print(f"[f2c_intermediates] vertex {v}: {len(_vtx_query_positions)} positions "
-          f"({len(_vtx_collapse_steps)} collapse steps)")
+          f"({len(steps)} steps, source={source})")
 
 
 def _rebuild_vtx_trajectory():

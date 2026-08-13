@@ -600,6 +600,9 @@ def compute_f2c_correspondences(bundle):
               f'min={nz.min()}  median={int(np.median(nz))}  max={nz.max()}  mean={nz.mean():.1f}')
     print(f'[f2c_batch] ---------------------------\n')
 
+    # expose vtx_steps on the bundle so callers reuse the same sheet selection
+    bundle._f2c_vtx_steps = vtx_steps
+
     return f2c_v, tracked_mask
 
 
