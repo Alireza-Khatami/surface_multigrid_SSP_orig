@@ -345,9 +345,11 @@ bool SSP_collapse_edge(
     }
 
     if (FUV_pre_si.rows() <= 2) {
-      if (is_seam_collapse)
-        SEAM_LOG("[SEAM-SKIP-FEW-FACES]  sid=%d  FUV_rows=%d  e=(%d,%d)\n",
+      if (is_seam_collapse) {
+        SEAM_LOG("[SEAM-FAIL-FEW-FACES]  sid=%d  FUV_rows=%d  e=(%d,%d)\n",
           sid, FUV_pre_si.rows(), E(e,0), E(e,1));
+        return false;
+      }
       continue;
     }
 
@@ -360,9 +362,6 @@ bool SSP_collapse_edge(
     }
 
     if (b_si(0) < 0 || b_si(1) < 0 || b_si(0) >= b_si(1)) {
-      if (is_seam_collapse)
-        SEAM_LOG("[SEAM-SKIP-BSI]  sid=%d  b=(%d,%d)  e=(%d,%d) vi=%d vj=%d\n",
-          sid, b_si(0), b_si(1), E(e,0), E(e,1), vi, vj);
 #ifdef SSP_LSCM_LOG
       static int b_fail = 0;
       if (b_fail < 5) {
@@ -381,6 +380,11 @@ bool SSP_collapse_edge(
           fprintf(stderr, "  HYPOTHESIS: sheets_Nsf[sid] contains only infinity faces\n");
       }
 #endif
+      if (is_seam_collapse) {
+        SEAM_LOG("[SEAM-FAIL-BSI]  sid=%d  b=(%d,%d)  e=(%d,%d) vi=%d vj=%d\n",
+          sid, b_si(0), b_si(1), E(e,0), E(e,1), vi, vj);
+        return false;
+      }
       continue;
     }
 
@@ -397,9 +401,6 @@ bool SSP_collapse_edge(
     vector<int> Ndv_local = fan_walk_local(E(e,0), E(e,1), Ndf_walk, subsetVIdx_si);
 
     if (Nsv_local.empty() || Ndv_local.empty()) {
-      if (is_seam_collapse)
-        SEAM_LOG("[SEAM-SKIP-FANWALK]  sid=%d  Nsv=%zu Ndv=%zu  e=(%d,%d)\n",
-          sid, Nsv_local.size(), Ndv_local.size(), E(e,0), E(e,1));
 #ifdef SSP_LSCM_LOG
       static int fw_empty = 0;
       if (fw_empty < 10) {
@@ -425,6 +426,11 @@ bool SSP_collapse_edge(
         }
       }
 #endif
+      if (is_seam_collapse) {
+        SEAM_LOG("[SEAM-FAIL-FANWALK]  sid=%d  Nsv=%zu Ndv=%zu  e=(%d,%d)\n",
+          sid, Nsv_local.size(), Ndv_local.size(), E(e,0), E(e,1));
+        return false;
+      }
       continue;
     }
 
@@ -536,8 +542,8 @@ bool SSP_collapse_edge(
 #endif
 
       if (!all_ok) {
-        if (is_seam_collapse)
-          SEAM_LOG("[SEAM-SKIP-INV]  sid=%d  e=(%d,%d)  fail=%s\n",
+        if (is_seam_collapse) {
+          SEAM_LOG("[SEAM-FAIL-INV]  sid=%d  e=(%d,%d)  fail=%s\n",
             sid, E(e,0), E(e,1),
             !inv_A ? "INV-A(empty-walk)" :
             !inv_G ? "INV-G(walk-ends-at-inf)" :
@@ -546,6 +552,8 @@ bool SSP_collapse_edge(
             !inv_B ? "INV-B(e0/e1-uninit)" :
             !inv_C ? "INV-C(idx-out-of-range)" :
                      "INV-D(vi/vj-absent)");
+          return false;
+        }
         continue;
       }
     }
