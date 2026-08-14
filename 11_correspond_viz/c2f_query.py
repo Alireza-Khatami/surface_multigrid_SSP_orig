@@ -558,6 +558,50 @@ def compute_f2c_correspondences(bundle):
     for v in vtx_steps:
         vtx_steps[v].sort(key=lambda x: x[0])
 
+    # --- Diagnostic: seam duplicate pattern and multi-sheet cases ---
+    # "local_v >= uvRows" entries: the user believes these mark seam vertices that
+    # need merging after the collapse — the same vertex should also appear at
+    # local_v < uvRows in the same sheet (the canonical copy).  Log both cases.
+    n_over_uvrows      = 0   # (ci, v) skipped because local_v >= uvRows
+    n_has_canonical    = 0   # of those: also appear at local_v < uvRows in same sheet
+    n_multi_valid_sheet = 0  # (ci, v) with valid UV slot in >1 sheet of same collapse
+
+    for ci, cd in enumerate(bundle.decInfo):
+        # Multi-sheet check per collapse
+        valid_sheet_count = {}  # v -> number of sheets with local_v < uvRows
+        for sheet in cd.sheets:
+            uvRows = len(sheet.UV_post)
+            for local_v, gv in enumerate(sheet.subsetVIdx):
+                if local_v >= uvRows:
+                    continue
+                v = int(gv)
+                if 0 <= v < NF:
+                    valid_sheet_count[v] = valid_sheet_count.get(v, 0) + 1
+        n_multi_valid_sheet += sum(1 for cnt in valid_sheet_count.values() if cnt > 1)
+
+        # Seam duplicate check per sheet
+        for sheet in cd.sheets:
+            uvRows = len(sheet.UV_post)
+            svSz   = len(sheet.subsetVIdx)
+            if svSz <= uvRows:
+                continue
+            # Vertices with a canonical UV slot in this sheet
+            canonical_set = {int(sheet.subsetVIdx[lv]) for lv in range(uvRows)
+                             if 0 <= int(sheet.subsetVIdx[lv]) < NF}
+            for local_v in range(uvRows, svSz):
+                gv = int(sheet.subsetVIdx[local_v])
+                if not (0 <= gv < NF):
+                    continue
+                n_over_uvrows += 1
+                if gv in canonical_set:
+                    n_has_canonical += 1
+
+    pct_can = (100 * n_has_canonical / n_over_uvrows) if n_over_uvrows else 0.0
+    print(f'[f2c_seam] Entries at local_v >= uvRows (skipped in map build) : {n_over_uvrows}')
+    print(f'[f2c_seam]   of those with canonical (local_v < uvRows) copy   : '
+          f'{n_has_canonical}  ({pct_can:.1f}%)')
+    print(f'[f2c_seam] (ci, v) with valid UV slot in >1 sheet of same coll : {n_multi_valid_sheet}')
+
     f2c_v        = fineV.copy()
     tracked_mask = np.zeros(NF, dtype=bool)
 

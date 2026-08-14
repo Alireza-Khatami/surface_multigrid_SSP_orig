@@ -85,6 +85,8 @@ _flipped_vtx_arrows       = None     # cached (NV,3) arrow vectors for the quant
 _f2c_deform_mesh_v  = None   # (NF, 3) fineV with F2C-tracked verts moved
 _f2c_tracked_mask   = None   # (NF,) bool
 _use_f2c_deform     = False  # True = F2C mode, False = bundle mode
+_use_incident_steps = True   # True = incident faces only (direct, fewer steps);
+                              # False = full one-ring via batch map (more steps)
 
 # collapse-trace state
 _selected_vtx         = -1
@@ -719,7 +721,8 @@ def _rebuild_canonical_view():
 
 def _find_vtx_collapse_steps(v: int):
     """
-    Walk decIM forward and collect every collapse step that touches vertex v.
+    Walk decIM forward and collect every collapse step that touches vertex v
+    via its incident faces only (direct method — fewer steps than full one-ring).
     Returns list stored in _vtx_collapse_steps:
         (collapse_idx, SheetData, local_idx_of_v_in_sheet)
     """
@@ -740,41 +743,44 @@ def _find_vtx_collapse_steps(v: int):
     steps = []
     for ci in sorted(seen):
         cd = _bundle.decInfo[ci]
-        # Prefer the first sheet where v has a valid UV slot (local_v < uvRows).
-        # This matches the sheet-selection logic in compute_f2c_correspondences.
-        chosen = None
+        # Collect all sheets where v has a valid UV slot (local_v < uvRows).
+        valid_sheets = []
         for sheet in cd.sheets:
             uvRows = len(sheet.UV_post)
             hits = np.where(sheet.subsetVIdx == v)[0]
             if len(hits) and int(hits[0]) < uvRows:
-                chosen = (ci, sheet, int(hits[0]))
-                break
-        if chosen is None:
+                valid_sheets.append((sheet, int(hits[0])))
+        if len(valid_sheets) > 1:
+            print(f"[trace][multi-sheet] ci={ci} vertex={v}: "
+                  f"valid UV slot in {len(valid_sheets)} sheets — using first")
+        if valid_sheets:
+            steps.append((ci, valid_sheets[0][0], valid_sheets[0][1]))
+        else:
             # fallback: record even if no valid UV slot (will be skipped in query)
             for sheet in cd.sheets:
                 hits = np.where(sheet.subsetVIdx == v)[0]
                 if len(hits):
-                    chosen = (ci, sheet, int(hits[0]))
+                    steps.append((ci, sheet, int(hits[0])))
                     break
-        if chosen is not None:
-            steps.append(chosen)
     _vtx_collapse_steps = steps
     print(f"[trace] vertex {v}: {len(steps)} collapse steps "
-          f"(from {len(faces_of_v)} incident fine faces)")
+          f"(incident faces only, from {len(faces_of_v)} fine faces)")
 
 
 def _load_vtx_collapse_steps(v: int):
     """
     Populate _vtx_collapse_steps for vertex v.
-    Prefers _bundle._f2c_vtx_steps (batch map) when available — it finds all
-    collapses where v is in the one-ring, not just faces incident to v.
-    Falls back to _find_vtx_collapse_steps otherwise.
+    _use_incident_steps=True  → incident faces only (direct, fewer steps).
+    _use_incident_steps=False → full one-ring via batch map (more steps).
     """
     global _vtx_collapse_steps
+    if _use_incident_steps:
+        _find_vtx_collapse_steps(v)
+        return
     batch_map = getattr(_bundle, '_f2c_vtx_steps', None)
     if batch_map is not None and v in batch_map:
         _vtx_collapse_steps = batch_map[v]
-        print(f"[trace] vertex {v}: {len(_vtx_collapse_steps)} collapse steps (batch map)")
+        print(f"[trace] vertex {v}: {len(_vtx_collapse_steps)} collapse steps (full one-ring / batch map)")
     else:
         _find_vtx_collapse_steps(v)
 
@@ -899,7 +905,7 @@ def ui_callback():
     global _z_offset, _sample_step, _show_arrows, _selected_deform_face, _show_flipped
     global _show_flipped_verts, _show_flipped_arrows, _selected_flipped_face, _flipped_vtx_colors, _flipped_vtx_arrows
     global _selected_vtx, _current_step_idx, _uv_scale, _uv_plane_z, _canonical_view, _uv_post_offset, _canonical_domain, _vtx_query_positions
-    global _use_f2c_deform
+    global _use_f2c_deform, _use_incident_steps
 
     changed = False
 
@@ -1002,6 +1008,18 @@ def ui_callback():
 
     psim.Separator()
     psim.TextUnformatted("Collapse Trace  (click fine_mesh_verts point cloud)")
+    c, v = psim.Checkbox("Incident faces only (direct, fewer steps)", _use_incident_steps)
+    if c:
+        _use_incident_steps = v
+        if _selected_vtx >= 0:
+            _current_step_idx = 0
+            _load_vtx_collapse_steps(_selected_vtx)
+            _run_query_intermediates(_selected_vtx)
+            _rebuild_step_viz()
+            if _canonical_view:
+                _rebuild_canonical_view()
+    psim.SameLine()
+    psim.TextDisabled("(unchecked = full one-ring)")
 
     if _selected_vtx >= 0:
         n_steps = len(_vtx_collapse_steps)
