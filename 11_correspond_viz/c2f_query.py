@@ -651,6 +651,119 @@ def compute_f2c_correspondences(bundle):
 
 
 # ---------------------------------------------------------------------------
+# compute_f2c_correspondences_incident  (batch F2C — incident faces method)
+# ---------------------------------------------------------------------------
+
+def compute_f2c_correspondences_incident(bundle):
+    """
+    Same interface as compute_f2c_correspondences, but finds collapse steps for
+    each fine vertex using only its directly incident faces (via decIM), NOT the
+    full one-ring scan.  This mirrors what _find_vtx_collapse_steps does interactively.
+
+    Stores the per-vertex step lists on bundle._f2c_incident_vtx_steps so the
+    interactive tracker can reuse them when "incident faces only" mode is active.
+
+    Returns
+    -------
+    f2c_v        : (NF, 3) float64
+    tracked_mask : (NF,) bool
+    """
+    if not bundle.has_ssp_data:
+        raise RuntimeError('Bundle has no SSP data (need a v2 .c2f file)')
+
+    NF    = bundle.fineV.shape[0]
+    fineV = bundle.fineV
+    fineF = bundle.fineF
+    decIM   = bundle.decIM
+    decInfo = bundle.decInfo
+    nFO     = len(decIM)
+
+    # Build vertex→incident-faces adjacency once (O(NF) instead of O(NV*NF))
+    v2f = [[] for _ in range(NF)]
+    for fi in range(fineF.shape[0]):
+        for v in fineF[fi]:
+            v2f[v].append(fi)
+
+    vtx_steps = {}
+
+    for v in range(NF):
+        seen = set()
+        for fi in v2f[v]:
+            if fi < nFO:
+                for ci in decIM[fi]:
+                    seen.add(ci)
+        if not seen:
+            continue
+
+        steps = []
+        for ci in sorted(seen):
+            cd = decInfo[ci]
+            v_arr = np.int32(v)
+            # First sheet with a valid UV slot for this vertex
+            valid = None
+            for sheet in cd.sheets:
+                uvRows = len(sheet.UV_post)
+                hits   = np.where(sheet.subsetVIdx == v_arr)[0]
+                if len(hits) and int(hits[0]) < uvRows:
+                    valid = (ci, sheet, int(hits[0]))
+                    break
+            if valid is None:
+                # fallback: any sheet that contains the vertex (will be skipped in query)
+                for sheet in cd.sheets:
+                    hits = np.where(sheet.subsetVIdx == v_arr)[0]
+                    if len(hits):
+                        valid = (ci, sheet, int(hits[0]))
+                        break
+            if valid is not None:
+                steps.append(valid)
+
+        if steps:
+            vtx_steps[v] = steps
+
+    f2c_v        = fineV.copy()
+    tracked_mask = np.zeros(NF, dtype=bool)
+
+    n_zero_steps  = NF - len(vtx_steps)
+    n_all_skipped = 0
+    n_moved       = 0
+    n_stationary  = 0
+    step_counts   = []
+
+    for v, steps in vtx_steps.items():
+        positions = query_vertex_f2c_intermediates(steps, fineV, fineV[v])
+        step_counts.append(len(positions) - 1)
+        final = positions[-1]
+        f2c_v[v]        = final
+        tracked_mask[v] = True
+
+        if len(positions) == 1:
+            n_all_skipped += 1
+        elif np.allclose(final, fineV[v], atol=1e-10):
+            n_stationary += 1
+        else:
+            n_moved += 1
+
+    n_in_map = len(vtx_steps)
+    sc = np.array(step_counts, dtype=np.int32) if step_counts else np.array([0])
+
+    print(f'\n[f2c_incident] ---- F2C incident-faces batch stats ----')
+    print(f'[f2c_incident] Fine vertices total          : {NF}')
+    print(f'[f2c_incident] Zero steps (no incident col) : {n_zero_steps} / {NF}  ({100*n_zero_steps/NF:.1f}%)')
+    print(f'[f2c_incident] In map (≥1 step found)       : {n_in_map} / {NF}  ({100*n_in_map/NF:.1f}%)')
+    print(f'[f2c_incident]   all skipped (no valid UV)  : {n_all_skipped}')
+    print(f'[f2c_incident]   stationary (moved=0)       : {n_stationary}')
+    print(f'[f2c_incident]   moved                      : {n_moved}')
+    if len(sc) > 0 and sc.max() > 0:
+        nz = sc[sc > 0]
+        print(f'[f2c_incident] Steps/vertex (moved): '
+              f'min={nz.min()}  median={int(np.median(nz))}  max={nz.max()}  mean={nz.mean():.1f}')
+    print(f'[f2c_incident] ------------------------------------------\n')
+
+    bundle._f2c_incident_vtx_steps = vtx_steps
+    return f2c_v, tracked_mask
+
+
+# ---------------------------------------------------------------------------
 # sample_face_correspondence
 # ---------------------------------------------------------------------------
 

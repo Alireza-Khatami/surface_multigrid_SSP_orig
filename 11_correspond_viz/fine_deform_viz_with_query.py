@@ -28,7 +28,9 @@ import polyscope as ps
 import polyscope.imgui as psim
 from scipy.spatial import cKDTree
 
-from c2f_query import load_bundle, query_vertex_f2c_intermediates, compute_f2c_correspondences
+from c2f_query import (load_bundle, query_vertex_f2c_intermediates,
+                       compute_f2c_correspondences,
+                       compute_f2c_correspondences_incident)
 
 # ---- structure names ----
 FINE_MESH     = "fine_mesh"
@@ -81,12 +83,13 @@ _flipped_faces_glob       = None     # (K,3) global fine vertex IDs per flipped 
 _flipped_vtx_colors       = None     # cached (NV,3) color array for the quantity
 _flipped_vtx_arrows       = None     # cached (NV,3) arrow vectors for the quantity
 
-# F2C batch deformed mesh
-_f2c_deform_mesh_v  = None   # (NF, 3) fineV with F2C-tracked verts moved
-_f2c_tracked_mask   = None   # (NF,) bool
-_use_f2c_deform     = False  # True = F2C mode, False = bundle mode
-_use_incident_steps = True   # True = incident faces only (direct, fewer steps);
-                              # False = full one-ring via batch map (more steps)
+# F2C batch deformed mesh — two precomputed versions, toggled by _use_incident_steps
+_f2c_deform_mesh_v      = None   # (NF, 3) active F2C result (points at one of the two below)
+_f2c_tracked_mask       = None   # (NF,) bool — active mask
+_f2c_onering_mesh_v     = None   # full one-ring batch (compute_f2c_correspondences)
+_f2c_incident_mesh_v    = None   # incident-faces batch (compute_f2c_correspondences_incident)
+_use_f2c_deform         = False  # True = F2C mode, False = bundle mode
+_use_incident_steps     = True   # True = incident faces only; False = full one-ring
 
 # collapse-trace state
 _selected_vtx         = -1
@@ -141,12 +144,31 @@ def _compute_vertex_correspondences():
 
 def _compute_f2c_deformed_mesh():
     """
-    Run F2C query for every fine vertex (batch), store the result as a
-    deformed vertex array — fine vertices replaced by their F2C final position.
+    Compute both F2C batch variants (full one-ring and incident-faces) and set
+    _f2c_deform_mesh_v to whichever is selected by _use_incident_steps.
     """
     global _f2c_deform_mesh_v, _f2c_tracked_mask
-    print("[f2c] computing F2C correspondences for all fine vertices...")
-    _f2c_deform_mesh_v, _f2c_tracked_mask = compute_f2c_correspondences(_bundle)
+    global _f2c_onering_mesh_v, _f2c_incident_mesh_v
+
+    print("[f2c] computing full one-ring F2C correspondences...")
+    _f2c_onering_mesh_v, _  = compute_f2c_correspondences(_bundle)
+
+    print("[f2c] computing incident-faces F2C correspondences...")
+    _f2c_incident_mesh_v, _ = compute_f2c_correspondences_incident(_bundle)
+
+    _apply_f2c_active()
+
+
+def _apply_f2c_active():
+    """Set _f2c_deform_mesh_v to the precomputed result matching _use_incident_steps."""
+    global _f2c_deform_mesh_v, _f2c_tracked_mask
+    if _use_incident_steps:
+        _f2c_deform_mesh_v = _f2c_incident_mesh_v
+        label = "incident-faces"
+    else:
+        _f2c_deform_mesh_v = _f2c_onering_mesh_v
+        label = "full one-ring"
+    print(f"[f2c] active deformed mesh: {label}")
 
 
 # ---------------------------------------------------------------------------
@@ -769,20 +791,26 @@ def _find_vtx_collapse_steps(v: int):
 
 def _load_vtx_collapse_steps(v: int):
     """
-    Populate _vtx_collapse_steps for vertex v.
-    _use_incident_steps=True  → incident faces only (direct, fewer steps).
-    _use_incident_steps=False → full one-ring via batch map (more steps).
+    Populate _vtx_collapse_steps for vertex v using the active method:
+      _use_incident_steps=True  → _bundle._f2c_incident_vtx_steps (incident faces)
+      _use_incident_steps=False → _bundle._f2c_vtx_steps (full one-ring)
+    Falls back to _find_vtx_collapse_steps if the precomputed map is missing.
     """
     global _vtx_collapse_steps
     if _use_incident_steps:
-        _find_vtx_collapse_steps(v)
-        return
-    batch_map = getattr(_bundle, '_f2c_vtx_steps', None)
-    if batch_map is not None and v in batch_map:
-        _vtx_collapse_steps = batch_map[v]
-        print(f"[trace] vertex {v}: {len(_vtx_collapse_steps)} collapse steps (full one-ring / batch map)")
+        incident_map = getattr(_bundle, '_f2c_incident_vtx_steps', None)
+        if incident_map is not None and v in incident_map:
+            _vtx_collapse_steps = incident_map[v]
+            print(f"[trace] vertex {v}: {len(_vtx_collapse_steps)} collapse steps (incident faces)")
+        else:
+            _find_vtx_collapse_steps(v)
     else:
-        _find_vtx_collapse_steps(v)
+        onering_map = getattr(_bundle, '_f2c_vtx_steps', None)
+        if onering_map is not None and v in onering_map:
+            _vtx_collapse_steps = onering_map[v]
+            print(f"[trace] vertex {v}: {len(_vtx_collapse_steps)} collapse steps (full one-ring)")
+        else:
+            _find_vtx_collapse_steps(v)
 
 
 def _run_query_intermediates(v: int):
@@ -1011,6 +1039,9 @@ def ui_callback():
     c, v = psim.Checkbox("Incident faces only (direct, fewer steps)", _use_incident_steps)
     if c:
         _use_incident_steps = v
+        _apply_f2c_active()        # swap active deformed mesh vertices
+        _rebuild_meshes()          # update deformed_fine_mesh in the viewport
+        _rebuild_flipped_viz()     # recompute flipped faces for the new mesh
         if _selected_vtx >= 0:
             _current_step_idx = 0
             _load_vtx_collapse_steps(_selected_vtx)
