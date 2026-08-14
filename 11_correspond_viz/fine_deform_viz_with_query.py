@@ -71,7 +71,7 @@ _fine_id_to_row = None  # dict: fine_vertex_id -> row index in _fine_ids
 
 _z_offset               = 1.0
 _sample_step            = 10
-_show_arrows            = True
+_show_arrows            = False
 _selected_deform_face   = -1
 _face_highlight_active  = False
 _show_flipped             = True
@@ -88,7 +88,7 @@ _f2c_deform_mesh_v      = None   # (NF, 3) active F2C result (points at one of t
 _f2c_tracked_mask       = None   # (NF,) bool — active mask
 _f2c_onering_mesh_v     = None   # full one-ring batch (compute_f2c_correspondences)
 _f2c_incident_mesh_v    = None   # incident-faces batch (compute_f2c_correspondences_incident)
-_use_f2c_deform         = False  # True = F2C mode, False = bundle mode
+_use_f2c_deform         = True  # True = F2C mode, False = bundle mode
 _use_incident_steps     = True   # True = incident faces only; False = full one-ring
 
 # collapse-trace state
@@ -419,7 +419,7 @@ def _rebuild_flipped_vtx_colors():
 
     _flipped_vtx_colors = colors
     pc.add_color_quantity("flipped_verts", colors, enabled=_show_flipped_verts)
-    print ("dfaaf")
+    # print ("dfaaf")
 
 
 def _rebuild_flipped_arrows():
@@ -1196,6 +1196,18 @@ def ui_callback():
 
     # ---- pick detection ----
     io = psim.GetIO()
+
+    # Double-click: recenter camera on the clicked primitive (look_at with fly)
+    if io.MouseDoubleClicked[0]:
+        try:
+            pr = ps.pick(screen_coords=io.MousePos)
+        except Exception:
+            pr = None
+        if pr is not None and getattr(pr, 'is_hit', False):
+            target = pr.position   # (3,) world position of hit point
+            cam_pos = ps.get_view_camera_parameters().get_position()
+            ps.look_at(cam_pos, target, fly_to=True)
+
     if io.MouseClicked[0]:
         try:
             pr = ps.pick(screen_coords=io.MousePos)
@@ -1273,17 +1285,6 @@ def ui_callback():
                         pc.set_color((1.0, 1.0, 0.0))   # yellow — distinct from everything else
                         pc.set_radius(0.012, relative=True)
 
-            elif sname == FINE_MESH:
-                etype = sdata.get('element_type', None)
-                vidx  = int(sdata.get('index', -1))
-                nV    = _bundle.fineV.shape[0]
-                if etype == 'vertex' and 0 <= vidx < nV:
-                    _selected_vtx     = vidx
-                    _current_step_idx = 0
-                    _load_vtx_collapse_steps(vidx)
-                    _rebuild_vtx_trajectory()
-                    _rebuild_uv_sheet_viz()
-                    _rebuild_canonical_view()
 
 
 
