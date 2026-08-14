@@ -360,8 +360,22 @@ bool do_next_step()
             gCollapseCount++;
             if (gLastCollapseWasSeam) gSeamCollapseCount++;
             sample_tracker_update();
-            std::cerr << "############## collapse ############ " << gCollapseCount
-                      << "  seam=" << gSeamCollapseCount << "/" << gCollapseCount << "\n";
+
+            // s = survivor (lower vertex index, kept + repositioned)
+            // d = absorbed  (higher index, all face refs remapped to s, then gone)
+            // f1, f2 = the two flap faces NULLed out by this collapse
+            // gV.row(s) is already at the new placement position at this point
+            int s = std::min(gE(e,0), gE(e,1));
+            int d = std::max(gE(e,0), gE(e,1));
+            fprintf(stderr,
+                "[COLLAPSE #%d] e=%d  kept=v%d  gone=v%d"
+                "  new_pos=(%.4g,%.4g,%.4g)"
+                "  deleted_faces=[f%d,f%d]"
+                "  seam=%d/%d\n",
+                gCollapseCount, e, s, d,
+                gV(s,0), gV(s,1), gV(s,2),
+                f1, f2,
+                gSeamCollapseCount, gCollapseCount);
 
             int live = count_live_faces();
             if (live <= gTargetFaces) {
@@ -482,28 +496,6 @@ int main(int argc, char * argv[])
         }
     }
 
-#ifdef C2F_VIZ_DIAGNOSTIC
-    // Polyscope point cloud: one point per original MAT vertex, coloured by struct ID set.
-    // Each unique set<int> combination maps to a unique scalar via FNV-1a hash, giving
-    // a consistent arbitrary colour per combination in Polyscope's colormap.
-    if (!gVertexStructIDs.empty()) {
-        const int nVO = (int)gVO.rows();
-        Eigen::VectorXd structScalar(nVO);
-        for (int i = 0; i < nVO; ++i) {
-            // FNV-1a hash over the sorted struct IDs in the set
-            uint32_t h = 2166136261u;
-            for (int id : gVertexStructIDs[i]) {
-                h ^= (uint32_t)id;
-                h *= 16777619u;
-            }
-            structScalar(i) = (double)h;
-        }
-        auto* pc = polyscope::registerPointCloud("mat_struct_ids", gVO);
-        pc->setPointRadius(0.004, true);
-        pc->addScalarQuantity("struct_hash", structScalar)->setEnabled(true);
-    }
-#endif
-
     // Struct ID gate: block collapse (v0, v1) when their struct ID sets differ.
     // Only active when both --matstruct_path and --mat_struct_check are provided.
     // Skips the infinity cap vertex (index >= gVertexStructIDs.size()).
@@ -570,6 +562,25 @@ int main(int argc, char * argv[])
 
 #ifdef C2F_VIZ_DIAGNOSTIC
     polyscope::init();
+
+    // Polyscope point cloud: one point per original MAT vertex, coloured by struct ID set.
+    // Each unique set<int> combination maps to a unique scalar via FNV-1a hash.
+    if (!gVertexStructIDs.empty()) {
+        const int nVO = (int)gVO.rows();
+        Eigen::VectorXd structScalar(nVO);
+        for (int i = 0; i < nVO; ++i) {
+            uint32_t h = 2166136261u;
+            for (int id : gVertexStructIDs[i]) {
+                h ^= (uint32_t)id;
+                h *= 16777619u;
+            }
+            structScalar(i) = (double)h;
+        }
+        auto* pc = polyscope::registerPointCloud("mat_struct_ids", gVO);
+        pc->setPointRadius(0.004, true);
+        pc->addScalarQuantity("struct_hash", structScalar)->setEnabled(true);
+    }
+
     polyscope::state::userCallback = ui_callback;
     update_display();
     polyscope::show();

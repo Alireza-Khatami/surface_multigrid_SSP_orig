@@ -49,6 +49,8 @@ class Bundle:
 
     # Vertex correspondence: fine_pos = coarseV[i] + corrVec[i]
     corrVec: np.ndarray      # (NC, 3) float64
+    corrBC:  np.ndarray = field(default_factory=lambda: np.empty((0, 3)))  # (NC, 3) barycentric weights
+    corrFV:  np.ndarray = field(default_factory=lambda: np.empty((0, 3), dtype=np.int32))  # (NC, 3) fine vertex indices
 
     # v2 SSP query data (present only if has_ssp_data)
     has_ssp_data: bool = False
@@ -137,17 +139,21 @@ def load_bundle(path: str) -> Bundle:
     fineV = r.f64_array(NF * 3).reshape(NF, 3)
     fineF = r.u32_array(FF * 3).reshape(FF, 3)
 
-    # Correspondence table → corrVec
+    # Correspondence table → corrVec, corrBC, corrFV
     corrVec = np.empty((NC, 3), dtype=np.float64)
+    corrBC  = np.empty((NC, 3), dtype=np.float64)
+    corrFV  = np.empty((NC, 3), dtype=np.int32)
     for i in range(NC):
         bc = np.array([r.f64(), r.f64(), r.f64()])
         fv = np.array([r.u32(), r.u32(), r.u32()], dtype=np.int32)
         fine_pos = bc[0] * fineV[fv[0]] + bc[1] * fineV[fv[1]] + bc[2] * fineV[fv[2]]
         corrVec[i] = fine_pos - coarseV[i]
+        corrBC[i]  = bc
+        corrFV[i]  = fv
 
     b = Bundle(coarseV=coarseV, coarseF=coarseF,
                fineV=fineV, fineF=fineF,
-               corrVec=corrVec)
+               corrVec=corrVec, corrBC=corrBC, corrFV=corrFV)
 
     if not v2:
         print(f'[bundle] Loaded v1  NC={NC} FC={FC} NF={NF} FF={FF}')

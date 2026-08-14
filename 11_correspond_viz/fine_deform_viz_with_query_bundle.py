@@ -99,7 +99,7 @@ _current_step_idx     = 0
 _uv_plane_z         = -1.5  # Z position of UV flat-mesh in 3D viewport
 _uv_scale           = 3.0   # scale applied to normalised UV coords
 _canonical_view     = False
-_uv_post_offset     = .4   # normalised separation: UV_post sits this far above UV_pre
+_uv_post_offset     = 1.5   # normalised separation: UV_post sits this far above UV_pre
 _canonical_domain   = 'uv'  # 'uv' = show UV_pre/post panels  |  'ring' = show 3D one-ring
 
 
@@ -211,21 +211,17 @@ def _active_deform_mesh_v():
 
 
 def _rebuild_meshes():
-    fm = ps.register_surface_mesh(FINE_MESH, _bundle.fineV, _bundle.fineF)
+    # Primary mesh is the deformed (samples_vertices) positions — no Z offset, no second mesh
+    v = _deform_mesh_v if _deform_mesh_v is not None else _bundle.fineV
+    fm = ps.register_surface_mesh(FINE_MESH, v, _bundle.fineF)
     fm.set_color((0.55, 0.55, 0.55))
     fm.set_edge_width(0.3)
     fm.set_smooth_shade(False)
-    fm.set_transparency(0.4)
+    fm.set_transparency(0.7)
 
-    active_v = _active_deform_mesh_v()
-    if active_v is not None:
-        dv = active_v.copy()
-        dv[:, 2] += _z_offset
-        dm = ps.register_surface_mesh(DEFORM_MESH, dv, _bundle.fineF)
-        dm.set_color((0.95, 0.50, 0.10))
-        dm.set_edge_width(0.7)
-        dm.set_smooth_shade(False)
-        dm.set_transparency(0.7)
+    # Remove any stale lifted deformed mesh
+    if ps.has_surface_mesh(DEFORM_MESH):
+        ps.remove_surface_mesh(DEFORM_MESH)
 
 
 def _rebuild_deform_pc():
@@ -407,7 +403,6 @@ def _rebuild_flipped_viz():
     fm.set_transparency(1.0)
     _flipped_highlight_active = True
 
-    # Preserve the previous selection if it's still a valid index in the new list
     prev_sel = _selected_flipped_face
     _flipped_faces_glob    = flip_faces_glob
     _selected_flipped_face = prev_sel if 0 <= prev_sel < len(flip_faces_glob) else -1
@@ -488,7 +483,8 @@ def _rebuild_fine_vtx_pc():
     """Selectable point cloud over all fine mesh vertices."""
     if ps.has_point_cloud(FINE_VTX_PC):
         ps.remove_point_cloud(FINE_VTX_PC)
-    pc = ps.register_point_cloud(FINE_VTX_PC, _bundle.fineV)
+    base_v = _deform_mesh_v if _deform_mesh_v is not None else _bundle.fineV
+    pc = ps.register_point_cloud(FINE_VTX_PC, base_v)
     pc.set_color((0.75, 0.75, 0.75))
     pc.set_radius(0.003, relative=True)
     _rebuild_flipped_vtx_colors()
@@ -547,7 +543,7 @@ def _rebuild_step_viz():
         qi = min(step_idx + 1, len(_vtx_query_positions) - 1)
         current_pos = _vtx_query_positions[qi]
     else:
-        base_v = _deform_mesh_v if (not _use_f2c_deform and _deform_mesh_v is not None) else _bundle.fineV
+        base_v = _deform_mesh_v if _deform_mesh_v is not None else _bundle.fineV
         current_pos = base_v[_selected_vtx]
 
     pc = ps.register_point_cloud(STEP_POS_PC, current_pos[np.newaxis])
@@ -571,7 +567,7 @@ def _vtx_world_pos_after_collapse(sheet, local_v: int) -> np.ndarray:
     of the F2C mapping at this collapse step.
     """
     subV    = np.clip(sheet.subsetVIdx, 0, len(_bundle.fineV) - 1)
-    base_v  = _deform_mesh_v if (not _use_f2c_deform and _deform_mesh_v is not None) else _bundle.fineV
+    base_v  = _deform_mesh_v if _deform_mesh_v is not None else _bundle.fineV
     verts   = base_v[subV]
     uv_pre  = sheet.UV_pre
     F       = sheet.FUV_pre
@@ -624,8 +620,8 @@ def _compute_canonical(sheet, local_v: int) -> dict:
     Returns a dict with everything needed to register the canonical structures.
     """
     subV      = np.clip(sheet.subsetVIdx, 0, len(_bundle.fineV) - 1)
-    base_v    = _deform_mesh_v if (not _use_f2c_deform and _deform_mesh_v is not None) else _bundle.fineV
-    verts     = base_v[subV]   # (N, 3)
+    base_v    = _deform_mesh_v if _deform_mesh_v is not None else _bundle.fineV
+    verts     = base_v[subV]   # (N, 3) — deformed positions
     uv_pre    = sheet.UV_pre          # (N, 2)
     uv_post   = sheet.UV_post         # (N, 2)
     F         = sheet.FUV_pre         # (M, 3)
@@ -882,11 +878,12 @@ def _run_query_intermediates(v: int):
     _vtx_collapse_steps must already be populated by _load_vtx_collapse_steps(v).
     """
     global _vtx_query_positions
-    base_v    = _deform_mesh_v if (not _use_f2c_deform and _deform_mesh_v is not None) else _bundle.fineV
+    base_v    = _deform_mesh_v if _deform_mesh_v is not None else _bundle.fineV
+    start_pos = base_v[v]
     _vtx_query_positions = query_vertex_f2c_intermediates(
         _vtx_collapse_steps,
         base_v,
-        base_v[v],
+        start_pos,
     )
     print(f"[f2c_intermediates] vertex {v}: {len(_vtx_query_positions)} positions "
           f"({len(_vtx_collapse_steps)} steps)")
@@ -908,7 +905,8 @@ def _rebuild_vtx_trajectory():
     if _selected_vtx < 0:
         return
 
-    fine_pos = _bundle.fineV[_selected_vtx]
+    base_v   = _deform_mesh_v if _deform_mesh_v is not None else _bundle.fineV
+    fine_pos = base_v[_selected_vtx]
     pc = ps.register_point_cloud(TRACKED_VTX_PC, fine_pos[np.newaxis])
     pc.set_color((0.1, 1.0, 0.3))
     pc.set_radius(0.0035, relative=True)

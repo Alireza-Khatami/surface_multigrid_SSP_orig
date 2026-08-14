@@ -41,6 +41,10 @@ struct Sample {
     int         cur_FIdx;      // current face index in gF / gDecIM
     RowVector3d cur_BC;        // barycentric coords in cur_FIdx
     RowVector3i cur_BF;        // global vertex indices of cur_FIdx's corners
+    // Current live global vertex index this sample tracks (starts == fine_vertex_id,
+    // updated to s whenever fine_vertex_id's vertex is absorbed as d in a collapse).
+    // Used to snap cur_BC back to a one-hot after UV remap, preventing drift.
+    int         cur_vertex_id;
 };
 
 static std::vector<Sample>                      gSamples;
@@ -113,6 +117,7 @@ void sample_tracker_init(int n_total)
         s.cur_FIdx       = fi;
         s.cur_BC         = bc;
         s.cur_BF         = bf;
+        s.cur_vertex_id  = vi;
         fs_insert(fi, (int)gSamples.size());
         gSamples.push_back(s);
     }
@@ -156,6 +161,7 @@ void sample_tracker_init(int n_total)
         s.cur_FIdx       = fi;
         s.cur_BC         = bc;
         s.cur_BF         = bf;
+        s.cur_vertex_id  = -1;
         fs_insert(fi, (int)gSamples.size());
         gSamples.push_back(s);
     }
