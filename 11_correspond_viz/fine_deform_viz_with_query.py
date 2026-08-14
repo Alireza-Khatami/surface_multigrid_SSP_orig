@@ -762,6 +762,16 @@ def _find_vtx_collapse_steps(v: int):
             for ci in _bundle.decIM[fi]:
                 seen.add(ci)
 
+    # Collect v's incident face sheet IDs for multi-sheet preference
+    faceSheetID = _bundle.faceSheetID
+    nFO         = len(_bundle.decIM)
+    incident_sids = set()
+    if faceSheetID is not None:
+        for f in faces_of_v:
+            fi = int(f)
+            if fi < len(faceSheetID):
+                incident_sids.add(int(faceSheetID[fi]))
+
     steps = []
     for ci in sorted(seen):
         cd = _bundle.decInfo[ci]
@@ -772,11 +782,30 @@ def _find_vtx_collapse_steps(v: int):
             hits = np.where(sheet.subsetVIdx == v)[0]
             if len(hits) and int(hits[0]) < uvRows:
                 valid_sheets.append((sheet, int(hits[0])))
+
         if len(valid_sheets) > 1:
+            # Prefer the sheet whose global_sheet_id matches an incident face's sheet ID
+            chosen = None
+            for sh, lv in valid_sheets:
+                if sh.global_sheet_id in incident_sids:
+                    chosen = (sh, lv)
+                    break
+            sid_str = ', '.join(
+                f'sid={sh.global_sheet_id} uv_post={sh.UV_post[lv]}'
+                for sh, lv in valid_sheets)
+            match_sid = chosen[0].global_sheet_id if chosen else 'none'
             print(f"[trace][multi-sheet] ci={ci} vertex={v}: "
-                  f"valid UV slot in {len(valid_sheets)} sheets — using first")
-        if valid_sheets:
-            steps.append((ci, valid_sheets[0][0], valid_sheets[0][1]))
+                  f"{len(valid_sheets)} valid sheets [{sid_str}] "
+                  f"incident_sids={incident_sids} → chosen sid={match_sid}")
+            if chosen is None:
+                chosen = valid_sheets[0]  # fallback to first
+        elif valid_sheets:
+            chosen = valid_sheets[0]
+        else:
+            chosen = None
+
+        if chosen is not None:
+            steps.append((ci, chosen[0], chosen[1]))
         else:
             # fallback: record even if no valid UV slot (will be skipped in query)
             for sheet in cd.sheets:
@@ -784,6 +813,7 @@ def _find_vtx_collapse_steps(v: int):
                 if len(hits):
                     steps.append((ci, sheet, int(hits[0])))
                     break
+
     _vtx_collapse_steps = steps
     print(f"[trace] vertex {v}: {len(steps)} collapse steps "
           f"(incident faces only, from {len(faces_of_v)} fine faces)")
@@ -1036,7 +1066,7 @@ def ui_callback():
 
     psim.Separator()
     psim.TextUnformatted("Collapse Trace  (click fine_mesh_verts point cloud)")
-    c, v = psim.Checkbox("Incident faces only (direct, fewer steps)", _use_incident_steps)
+    c, v = psim.Checkbox("Direct one-ring (incident faces)", _use_incident_steps)
     if c:
         _use_incident_steps = v
         _apply_f2c_active()        # swap active deformed mesh vertices
@@ -1052,7 +1082,7 @@ def ui_callback():
             if _canonical_view:
                 _rebuild_canonical_view()
     psim.SameLine()
-    psim.TextDisabled("(unchecked = full one-ring)")
+    psim.TextDisabled("(unchecked = extended one-ring)")
 
     if _selected_vtx >= 0:
         n_steps = len(_vtx_collapse_steps)
