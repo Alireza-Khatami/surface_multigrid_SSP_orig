@@ -1041,7 +1041,9 @@ def ui_callback():
         _use_incident_steps = v
         _apply_f2c_active()        # swap active deformed mesh vertices
         _rebuild_meshes()          # update deformed_fine_mesh in the viewport
-        _rebuild_flipped_viz()     # recompute flipped faces for the new mesh
+        _rebuild_arrows()          # recalculate fine→deformed global arrows
+        _rebuild_selection()       # recalculate selection arrows if a face is selected
+        _rebuild_flipped_viz()     # recompute flipped faces + flipped vertex colors + flipped arrows
         if _selected_vtx >= 0:
             _current_step_idx = 0
             _load_vtx_collapse_steps(_selected_vtx)
