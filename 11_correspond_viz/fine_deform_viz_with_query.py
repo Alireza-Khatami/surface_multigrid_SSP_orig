@@ -248,6 +248,48 @@ def _compute_f2c_deformed_mesh():
         _qf2c(vi_worst, _bundle, verbose=True)
         print(f'[f2c_compare] expected for vi={vi_worst}: {exp_worst}\n')
 
+    # ---- compare flipped face sets between samples.txt and F2C query ----
+    if _deform_mesh_v is not None and _f2c_onering_mesh_v is not None:
+        fineF = _bundle.fineF
+        fineV = _bundle.fineV
+        v0o = fineV[fineF[:, 0]]; v1o = fineV[fineF[:, 1]]; v2o = fineV[fineF[:, 2]]
+        orig_n = np.cross(v1o - v0o, v2o - v0o)
+
+        def flipped_set(active_v, label):
+            v0d = active_v[fineF[:, 0]]; v1d = active_v[fineF[:, 1]]; v2d = active_v[fineF[:, 2]]
+            dn  = np.cross(v1d - v0d, v2d - v0d)
+            dots = np.sum(orig_n * dn, axis=1)
+            fl   = np.where(dots < -1e-10)[0]
+            return set(fl.tolist()), dots
+
+        flip_bundle, dots_bundle = flipped_set(_deform_mesh_v,      "bundle")
+        flip_f2c,    dots_f2c    = flipped_set(_f2c_onering_mesh_v, "f2c")
+
+        only_bundle = sorted(flip_bundle - flip_f2c)
+        only_f2c    = sorted(flip_f2c    - flip_bundle)
+        both        = sorted(flip_bundle & flip_f2c)
+
+        print(f'\n[flip_compare] ---- flipped face set comparison ----')
+        print(f'[flip_compare] bundle  flipped : {len(flip_bundle)}')
+        print(f'[flip_compare] f2c     flipped : {len(flip_f2c)}')
+        print(f'[flip_compare] in BOTH         : {len(both)}')
+        print(f'[flip_compare] ONLY in bundle  : {len(only_bundle)}  {only_bundle[:20]}')
+        print(f'[flip_compare] ONLY in f2c     : {len(only_f2c)}   {only_f2c[:20]}')
+
+        if only_bundle or only_f2c:
+            print(f'[flip_compare] --- borderline faces (|dot| < 1e-4) ---')
+            for fi in sorted(set(only_bundle) | set(only_f2c)):
+                vids = fineF[fi]
+                db   = float(dots_bundle[fi])
+                df   = float(dots_f2c[fi])
+                pos_err = [float(np.linalg.norm(_f2c_onering_mesh_v[int(v)] - _deform_mesh_v[int(v)]))
+                           for v in vids]
+                print(f'  fi={fi:4d}  verts=({vids[0]},{vids[1]},{vids[2]})'
+                      f'  dot_bundle={db:+.6e}  dot_f2c={df:+.6e}'
+                      f'  vert_errs=({pos_err[0]:.2e},{pos_err[1]:.2e},{pos_err[2]:.2e})'
+                      f'  {"ONLY_BUNDLE" if fi in flip_bundle - flip_f2c else "ONLY_F2C"}')
+        print(f'[flip_compare] -----------------------------------------------\n')
+
     _apply_f2c_active()
 
 
@@ -434,7 +476,9 @@ def _rebuild_flipped_viz():
     v0d = active_v[fineF[:, 0]];  v1d = active_v[fineF[:, 1]];  v2d = active_v[fineF[:, 2]]
     deform_n = np.cross(v1d - v0d, v2d - v0d)
 
-    flipped   = np.sum(orig_n * deform_n, axis=1) < 0
+    FLIP_EPS  = 1e-10
+    dots      = np.sum(orig_n * deform_n, axis=1)
+    flipped   = dots < -FLIP_EPS
     n_flipped = int(flipped.sum())
     print(f"[flip] {n_flipped} / {nF} faces flipped")
 
@@ -1151,7 +1195,7 @@ def ui_callback():
         v0d = _av[fineF[:, 0]];  v1d = _av[fineF[:, 1]];  v2d = _av[fineF[:, 2]]
         orig_n   = np.cross(v1o - v0o, v2o - v0o)
         deform_n = np.cross(v1d - v0d, v2d - v0d)
-        n_flipped = int((np.sum(orig_n * deform_n, axis=1) < 0).sum())
+        n_flipped = int((np.sum(orig_n * deform_n, axis=1) < -1e-10).sum())
         psim.TextUnformatted(f"Flipped: {n_flipped} / {fineF.shape[0]} faces")
         if _selected_flipped_face >= 0 and _flipped_faces_glob is not None:
             vids = _flipped_faces_glob[_selected_flipped_face]
