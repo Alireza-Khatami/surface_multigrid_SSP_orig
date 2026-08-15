@@ -336,32 +336,20 @@ def query_coarse_to_fine(
             if not found:
                 break
 
-            # Determine the sheet this face belongs to
-            sid = int(faceSheetID[face]) if face < nFO else 0
-
-            # Find the matching SheetData for this face's sheet.
-            cd  = decInfo[d_idx]
-            sd  = None
-            for s in cd.sheets:
-                if s.global_sheet_id == sid:
-                    sd = s
-                    break
-            if sd is None and cd.sheets:
-                if len(cd.sheets) == 1:
-                    # Manifold collapse: single sheet, [0] is always correct.
-                    sd = cd.sheets[0]
-                # else: seam collapse — no matching sheet found.
-                # Using a different sheet's UV would corrupt the sample; skip.
-            if sd is None:
-                continue
-
-            # Find the pre-collapse face row matching the current face
+            # Find the sheet and pre-collapse face row by searching FIdx_pre directly
+            # across all sheets (more robust than faceSheetID matching for seam collapses).
+            cd      = decInfo[d_idx]
+            sd      = None
             pre_row = -1
-            for r in range(len(sd.FIdx_pre)):
-                if sd.FIdx_pre[r] == face:
-                    pre_row = r
+            for s in cd.sheets:
+                for r in range(len(s.FIdx_pre)):
+                    if int(s.FIdx_pre[r]) == face:
+                        sd      = s
+                        pre_row = r
+                        break
+                if sd is not None:
                     break
-            if pre_row < 0:
+            if sd is None or pre_row < 0:
                 continue
 
             # Project BC through UV_post → UV query point
@@ -377,13 +365,11 @@ def query_coarse_to_fine(
             min_per_face = B.min(axis=1)          # (fuvRows,)
             best = int(np.argmax(min_per_face))   # largest min = most inside
 
-            # Clamp small negatives and renormalize
+            # Clamp small negatives and renormalize (no centroid fallback — match C++)
             b_row = np.maximum(0.0, B[best])
             s_row = b_row.sum()
-            if s_row > 0:
+            if s_row > 1e-12:
                 b_row /= s_row
-            else:
-                b_row = np.array([1.0 / 3, 1.0 / 3, 1.0 / 3])
 
             new_fidx = int(sd.FIdx_pre[best])
             new_v0   = int(sd.subsetVIdx[sd.FUV_pre[best, 0]])
@@ -448,25 +434,19 @@ def query_point_with_intermediates(
         if not found:
             break
 
-        sid = int(faceSheetID[face]) if face < nFO else 0
-        cd  = decInfo[d_idx]
-        sd  = None
-        for s in cd.sheets:
-            if s.global_sheet_id == sid:
-                sd = s
-                break
-        if sd is None and cd.sheets:
-            if len(cd.sheets) == 1:
-                sd = cd.sheets[0]
-        if sd is None:
-            continue
-
+        # Direct FIdx_pre search across all sheets (fixes seam-collapse sheet mismatch)
+        cd      = decInfo[d_idx]
+        sd      = None
         pre_row = -1
-        for r in range(len(sd.FIdx_pre)):
-            if sd.FIdx_pre[r] == face:
-                pre_row = r
+        for s in cd.sheets:
+            for r in range(len(s.FIdx_pre)):
+                if int(s.FIdx_pre[r]) == face:
+                    sd      = s
+                    pre_row = r
+                    break
+            if sd is not None:
                 break
-        if pre_row < 0:
+        if sd is None or pre_row < 0:
             continue
 
         v0, v1, v2 = sd.FUV_pre[pre_row]
@@ -474,15 +454,17 @@ def query_point_with_intermediates(
                 BC[1] * sd.UV_post[v1] +
                 BC[2] * sd.UV_post[v2])
 
-        B            = compute_barycentric_2d(uv_q, sd.UV_pre, sd.FUV_pre)
-        best         = int(np.argmax(B.min(axis=1)))
-        b_row        = np.maximum(0.0, B[best])
-        s_row        = b_row.sum()
-        BC           = b_row / s_row if s_row > 0 else np.full(3, 1.0 / 3)
-        BF           = [int(sd.subsetVIdx[sd.FUV_pre[best, 0]]),
-                        int(sd.subsetVIdx[sd.FUV_pre[best, 1]]),
-                        int(sd.subsetVIdx[sd.FUV_pre[best, 2]])]
-        face         = int(sd.FIdx_pre[best])
+        B     = compute_barycentric_2d(uv_q, sd.UV_pre, sd.FUV_pre)
+        best  = int(np.argmax(B.min(axis=1)))
+        b_row = np.maximum(0.0, B[best])
+        s_row = b_row.sum()
+        if s_row > 1e-12:   # no centroid fallback — match C++
+            b_row /= s_row
+        BC   = b_row
+        BF   = [int(sd.subsetVIdx[sd.FUV_pre[best, 0]]),
+                int(sd.subsetVIdx[sd.FUV_pre[best, 1]]),
+                int(sd.subsetVIdx[sd.FUV_pre[best, 2]])]
+        face = int(sd.FIdx_pre[best])
 
         positions.append(pos3d())
 
@@ -555,6 +537,7 @@ def query_vertex_f2c_intermediates(vi, bundle, verbose=False, _fi_seed_override=
     face    = fi_seed
     ci      = -1
     n_skips = 0
+    vid     = vi   # tracks which coarse vertex this sample represents; updated to global_s on each SNAP
 
     def _v(idx):
         ci = g2c.get(idx)
@@ -601,48 +584,74 @@ def query_vertex_f2c_intermediates(vi, bundle, verbose=False, _fi_seed_override=
             n_skips += 1
             continue
 
-        # Vertex fixup (mirrors C++ face_sample_tracker.cpp lines 253-260):
-        # Relabel absorbed vertex global_d → survivor global_s in BF.
+        # Vertex fixup (mirrors C++ face_sample_tracker.cpp):
+        # Relabel absorbed vertex global_d → survivor global_s in BF after UV cast.
         def _apply_vtx_fixup(sd):
+            nonlocal BF
             if len(sd.b) >= 2 and sd.b[0] >= 0 and sd.b[1] >= 0:
                 global_d = int(sd.subsetVIdx[sd.b[1]])
                 global_s = int(sd.subsetVIdx[sd.b[0]])
-                for k in range(3):
-                    if BF[k] == global_d:
-                        BF[k] = global_s
+                BF = [global_s if BF[k] == global_d else BF[k] for k in range(3)]
 
-        # Embed current BC into UV_pre → uv_query
-        a = int(sd.FUV_pre[pre_row, 0])
-        b = int(sd.FUV_pre[pre_row, 1])
-        c = int(sd.FUV_pre[pre_row, 2])
-        uv_q = BC[0]*sd.UV_pre[a] + BC[1]*sd.UV_pre[b] + BC[2]*sd.UV_pre[c]
+        # SNAP: fires whenever the tracked vertex (vid) IS the absorbed vertex (global_d),
+        # regardless of BC value.  vid tracks vertex identity across collapses, starting at vi
+        # and updated to global_s on each SNAP — mirrors C++ cur_vertex_id logic.
+        snapped = False
+        if len(sd.b) >= 2 and sd.b[0] >= 0 and sd.b[1] >= 0 and len(sd.FUV_post) > 0:
+            global_d = int(sd.subsetVIdx[sd.b[1]])
+            global_s = int(sd.subsetVIdx[sd.b[0]])
+            if vid == global_d:
+                for row in range(len(sd.FUV_post)):
+                    for col in range(3):
+                        if int(sd.subsetVIdx[sd.FUV_post[row, col]]) == global_s:
+                            new_bc      = np.zeros(3)
+                            new_bc[col] = 1.0
+                            BC   = new_bc
+                            BF   = [int(sd.subsetVIdx[sd.FUV_post[row, i]]) for i in range(3)]
+                            face = int(sd.FIdx_post[row])
+                            vid  = global_s   # update tracked vertex to survivor
+                            snapped = True
+                            break
+                    if snapped:
+                        break
 
-        if verbose:
-            print(f"  [CAST] ci={ci_next} face={face} sid={sd.global_sheet_id} pre_row={pre_row} "
-                  f"uv_q=({uv_q[0]:.5f},{uv_q[1]:.5f})")
-
-        # Cast uv_query into UV_post; FIdx_post gives the surviving face index
-        if len(sd.FUV_post) > 0:
-            B    = compute_barycentric_2d(uv_q, sd.UV_post, sd.FUV_post)
-            best = int(np.argmax(B.min(axis=1)))
-            b_row = np.maximum(0.0, B[best])
-            s_row = b_row.sum()
-            if s_row > 1e-12:
-                b_row /= s_row
-            BC   = b_row
-            BF   = [int(sd.subsetVIdx[sd.FUV_post[best, i]]) for i in range(3)]
-            face = int(sd.FIdx_post[best])
+        if snapped:
+            if verbose:
+                print(f"  [SNAP] ci={ci_next} face={face} sid={sd.global_sheet_id} "
+                      f"global_d={global_d} → global_s={global_s}")
         else:
-            # v2 bundle fallback: FIdx_post not stored, approximate via FUV_pre triangulation
-            B    = compute_barycentric_2d(uv_q, sd.UV_post, sd.FUV_pre)
-            best = int(np.argmax(B.min(axis=1)))
-            b_row = np.maximum(0.0, B[best])
-            s_row = b_row.sum()
-            if s_row > 1e-12:
-                b_row /= s_row
-            BC   = b_row
-            BF   = [int(sd.subsetVIdx[sd.FUV_pre[best, i]]) for i in range(3)]
-            face = int(sd.FIdx_pre[best])
+            # Embed current BC into UV_pre → uv_query
+            a = int(sd.FUV_pre[pre_row, 0])
+            b = int(sd.FUV_pre[pre_row, 1])
+            c = int(sd.FUV_pre[pre_row, 2])
+            uv_q = BC[0]*sd.UV_pre[a] + BC[1]*sd.UV_pre[b] + BC[2]*sd.UV_pre[c]
+
+            if verbose:
+                print(f"  [CAST] ci={ci_next} face={face} sid={sd.global_sheet_id} pre_row={pre_row} "
+                      f"uv_q=({uv_q[0]:.5f},{uv_q[1]:.5f})")
+
+            if len(sd.FUV_post) > 0:
+                B    = compute_barycentric_2d(uv_q, sd.UV_post, sd.FUV_post)
+                best = int(np.argmax(B.min(axis=1)))
+                b_row = np.maximum(0.0, B[best])
+                s_row = b_row.sum()
+                if s_row > 1e-12:
+                    b_row /= s_row
+                BC   = b_row
+                BF   = [int(sd.subsetVIdx[sd.FUV_post[best, i]]) for i in range(3)]
+                face = int(sd.FIdx_post[best])
+                _apply_vtx_fixup(sd)
+            else:
+                B    = compute_barycentric_2d(uv_q, sd.UV_post, sd.FUV_pre)
+                best = int(np.argmax(B.min(axis=1)))
+                b_row = np.maximum(0.0, B[best])
+                s_row = b_row.sum()
+                if s_row > 1e-12:
+                    b_row /= s_row
+                BC   = b_row
+                BF   = [int(sd.subsetVIdx[sd.FUV_pre[best, i]]) for i in range(3)]
+                face = int(sd.FIdx_pre[best])
+                _apply_vtx_fixup(sd)
 
         if verbose:
             print(f"         → new face={face}  BC=({BC[0]:.4f},{BC[1]:.4f},{BC[2]:.4f})"
