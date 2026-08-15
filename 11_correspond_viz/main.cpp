@@ -24,6 +24,8 @@ using namespace Eigen;
 // Bundle format (little-endian binary, extension .c2f):
 //   magic   uint32  0xC2F50001 = v1 (no SSP data)
 //                   0xC2F50002 = v2 (includes SSP query data)
+//                   0xC2F50003 = v3 (adds FUV_post + FIdx_post per sheet)
+//                   0xC2F50004 = v4 (adds sd.b survivor/absorbed local indices per sheet)
 //   NC      uint32  compact coarse vertex count
 //   FC      uint32  coarse face count
 //   NF      uint32  fine vertex count
@@ -45,10 +47,12 @@ static bool load_bundle(const std::string & path, Bundle & b)
     auto readD  = [&](double   & v) { in.read((char*)&v, 8); };
 
     uint32_t magic; read32(magic);
-    if (magic != 0xC2F50001 && magic != 0xC2F50002) {
+    if (magic != 0xC2F50001 && magic != 0xC2F50002 && magic != 0xC2F50003 && magic != 0xC2F50004) {
         std::cerr << "[bundle] Bad magic 0x" << std::hex << magic << "\n"; return false;
     }
     const bool v2 = (magic == 0xC2F50002);
+    const bool v3 = (magic == 0xC2F50003);
+    const bool v4 = (magic == 0xC2F50004);
 
     uint32_t NC, FC, NF, FF;
     read32(NC); read32(FC); read32(NF); read32(FF);
@@ -86,8 +90,8 @@ static bool load_bundle(const std::string & path, Bundle & b)
         b.corrVec.row(i) = fine_pos - b.coarseV.row(i);
     }
 
-    // ---- v2: SSP query data ----
-    if (v2) {
+    // ---- v2/v3/v4: SSP query data ----
+    if (v2 || v3 || v4) {
         auto read32s = [&](int32_t & v) { in.read((char*)&v, 4); };
 
         uint32_t nV_total, nF_decIM, nFO;
@@ -154,11 +158,33 @@ static bool load_bundle(const std::string & path, Bundle & b)
                 for (uint32_t r = 0; r < fuvRows; r++) {
                     int32_t v; read32s(v); sd.FIdx_pre(r) = v;
                 }
+
+                if (v3 || v4) {
+                    uint32_t fuvPostRows; read32(fuvPostRows);
+                    sd.FUV_post.resize(fuvPostRows, 3);
+                    for (uint32_t r = 0; r < fuvPostRows; r++) {
+                        int32_t a, bv, c; read32s(a); read32s(bv); read32s(c);
+                        sd.FUV_post(r,0)=a; sd.FUV_post(r,1)=bv; sd.FUV_post(r,2)=c;
+                    }
+                    sd.FIdx_post.resize(fuvPostRows);
+                    for (uint32_t r = 0; r < fuvPostRows; r++) {
+                        int32_t v; read32s(v); sd.FIdx_post(r) = v;
+                    }
+                    if (v4) {
+                        // sd.b: survivor_local (b(0)) and absorbed_local (b(1))
+                        int32_t b0, b1; read32s(b0); read32s(b1);
+                        if (b0 >= 0 && b1 >= 0) {
+                            sd.b.resize(2);
+                            sd.b(0) = b0; sd.b(1) = b1;
+                        }
+                    }
+                }
             }
         }
 
         b.hasSspData = true;
-        std::cerr << "[bundle] Loaded v2 SSP data: nDec=" << nDec
+        int ver = v4 ? 4 : (v3 ? 3 : 2);
+        std::cerr << "[bundle] Loaded v" << ver << " SSP data: nDec=" << nDec
                   << "  nF_decIM=" << nF_decIM << "\n";
     }
 

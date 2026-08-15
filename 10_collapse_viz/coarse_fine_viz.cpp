@@ -634,7 +634,7 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
     std::ofstream out(bundlePath, std::ios::binary);
     if (!out) { std::cerr << "[bundle] Cannot write " << bundlePath << "\n"; return; }
 
-    const uint32_t magic = 0xC2F50002;  // v2: includes SSP query data
+    const uint32_t magic = 0xC2F50004;  // v4: adds sd.b (survivor/absorbed local indices) per sheet
     out.write((const char*)&magic, 4);
     out.write((const char*)&NC, 4);
     out.write((const char*)&FC, 4);
@@ -746,6 +746,25 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
                 int32_t fi = (int32_t)sd.FIdx_pre(r);
                 out.write((const char*)&fi, 4);
             }
+
+            uint32_t fuvPostRows = (uint32_t)sd.FUV_post.rows();
+            out.write((const char*)&fuvPostRows, 4);
+            for (uint32_t r = 0; r < fuvPostRows; r++) {
+                int32_t a = sd.FUV_post(r,0), b = sd.FUV_post(r,1), c2 = sd.FUV_post(r,2);
+                out.write((const char*)&a, 4);
+                out.write((const char*)&b, 4);
+                out.write((const char*)&c2, 4);
+            }
+            for (uint32_t r = 0; r < fuvPostRows; r++) {
+                int32_t fi = (int32_t)sd.FIdx_post(r);
+                out.write((const char*)&fi, 4);
+            }
+
+            // v4: sd.b — (survivor_local, absorbed_local) for vertex fixup
+            int32_t b0 = (sd.b.size() >= 2) ? (int32_t)sd.b(0) : -1;
+            int32_t b1 = (sd.b.size() >= 2) ? (int32_t)sd.b(1) : -1;
+            out.write((const char*)&b0, 4);
+            out.write((const char*)&b1, 4);
         }
     }
 

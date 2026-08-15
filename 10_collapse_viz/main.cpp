@@ -410,17 +410,19 @@ int main(int argc, char * argv[])
     bool        validityChecks   = false;
     std::string matstructPath;      // optional: path to .ma_struct file for struct-ID collapse gating
     bool        matStructCheck = false;  // --mat_struct_check: enable struct-ID collapse gate
+    std::string traceVerticesPath;  // optional: text file with one fine_vertex_id per line
 
 
-    //usage    
+    //usage
     // [--mesh_path PATH]       default: bunny.obj
     // [--target_faces N]       default: 285
     // [--mode midpoint|qslim|meshlab]   default: qslim
     // [--n_samples_total N]    default: 2000
     // [--output_dir PATH]      default: .
     // [--validity-checks]
+    // [--trace_vertices PATH]  text file: one fine_vertex_id per line; enables per-step walk trace
 
-    
+
     for (int i = 1; i < argc; ++i) {
         if (!argv[i]) continue;
         std::string a = argv[i];
@@ -429,12 +431,13 @@ int main(int argc, char * argv[])
         } else if (a == "--mat_struct_check") {
             matStructCheck = true;
         } else if (i + 1 < argc) {
-            if      (a == "--mesh_path")       meshPath       = argv[i+1];
-            else if (a == "--target_faces")    targetFaces    = std::stoi(argv[i+1]);
-            else if (a == "--mode")            namedMode      = argv[i+1];
-            else if (a == "--n_samples_total") gNSamplesTotal = std::stoi(argv[i+1]);
-            else if (a == "--output_dir")      namedOutDir    = argv[i+1];
-            else if (a == "--matstruct_path")  matstructPath  = argv[i+1];
+            if      (a == "--mesh_path")        meshPath          = argv[i+1];
+            else if (a == "--target_faces")     targetFaces       = std::stoi(argv[i+1]);
+            else if (a == "--mode")             namedMode         = argv[i+1];
+            else if (a == "--n_samples_total")  gNSamplesTotal    = std::stoi(argv[i+1]);
+            else if (a == "--output_dir")       namedOutDir       = argv[i+1];
+            else if (a == "--matstruct_path")   matstructPath     = argv[i+1];
+            else if (a == "--trace_vertices")   traceVerticesPath = argv[i+1];
             else { continue; }
             ++i;
         }
@@ -554,6 +557,10 @@ int main(int argc, char * argv[])
     const std::string samples_coarse_path   = out_dir + "samples_coarse_"     + stem + ".txt";
     const std::string samples_vertices_path = out_dir + "samples_vertices_"   + stem + ".txt";
 
+    if (!traceVerticesPath.empty()) {
+        const std::string trace_out = out_dir + "fine_samples_log_" + stem + ".txt";
+        sample_tracker_set_trace(traceVerticesPath, trace_out);
+    }
     sample_tracker_init(gNSamplesTotal);
 
     print_seam_edge_costs(out_dir + "seam_edge_costs_" + stem + ".txt");

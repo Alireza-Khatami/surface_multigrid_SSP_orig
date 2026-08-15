@@ -157,16 +157,22 @@ def _compute_vertex_correspondences():
     fine_indices = np.array(fine_ids_list, dtype=np.int32)
     deform_pts   = np.array(deform_pts_list, dtype=np.float64)
 
+    NF = _bundle.fineV.shape[0]
+    missing = sorted(set(range(NF)) - set(fine_indices.tolist()))
+    if missing:
+        print(f"[vtx_corr] WARNING: {len(missing)} fine vertices have no correspondence entry: {missing[:20]}{'...' if len(missing)>20 else ''}")
+
     _fine_ids       = fine_indices
     _fine_pts       = _bundle.fineV[fine_indices]
     _deform_pts     = deform_pts
     _fine_id_to_row = {int(fine_indices[i]): i for i in range(len(fine_indices))}
 
+    # Build full-mesh vertex array; untracked verts keep fineV position (warned above)
     deform_v = _bundle.fineV.copy()
     deform_v[fine_indices] = deform_pts
     _deform_mesh_v = deform_v
 
-    print(f"[vtx_corr] {len(fine_indices)} tracked fine verts loaded")
+    print(f"[vtx_corr] {len(fine_indices)}/{NF} fine verts loaded{' (complete)' if not missing else ''}")
     return True
 
 
@@ -183,6 +189,64 @@ def _compute_f2c_deformed_mesh():
 
     print("[f2c] computing incident-faces F2C correspondences...")
     _f2c_incident_mesh_v, _ = compute_f2c_correspondences_incident(_bundle)
+
+    # ---- check whether SSP moves vertices (coarseV vs fineV at same global index) ----
+    if _bundle.vtxMap is not None:
+        vtxMap = _bundle.vtxMap
+        diffs = np.linalg.norm(_bundle.coarseV - _bundle.fineV[vtxMap], axis=1)
+        print(f'[f2c_vtxcheck] coarseV vs fineV[vtxMap]: max diff = {diffs.max():.8f}  mean = {diffs.mean():.8f}')
+        if diffs.max() > 1e-10:
+            print(f'[f2c_vtxcheck] SSP MOVES VERTICES — must use coarseV for final eval, not fineV')
+        else:
+            print(f'[f2c_vtxcheck] SSP does NOT move vertices — fineV[BF] == coarseV[compact(BF)] OK')
+
+    # ---- compare our result against the bundle's samples_vertices ground truth ----
+    if _deform_mesh_v is not None and _f2c_onering_mesh_v is not None:
+        err = np.linalg.norm(_f2c_onering_mesh_v - _deform_mesh_v, axis=1)
+        print(f'\n[f2c_compare] --- position error vs samples_vertices ground truth ---')
+        print(f'[f2c_compare] max  = {err.max():.6f}')
+        print(f'[f2c_compare] mean = {err.mean():.6f}')
+        print(f'[f2c_compare] p95  = {np.percentile(err, 95):.6f}')
+        print(f'[f2c_compare] >1e-3: {(err > 1e-3).sum()} / {len(err)}')
+        print(f'[f2c_compare] >0.01: {(err > 0.01).sum()} / {len(err)}')
+        print(f'[f2c_compare] >0.1 : {(err > 0.1).sum()} / {len(err)}')
+        worst5 = np.argsort(err)[-5:][::-1]
+        print(f'[f2c_compare] worst 5 vertices:')
+        for vi in worst5:
+            ours = _f2c_onering_mesh_v[vi]
+            exp  = _deform_mesh_v[vi]
+            print(f'  vi={vi:4d}  err={err[vi]:.6f}  ours=({ours[0]:.4f},{ours[1]:.4f},{ours[2]:.4f})'
+                  f'  expected=({exp[0]:.4f},{exp[1]:.4f},{exp[2]:.4f})')
+        print(f'[f2c_compare] -------------------------------------------------------')
+        # For the worst vertex: try every incident face as fi_seed to see if fi_seed matters
+        vi_worst = int(worst5[0])
+        exp_worst = _deform_mesh_v[vi_worst]
+        fineF_arr = _bundle.fineF
+        print(f'\n[fi_seed_sweep] Trying all incident faces for vi={vi_worst}  expected=({exp_worst[0]:.4f},{exp_worst[1]:.4f},{exp_worst[2]:.4f})')
+        from c2f_query import query_vertex_f2c_intermediates as _qf2c
+        incident = [(int(fi), int(c)) for fi in range(fineF_arr.shape[0])
+                    for c in range(3) if int(fineF_arr[fi, c]) == vi_worst]
+        best_fi_err = float('inf')
+        best_fi = -1
+        default_fi = incident[0][0] if incident else -1
+        for fi_try, col_try in incident:
+            dm_first = _bundle.decIM[fi_try][0] if _bundle.decIM[fi_try] else 'empty'
+            pos_list, _, _, _ = _qf2c(vi_worst, _bundle, _fi_seed_override=(fi_try, col_try))
+            final_pos = pos_list[-1]
+            e = float(np.linalg.norm(final_pos - exp_worst))
+            marker = '  <-- BEST' if e < best_fi_err else ''
+            if e < best_fi_err:
+                best_fi_err = e
+                best_fi = fi_try
+            print(f'  fi={fi_try:4d} col={col_try}  decIM_first={dm_first!s:>5}  err={e:.6f}'
+                  f'  pos=({final_pos[0]:.4f},{final_pos[1]:.4f},{final_pos[2]:.4f}){marker}')
+        print(f'[fi_seed_sweep] Best fi_seed={best_fi}  err={best_fi_err:.6f}')
+        print(f'[fi_seed_sweep] Default fi_seed={default_fi}  (first face in fineF containing vi={vi_worst})')
+
+        # Verbose walk for our current fi_seed (first incident face)
+        print(f'\n[f2c_compare] Verbose trace for vi={vi_worst} with default fi_seed={default_fi}:')
+        _qf2c(vi_worst, _bundle, verbose=True)
+        print(f'[f2c_compare] expected for vi={vi_worst}: {exp_worst}\n')
 
     _apply_f2c_active()
 
@@ -236,7 +300,13 @@ def _rebuild_deform_pc():
         return
 
     step = max(1, _sample_step)
-    pts  = _deform_pts[::step].copy()
+
+    # In F2C mode use predicted positions; otherwise use ground-truth _deform_pts
+    if _use_f2c_deform and _f2c_deform_mesh_v is not None and _fine_ids is not None:
+        pts = _f2c_deform_mesh_v[_fine_ids][::step].copy()
+    else:
+        pts = _deform_pts[::step].copy()
+
     pts[:, 2] += _z_offset
 
     pc = ps.register_point_cloud(DEFORM_PC, pts)
@@ -882,14 +952,11 @@ def _run_query_intermediates(v: int):
     _vtx_collapse_steps must already be populated by _load_vtx_collapse_steps(v).
     """
     global _vtx_query_positions
-    base_v    = _deform_mesh_v if (not _use_f2c_deform and _deform_mesh_v is not None) else _bundle.fineV
-    _vtx_query_positions = query_vertex_f2c_intermediates(
-        _vtx_collapse_steps,
-        base_v,
-        base_v[v],
-    )
-    print(f"[f2c_intermediates] vertex {v}: {len(_vtx_query_positions)} positions "
-          f"({len(_vtx_collapse_steps)} steps)")
+    verbose = not _use_f2c_deform   # print UV diagnostics in bundle mode
+    if verbose:
+        print(f"\n[uv_diag] ---- vertex {v}  ({len(_vtx_collapse_steps)} collapse steps) ----")
+    _vtx_query_positions, n_sk, final_bf, final_bc = query_vertex_f2c_intermediates(v, _bundle, verbose=verbose)
+    print(f"[f2c_intermediates] vertex {v}: {len(_vtx_query_positions)} positions  skips={n_sk}  final_bf={final_bf}  final_bc=({final_bc[0]:.4f},{final_bc[1]:.4f},{final_bc[2]:.4f})")
 
 
 def _rebuild_vtx_trajectory():
@@ -1289,7 +1356,6 @@ def ui_callback():
                     if _selected_flipped_face >= 0:
                         vids     = _flipped_faces_glob[_selected_flipped_face]
                         active_v = _active_deform_mesh_v()
-                        batch_map = getattr(_bundle, '_f2c_vtx_steps', None)
                         mode_str  = "F2C" if _use_f2c_deform else "Bundle"
                         print(f"\n[flipped face {_selected_flipped_face}]  mode={mode_str}")
                         query_pts = []
@@ -1298,15 +1364,9 @@ def ui_callback():
                             deform_pos = active_v[vid] if active_v is not None else fine_pos
                             if _use_f2c_deform:
                                 # run f2c query fresh for this vertex
-                                if batch_map is not None and vid in batch_map:
-                                    steps = batch_map[vid]
-                                    positions = query_vertex_f2c_intermediates(
-                                        steps, _bundle.fineV, fine_pos)
-                                    query_final = positions[-1]
-                                    n_steps = len(steps)
-                                else:
-                                    query_final = fine_pos
-                                    n_steps = 0
+                                positions, _sk, _bf, _bc = query_vertex_f2c_intermediates(vid, _bundle)
+                                query_final = positions[-1]
+                                n_steps = len(positions) - 1
                                 print(f"  v{k}: fine_id={vid}  n_steps={n_steps}")
                                 print(f"        fine       =({fine_pos[0]:.6f}, {fine_pos[1]:.6f}, {fine_pos[2]:.6f})")
                                 print(f"        deformed   =({deform_pos[0]:.6f}, {deform_pos[1]:.6f}, {deform_pos[2]:.6f})")

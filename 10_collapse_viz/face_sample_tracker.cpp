@@ -16,6 +16,7 @@
 #include <random>
 #include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <cmath>
 
@@ -27,6 +28,11 @@ extern MatrixXd gVO;
 extern MatrixXi gF;
 extern MatrixXi gFO;
 extern std::vector<single_collapse_data> gDecInfo;
+
+// ---- trace configuration ----
+static std::unordered_set<int> gTraceVIDSet;   // vertex IDs to trace; empty = trace all
+static std::ofstream           gTraceFile;
+static int                     gCollapseIdx = 0;
 
 // ---- sample state ----
 
@@ -77,6 +83,34 @@ static void fs_remove(int fi, int si)
 
 // ---- public API ----
 
+void sample_tracker_set_trace(const std::string& vertex_list_path,
+                               const std::string& trace_output_path)
+{
+    gTraceVIDSet.clear();
+    gCollapseIdx = 0;
+
+    std::ifstream vf(vertex_list_path);
+    if (!vf) {
+        fprintf(stderr, "[sample_tracker] WARNING: cannot open vertex list '%s' — tracing all vertices\n",
+                vertex_list_path.c_str());
+    } else {
+        int v;
+        while (vf >> v) gTraceVIDSet.insert(v);
+        fprintf(stderr, "[sample_tracker] trace: %zu vertices from '%s'\n",
+                gTraceVIDSet.size(), vertex_list_path.c_str());
+    }
+
+    if (gTraceFile.is_open()) gTraceFile.close();
+    gTraceFile.open(trace_output_path);
+    if (!gTraceFile)
+        fprintf(stderr, "[sample_tracker] WARNING: cannot open trace file '%s'\n",
+                trace_output_path.c_str());
+    else {
+        gTraceFile << "# ci  vi  sheet  face_pre  bc_pre(0,1,2)  vid_pre  face_post  bc_post(0,1,2)  vid_post  method\n";
+        fprintf(stderr, "[sample_tracker] trace output → '%s'\n", trace_output_path.c_str());
+    }
+}
+
 void sample_tracker_init(int n_total)
 {
     gSamples.clear();
@@ -96,7 +130,11 @@ void sample_tracker_init(int n_total)
     int id = 0;
 
     // --- vertex samples ---
+    // If gTraceVIDSet is non-empty, only seed those specific vertices.
     for (int vi = 0; vi < nVO; vi++) {
+        if (!gTraceVIDSet.empty() && gTraceVIDSet.find(vi) == gTraceVIDSet.end())
+            continue;
+
         int fi = vtxFace[vi];
         if (fi < 0) continue;
         int col = -1;
@@ -122,6 +160,10 @@ void sample_tracker_init(int n_total)
         gSamples.push_back(s);
     }
 
+    // INTERIOR_SAMPLES: disabled while debugging vertex tracking.
+    // TODO: uncomment the block below once vertex correspondence is validated,
+    //       to restore area-weighted interior sample tracking.
+    /*
     // --- interior barycentric samples (area-weighted) ---
     // Build CDF over face areas so larger faces receive proportionally more samples.
     std::vector<double> area_cdf(nFO);
@@ -165,16 +207,19 @@ void sample_tracker_init(int n_total)
         fs_insert(fi, (int)gSamples.size());
         gSamples.push_back(s);
     }
+    */
+    const int n_interior = 0; // interior samples disabled; was n_total
 
     fprintf(stderr,
-        "[sample_tracker] init: %d samples (%d vertex + %d interior area-weighted)  nFO=%d  nVO=%d  total_area=%.4g\n",
-        id, nVO, n_total, nFO, nVO, total_area);
+        "[sample_tracker] init: %d samples (%d vertex + %d interior)  nFO=%d  nVO=%d  trace_set=%zu\n",
+        id, id, n_interior, nFO, nVO, gTraceVIDSet.size());
 }
 
 void sample_tracker_update()
 {
     if (gDecInfo.empty() || gSamples.empty()) return;
     const single_collapse_data& d = gDecInfo.back();
+    const int ci = gCollapseIdx++;
 
     // Rebuild per-collapse remap record for canonical-view display.
     gLastRingRemap.clear();
@@ -183,6 +228,10 @@ void sample_tracker_update()
         const SheetData& sd = d.sheets[shi];
         if (sd.FIdx_pre.size() == 0 || sd.FIdx_post.size() == 0) continue;
         const bool on_snap = (shi == 0); // sheets[0] is the sheet gSnap/uv_pre_3d represents
+
+        // Absorbed / survivor global vertex indices for this sheet (requires sd.b from v4 bundle).
+        const int global_d = (sd.b.size() >= 2) ? (int)sd.subsetVIdx(sd.b(1)) : -1;
+        const int global_s = (sd.b.size() >= 2) ? (int)sd.subsetVIdx(sd.b(0)) : -1;
 
         // Build pre-face → row index for O(1) lookup
         std::unordered_map<int,int> preFaceRow;
@@ -204,6 +253,58 @@ void sample_tracker_update()
             if (rit == preFaceRow.end()) continue;
             int pre_row = rit->second;
 
+            const bool should_trace = gTraceFile.is_open() && s.is_vertex &&
+                (gTraceVIDSet.empty() || gTraceVIDSet.count(s.fine_vertex_id));
+
+            // ---- ABSORBED-VERTEX SNAP ----
+            // When this sample IS exactly the absorbed vertex (cur_vertex_id == global_d),
+            // skip the UV cast entirely and directly remap to the survivor with a one-hot BC.
+            // This avoids ambiguous face selection when the absorbed vertex's UV position
+            // lies exactly on a shared edge in UV_post (the general cast lands there and
+            // may pick a different triangle than C++ due to FP tie-breaking).
+            if (s.is_vertex && global_d >= 0 && s.cur_vertex_id == global_d) {
+                // Find a post-collapse face that has global_s as a corner.
+                int snap_row = -1, snap_corner = -1;
+                for (int r = 0; r < (int)sd.FIdx_post.size() && snap_row < 0; r++)
+                    for (int c = 0; c < 3; c++)
+                        if ((int)sd.subsetVIdx(sd.FUV_post(r, c)) == global_s) {
+                            snap_row = r; snap_corner = c; break;
+                        }
+
+                if (snap_row >= 0) {
+                    RowVector3d snap_bc = RowVector3d::Zero();
+                    snap_bc(snap_corner) = 1.0;
+                    RowVector3i snap_bf;
+                    snap_bf << sd.subsetVIdx(sd.FUV_post(snap_row, 0)),
+                               sd.subsetVIdx(sd.FUV_post(snap_row, 1)),
+                               sd.subsetVIdx(sd.FUV_post(snap_row, 2));
+                    int new_FIdx = (int)sd.FIdx_post(snap_row);
+
+                    if (should_trace) {
+                        gTraceFile
+                            << ci << "  " << s.fine_vertex_id << "  " << shi
+                            << "  " << s.cur_FIdx
+                            << "  " << s.cur_BC(0) << " " << s.cur_BC(1) << " " << s.cur_BC(2)
+                            << "  " << s.cur_vertex_id
+                            << "  " << new_FIdx
+                            << "  " << snap_bc(0) << " " << snap_bc(1) << " " << snap_bc(2)
+                            << "  " << global_s
+                            << "  SNAP\n";
+                    }
+
+                    gLastRingRemap.push_back({pre_row, s.cur_BC, snap_row, snap_bc, on_snap});
+                    fs_remove(s.cur_FIdx, si);
+                    s.cur_FIdx      = new_FIdx;
+                    s.cur_BC        = snap_bc;
+                    s.cur_BF        = snap_bf;
+                    s.cur_vertex_id = global_s;
+                    fs_insert(new_FIdx, si);
+                    continue; // skip UV cast for this sample
+                }
+                // If no post face found for global_s, fall through to UV cast.
+            }
+
+            // ---- GENERAL UV CAST ----
             // Express sample position in UV_pre (uses this sheet's UV, not a global assumption)
             int lv0 = sd.FUV_pre(pre_row, 0);
             int lv1 = sd.FUV_pre(pre_row, 1);
@@ -217,7 +318,7 @@ void sample_tracker_update()
             MatrixXd B;
             compute_barycentric(queryUV, sd.UV_post, sd.FUV_post, B);
 
-            // Pick face that minimises the largest negative BC component
+            // Pick face that minimises the largest negative BC component (first-wins).
             VectorXd d2v = -B.rowwise().minCoeff();
             int best = 0; double minD = 1.0;
             for (int bb = 0; bb < (int)d2v.size(); bb++)
@@ -235,6 +336,18 @@ void sample_tracker_update()
                       sd.subsetVIdx(sd.FUV_post(best,1)),
                       sd.subsetVIdx(sd.FUV_post(best,2));
 
+            if (should_trace) {
+                gTraceFile
+                    << ci << "  " << s.fine_vertex_id << "  " << shi
+                    << "  " << s.cur_FIdx
+                    << "  " << s.cur_BC(0) << " " << s.cur_BC(1) << " " << s.cur_BC(2)
+                    << "  " << s.cur_vertex_id
+                    << "  " << new_FIdx
+                    << "  " << new_BC(0) << " " << new_BC(1) << " " << new_BC(2)
+                    << "  " << s.cur_vertex_id  // vid_post same as pre (no vertex change here)
+                    << "  CAST\n";
+            }
+
             // Record UV face row + BC for canonical-view placement on UV surfaces.
             gLastRingRemap.push_back({pre_row, s.cur_BC, best, new_BC, on_snap});
 
@@ -248,15 +361,16 @@ void sample_tracker_update()
 
     // Vertex fixup: after UV remap, cur_BF may still reference the absorbed
     // vertex d (subsetVIdx was captured pre-collapse).  Patch d→s across all
-    // samples so gV lookups stay correct.  For non-active SheetData entries,
-    // b(0)=3 → subsetVIdx(3)=s and b(1)=d_local → subsetVIdx(d_local)=d.
+    // samples so gV lookups stay correct.  Also update cur_vertex_id.
     for (const SheetData& sd : d.sheets) {
         if (sd.b.size() < 2) continue;
         int global_d = sd.subsetVIdx(sd.b(1)); // absorbed
         int global_s = sd.subsetVIdx(sd.b(0)); // survivor
-        for (Sample& s : gSamples)
+        for (Sample& s : gSamples) {
             for (int c = 0; c < 3; c++)
                 if (s.cur_BF(c) == global_d) s.cur_BF(c) = global_s;
+            if (s.cur_vertex_id == global_d) s.cur_vertex_id = global_s;
+        }
     }
 }
 

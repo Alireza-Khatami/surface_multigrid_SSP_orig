@@ -2,9 +2,18 @@
 #include <string>
 #include <Eigen/Dense>
 
-// Seed vertex samples (one per fine mesh vertex) plus n_total interior
-// barycentric samples distributed across fine mesh triangles proportional
-// to face area (larger faces receive more samples).  Call once after init_ssp().
+// Configure a subset of fine-mesh vertices to track and a file to receive the
+// per-collapse-step walk trace.  Call BEFORE sample_tracker_init().
+// vertex_list_path: text file with one fine_vertex_id (int) per line.
+// trace_output_path: receives one line per tracked sample per update step.
+void sample_tracker_set_trace(const std::string& vertex_list_path,
+                               const std::string& trace_output_path);
+
+// Seed vertex samples (one per fine mesh vertex, or only the subset configured
+// via sample_tracker_set_trace) plus n_total interior barycentric samples
+// distributed across fine mesh triangles proportional to face area.
+// Call once after init_ssp().
+// NOTE: interior samples are currently disabled — see INTERIOR_SAMPLES comment.
 void sample_tracker_init(int n_total = 2000);
 
 // Remap all samples through the latest entry in gDecInfo.

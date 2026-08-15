@@ -28,8 +28,12 @@ class SheetData:
     subsetVIdx: np.ndarray   # (svSz,)  int32 — global vertex indices, sorted asc
     UV_pre:  np.ndarray      # (uvRows, 2) float64
     UV_post: np.ndarray      # (uvRows, 2) float64
-    FUV_pre: np.ndarray      # (fuvRows, 3) int32 — local vertex indices
-    FIdx_pre: np.ndarray     # (fuvRows,)   int32 — global original face indices
+    FUV_pre: np.ndarray      # (fuvRows, 3) int32 — local vertex indices, pre-collapse
+    FIdx_pre: np.ndarray     # (fuvRows,)   int32 — global face indices, pre-collapse
+    FUV_post: np.ndarray     # (fuvPostRows, 3) int32 — local vertex indices, post-collapse
+    FIdx_post: np.ndarray    # (fuvPostRows,)   int32 — global face indices, post-collapse
+    b: np.ndarray = field(default_factory=lambda: np.empty((0,), dtype=np.int32))
+    # b[0]=survivor_local, b[1]=absorbed_local  (v4+ only; empty for v2/v3)
 
 
 @dataclass
@@ -122,9 +126,11 @@ def load_bundle(path: str) -> Bundle:
     r = _Reader(data)
 
     magic = r.u32()
-    if magic not in (0xC2F50001, 0xC2F50002):
+    if magic not in (0xC2F50001, 0xC2F50002, 0xC2F50003, 0xC2F50004):
         raise ValueError(f'Bad magic: 0x{magic:08X}')
     v2 = (magic == 0xC2F50002)
+    v3 = (magic == 0xC2F50003)
+    v4 = (magic == 0xC2F50004)
 
     NC = r.u32()
     FC = r.u32()
@@ -155,11 +161,11 @@ def load_bundle(path: str) -> Bundle:
                fineV=fineV, fineF=fineF,
                corrVec=corrVec, corrBC=corrBC, corrFV=corrFV)
 
-    if not v2:
+    if not v2 and not v3 and not v4:
         print(f'[bundle] Loaded v1  NC={NC} FC={FC} NF={NF} FF={FF}')
         return b
 
-    # ---- v2 SSP data ----
+    # ---- v2/v3/v4 SSP data ----
     nV_total = r.u32()
     nF_decIM = r.u32()
     nFO      = r.u32()
@@ -196,6 +202,19 @@ def load_bundle(path: str) -> Bundle:
             FUV_pre  = r.i32_array(fuvRows * 3).reshape(fuvRows, 3)
             FIdx_pre = r.i32_array(fuvRows)
 
+            if v3 or v4:
+                fuvPostRows = r.u32()
+                FUV_post  = r.i32_array(fuvPostRows * 3).reshape(fuvPostRows, 3)
+                FIdx_post = r.i32_array(fuvPostRows)
+            else:
+                FUV_post  = np.empty((0, 3), dtype=np.int32)
+                FIdx_post = np.empty((0,),   dtype=np.int32)
+
+            if v4:
+                b_arr = r.i32_array(2)  # [survivor_local, absorbed_local]
+            else:
+                b_arr = np.empty((0,), dtype=np.int32)
+
             cd.sheets.append(SheetData(
                 global_sheet_id=sid,
                 subsetVIdx=subsetVIdx,
@@ -203,12 +222,25 @@ def load_bundle(path: str) -> Bundle:
                 UV_post=UV_post,
                 FUV_pre=FUV_pre,
                 FIdx_pre=FIdx_pre,
+                FUV_post=FUV_post,
+                FIdx_post=FIdx_post,
+                b=b_arr,
             ))
         b.decInfo.append(cd)
 
     b.has_ssp_data = True
-    print(f'[bundle] Loaded v2  NC={NC} FC={FC} NF={NF} FF={FF}'
+    ver = 4 if v4 else (3 if v3 else 2)
+    print(f'[bundle] Loaded v{ver}  NC={NC} FC={FC} NF={NF} FF={FF}'
           f'  nDec={nDec}  nFO={nFO}')
+
+    # Confirm whether sd.b (survivor/absorbed vertex pair) is present
+    total_sheets = sum(len(cd.sheets) for cd in b.decInfo)
+    sheets_with_b = sum(1 for cd in b.decInfo for sd in cd.sheets if len(sd.b) >= 2)
+    if sheets_with_b == 0:
+        print(f'[bundle] sd.b NOT present (v{ver} bundle — need v4 to get vertex fixup data)')
+    else:
+        print(f'[bundle] sd.b present: {sheets_with_b}/{total_sheets} sheets have survivor/absorbed pair')
+
     return b
 
 
@@ -250,7 +282,7 @@ def compute_barycentric_2d(p: np.ndarray,
     denom = d00 * d11 - d01 * d01
     vv = (d11 * d20 - d01 * d21) / denom
     ww = (d00 * d21 - d01 * d20) / denom
-    uu = 1.0 - vv - ww
+    uu = 1.0 - (vv + ww)   # match C++: 1.0f - (v+w) avoids (1-vv)-ww rounding at boundaries
 
     return np.stack([uu, vv, ww], axis=1)   # (nF, 3)
 
@@ -461,154 +493,179 @@ def query_point_with_intermediates(
 # query_vertex_f2c_intermediates
 # ---------------------------------------------------------------------------
 
-def query_vertex_f2c_intermediates(
-    collapse_steps,
-    fineV,
-    start_pos,
-):
+def query_vertex_f2c_intermediates(vi, bundle, verbose=False, _fi_seed_override=None, _skip_log=None):
     """
-    Track a fine vertex forward through F2C collapse steps and return the 3D
-    position at each stage (fine → coarse direction).
+    Track fine vertex vi to its coarse position using the correct F2C shadow cast.
+
+    Implements fine_to_coarse_procedure.md exactly:
+      Step 0 : seed one-hot BC at vi's corner on fi_seed
+      Step 1+ : find next collapse ci_next > ci via decIM[face]
+                embed BC into UV_pre  →  cast into UV_post (using FUV_post/FIdx_post)
+                update BC, BF, face
+      Final   : BC · coarseV[compact(BF)]  (SSP moves vertices; must use coarseV, not fineV)
 
     Parameters
     ----------
-    collapse_steps : list of (collapse_idx, SheetData, local_v_idx)
-                     sorted ascending by collapse_idx (as produced by
-                     _find_vtx_collapse_steps in the viz script)
-    fineV          : (NF, 3) fine mesh vertex positions
-    start_pos      : (3,) starting 3D position (the selected fine vertex)
+    vi               : int     — fine vertex index
+    bundle           : Bundle  — must have v2/v3 SSP data
+    verbose          : bool    — print per-step UV diagnostics
+    _fi_seed_override: (fi, col) tuple to force a specific seeding face (for diagnostics)
 
     Returns
     -------
-    List[np.ndarray(3,)]
-        positions[0]   = start_pos (fine mesh vertex)
-        positions[i+1] = 3D position after the i-th collapse step
+    positions   : List[np.ndarray(3,)]
+        positions[0] = fine start;  positions[-1] = final coarse position
+    n_skips     : int
+        number of collapses skipped (no sheet match or face not in FIdx_pre)
+    final_bf    : List[int]  (3 global SSP vertex indices of the landing triangle)
+    final_bc    : np.ndarray(3,)
     """
-    positions = [np.array(start_pos, dtype=np.float64)]
+    fineV       = bundle.fineV
+    fineF       = bundle.fineF
+    coarseV     = bundle.coarseV
+    vtxMap      = bundle.vtxMap
+    decIM       = bundle.decIM
+    decInfo     = bundle.decInfo
+    faceSheetID = bundle.faceSheetID
+    nFO         = len(faceSheetID) if faceSheetID is not None else 0
 
-    for _ci, sheet, local_v in collapse_steps:
-        if local_v >= len(sheet.UV_post):
-            continue   # vertex has no UV slot in this sheet (boundary/seam case)
-        # UV position of this vertex after the collapse
-        uv_post = sheet.UV_post[local_v]
+    # global SSP index → compact coarse index (for coarseV lookup)
+    g2c = {int(vtxMap[i]): i for i in range(len(vtxMap))} if vtxMap is not None else {}
 
-        # Express uv_post in barycentric coords within the UV_pre triangulation
-        B    = compute_barycentric_2d(uv_post, sheet.UV_pre, sheet.FUV_pre)
-        best = int(np.argmax(B.min(axis=1)))
-        b_row = np.maximum(0.0, B[best])
-        s_row = b_row.sum()
-        BC    = b_row / s_row if s_row > 0 else np.full(3, 1.0 / 3)
+    # Step 0: find fi_seed (any face incident to vi) and initialize one-hot BC
+    if _fi_seed_override is not None:
+        fi_seed, col = _fi_seed_override
+    else:
+        fi_seed = col = -1
+        for fi in range(fineF.shape[0]):
+            row = fineF[fi]
+            for c in range(3):
+                if int(row[c]) == vi:
+                    fi_seed, col = fi, c
+                    break
+            if fi_seed >= 0:
+                break
 
-        p0 = int(sheet.subsetVIdx[sheet.FUV_pre[best, 0]])
-        p1 = int(sheet.subsetVIdx[sheet.FUV_pre[best, 1]])
-        p2 = int(sheet.subsetVIdx[sheet.FUV_pre[best, 2]])
-        pos = BC[0] * fineV[p0] + BC[1] * fineV[p1] + BC[2] * fineV[p2]
-        positions.append(pos)
+    if fi_seed < 0:
+        return [fineV[vi].copy()], 0, [int(fineF[0, i]) for i in range(3)], np.array([1/3, 1/3, 1/3])
 
-    return positions
+    BC      = np.zeros(3, dtype=np.float64)
+    BC[col] = 1.0
+    BF      = [int(fineF[fi_seed, 0]), int(fineF[fi_seed, 1]), int(fineF[fi_seed, 2])]
+    face    = fi_seed
+    ci      = -1
+    n_skips = 0
+
+    def _v(idx):
+        ci = g2c.get(idx)
+        return coarseV[ci] if ci is not None else fineV[idx]
+
+    def pos3d():
+        return BC[0]*_v(BF[0]) + BC[1]*_v(BF[1]) + BC[2]*_v(BF[2])
+
+    positions = [pos3d()]
+
+    while True:
+        # Step 1: first collapse index > ci that touched the current face
+        ci_next = None
+        for d in decIM[face]:
+            if d > ci:
+                ci_next = d
+                break
+        if ci_next is None:
+            if verbose:
+                print(f"  [DONE] no more collapses for face={face} after ci={ci}  "
+                      f"({len(positions)-1} steps, {n_skips} skips)")
+            break
+
+        # Find the sheet containing the current face by searching FIdx_pre directly.
+        # This is more robust than faceSheetID matching for seam collapses, where a
+        # face's stored sheet ID may not equal the collapse sheet's global_sheet_id.
+        cd      = decInfo[ci_next]
+        sd      = None
+        pre_row = -1
+        for s in cd.sheets:
+            for r in range(len(s.FIdx_pre)):
+                if int(s.FIdx_pre[r]) == face:
+                    sd      = s
+                    pre_row = r
+                    break
+            if sd is not None:
+                break
+        if sd is None:
+            if verbose:
+                sid_dbg = int(faceSheetID[face]) if faceSheetID is not None else -1
+                print(f"  [SKIP] ci={ci_next} face={face} not found in any sheet's FIdx_pre "
+                      f"(faceSheetID={sid_dbg}  sheets={[s.global_sheet_id for s in cd.sheets]})")
+            ci = ci_next
+            n_skips += 1
+            continue
+
+        # Vertex fixup (mirrors C++ face_sample_tracker.cpp lines 253-260):
+        # Relabel absorbed vertex global_d → survivor global_s in BF.
+        def _apply_vtx_fixup(sd):
+            if len(sd.b) >= 2 and sd.b[0] >= 0 and sd.b[1] >= 0:
+                global_d = int(sd.subsetVIdx[sd.b[1]])
+                global_s = int(sd.subsetVIdx[sd.b[0]])
+                for k in range(3):
+                    if BF[k] == global_d:
+                        BF[k] = global_s
+
+        # Embed current BC into UV_pre → uv_query
+        a = int(sd.FUV_pre[pre_row, 0])
+        b = int(sd.FUV_pre[pre_row, 1])
+        c = int(sd.FUV_pre[pre_row, 2])
+        uv_q = BC[0]*sd.UV_pre[a] + BC[1]*sd.UV_pre[b] + BC[2]*sd.UV_pre[c]
+
+        if verbose:
+            print(f"  [CAST] ci={ci_next} face={face} sid={sd.global_sheet_id} pre_row={pre_row} "
+                  f"uv_q=({uv_q[0]:.5f},{uv_q[1]:.5f})")
+
+        # Cast uv_query into UV_post; FIdx_post gives the surviving face index
+        if len(sd.FUV_post) > 0:
+            B    = compute_barycentric_2d(uv_q, sd.UV_post, sd.FUV_post)
+            best = int(np.argmax(B.min(axis=1)))
+            b_row = np.maximum(0.0, B[best])
+            s_row = b_row.sum()
+            if s_row > 1e-12:
+                b_row /= s_row
+            BC   = b_row
+            BF   = [int(sd.subsetVIdx[sd.FUV_post[best, i]]) for i in range(3)]
+            face = int(sd.FIdx_post[best])
+        else:
+            # v2 bundle fallback: FIdx_post not stored, approximate via FUV_pre triangulation
+            B    = compute_barycentric_2d(uv_q, sd.UV_post, sd.FUV_pre)
+            best = int(np.argmax(B.min(axis=1)))
+            b_row = np.maximum(0.0, B[best])
+            s_row = b_row.sum()
+            if s_row > 1e-12:
+                b_row /= s_row
+            BC   = b_row
+            BF   = [int(sd.subsetVIdx[sd.FUV_pre[best, i]]) for i in range(3)]
+            face = int(sd.FIdx_pre[best])
+
+        if verbose:
+            print(f"         → new face={face}  BC=({BC[0]:.4f},{BC[1]:.4f},{BC[2]:.4f})"
+                  f"  BF={BF}")
+
+        ci = ci_next
+        positions.append(pos3d())
+
+    return positions, n_skips, BF, BC.copy()
 
 
 # ---------------------------------------------------------------------------
 # compute_f2c_correspondences  (batch F2C for every fine vertex)
 # ---------------------------------------------------------------------------
 
-def _build_incident_maps(bundle):
-    """
-    Build two per-vertex lookup structures needed for incident-gated F2C:
-
-    v_incident_ci   : dict  v -> set of collapse indices that touch v via decIM
-    v_incident_sids : dict  v -> set of faceSheetID values for v's incident faces
-
-    These let compute_f2c_correspondences gate and prefer sheets the same way
-    _find_vtx_collapse_steps does.
-    """
-    NF    = bundle.fineV.shape[0]
-    fineF = bundle.fineF
-    decIM = bundle.decIM
-    nFO   = len(decIM)
-    faceSheetID = bundle.faceSheetID  # (nFO,) int32 or None
-
-    # vertex → list of incident face indices
-    v2f = [[] for _ in range(NF)]
-    for fi in range(fineF.shape[0]):
-        for corner in fineF[fi]:
-            v2f[corner].append(fi)
-
-    v_incident_ci   = {}
-    v_incident_sids = {}
-    for v in range(NF):
-        ci_set  = set()
-        sid_set = set()
-        for fi in v2f[v]:
-            if fi < nFO:
-                for ci in decIM[fi]:
-                    ci_set.add(ci)
-                if faceSheetID is not None and fi < len(faceSheetID):
-                    sid_set.add(int(faceSheetID[fi]))
-        if ci_set:
-            v_incident_ci[v]   = ci_set
-        if sid_set:
-            v_incident_sids[v] = sid_set
-
-    return v_incident_ci, v_incident_sids
-
-
-def _pick_best_sheet(cd, v, uvRows_min, v_incident_sids,
-                     n_multi_match, n_multi_fallback, multi_samples):
-    """
-    Among all sheets in CollapseData cd where vertex v has local_v < uvRows,
-    prefer the sheet whose global_sheet_id matches v's incident face sheet IDs.
-    Returns (sheet, local_v) or None.
-    Also updates multi-sheet logging counters (passed as single-element lists
-    so they can be mutated by reference).
-    """
-    valid = []
-    for sheet in cd.sheets:
-        uvRows = len(sheet.UV_post)
-        hits   = np.where(sheet.subsetVIdx == np.int32(v))[0]
-        if len(hits) and int(hits[0]) < uvRows:
-            valid.append((sheet, int(hits[0])))
-
-    if not valid:
-        return None
-    if len(valid) == 1:
-        return valid[0]
-
-    # Multiple valid sheets — prefer one whose sheet ID is incident to v
-    incident_sids = v_incident_sids.get(v, set())
-    chosen = None
-    for sh, lv in valid:
-        if sh.global_sheet_id in incident_sids:
-            chosen = (sh, lv)
-            n_multi_match[0] += 1
-            break
-    if chosen is None:
-        chosen = valid[0]
-        n_multi_fallback[0] += 1
-
-    if len(multi_samples) < 8:
-        sid_str = ', '.join(f'sid={sh.global_sheet_id}' for sh, _ in valid)
-        multi_samples.append(
-            f'  ci=? v={v} incident_sids={incident_sids} candidates=[{sid_str}] '
-            f'chosen=sid={chosen[0].global_sheet_id}')
-    return chosen
-
-
 def compute_f2c_correspondences(bundle):
     """
-    For every fine vertex that appears in at least one collapse sheet, compute
-    its final F2C position.
-
-    Gating: only records (ci, v) when ci appears in decIM[fi] for at least one
-    of v's incident faces — this matches _find_vtx_collapse_steps and avoids
-    applying LSCM-parametrization-only steps that don't move v in 3D.
-
-    Sheet selection: for multi-sheet (seam) collapses, prefers the sheet whose
-    global_sheet_id matches faceSheetID[fi] for one of v's incident faces.
+    For every fine vertex, compute its final F2C position using the correct
+    shadow-cast chain (fine_to_coarse_procedure.md).
 
     Parameters
     ----------
-    bundle : Bundle  (must have v2 SSP data)
+    bundle : Bundle  (must have v2/v3 SSP data)
 
     Returns
     -------
@@ -621,268 +678,95 @@ def compute_f2c_correspondences(bundle):
     NF    = bundle.fineV.shape[0]
     fineV = bundle.fineV
 
-    v_incident_ci, v_incident_sids = _build_incident_maps(bundle)
-
-    # Dedup logging state
-    n_dedup_dup     = 0   # local_v >= uvRows AND v already seen at valid slot in same sheet
-    n_dedup_genuine = 0   # local_v >= uvRows AND v has no earlier slot in same sheet
-    dedup_samples   = []  # first few of each kind
-
-    # Multi-sheet logging state (single-element lists so _pick_best_sheet can mutate)
-    n_multi_match    = [0]
-    n_multi_fallback = [0]
-    multi_samples    = []
-
-    vtx_steps = {}
-    recorded  = set()
-
-    for ci, cd in enumerate(bundle.decInfo):
-        # Collect per-vertex candidates across all sheets for this collapse
-        # (so we can choose the best sheet before committing)
-        candidates = {}  # v -> list of (sheet, local_v)
-
-        for sheet in cd.sheets:
-            uvRows      = len(sheet.UV_post)
-            seen_in_sh  = {}  # v -> first local_v < uvRows in this sheet (for dedup log)
-
-            for local_v, gv in enumerate(sheet.subsetVIdx):
-                v = int(gv)
-                if not (0 <= v < NF):
-                    continue
-
-                if local_v >= uvRows:
-                    # Dedup diagnostic
-                    earlier = seen_in_sh.get(v)
-                    if earlier is not None:
-                        n_dedup_dup += 1
-                        if len(dedup_samples) < 4:
-                            dedup_samples.append(
-                                f'  [dup]  ci={ci} v={v} local_v={local_v} >= uvRows={uvRows}'
-                                f' → duplicate of local_v={earlier} (correct skip)')
-                    else:
-                        n_dedup_genuine += 1
-                        if len(dedup_samples) < 4:
-                            dedup_samples.append(
-                                f'  [gen]  ci={ci} v={v} local_v={local_v} >= uvRows={uvRows}'
-                                f' → no earlier slot (genuine no-UV skip)')
-                    continue
-
-                seen_in_sh[v] = local_v
-
-                # Gate: ci must be reachable from v's incident faces
-                if v not in v_incident_ci or ci not in v_incident_ci[v]:
-                    continue
-                key = (ci, v)
-                if key in recorded:
-                    continue
-
-                if v not in candidates:
-                    candidates[v] = []
-                candidates[v].append((sheet, local_v))
-
-        # Commit best sheet per vertex for this collapse
-        for v, cands in candidates.items():
-            key = (ci, v)
-            if key in recorded:
-                continue
-            recorded.add(key)
-
-            if len(cands) == 1:
-                chosen_sh, chosen_lv = cands[0]
-            else:
-                # Prefer sheet matching v's incident face sheet IDs
-                incident_sids = v_incident_sids.get(v, set())
-                chosen_sh, chosen_lv = cands[0]
-                for sh, lv in cands:
-                    if sh.global_sheet_id in incident_sids:
-                        chosen_sh, chosen_lv = sh, lv
-                        n_multi_match[0] += 1
-                        break
-                else:
-                    n_multi_fallback[0] += 1
-                if len(multi_samples) < 8:
-                    sid_str = ', '.join(f'sid={sh.global_sheet_id}' for sh, _ in cands)
-                    multi_samples.append(
-                        f'  ci={ci} v={v} incident_sids={incident_sids} '
-                        f'candidates=[{sid_str}] chosen=sid={chosen_sh.global_sheet_id}')
-
-            if v not in vtx_steps:
-                vtx_steps[v] = []
-            vtx_steps[v].append((ci, chosen_sh, chosen_lv))
-
-    # Sort each vertex's steps ascending (fine→coarse)
-    for v in vtx_steps:
-        vtx_steps[v].sort(key=lambda x: x[0])
-
-    # --- Dedup / multi-sheet summary ---
-    print(f'\n[f2c_dedup] local_v >= uvRows — duplicate (v seen at valid slot) : {n_dedup_dup}')
-    print(f'[f2c_dedup] local_v >= uvRows — genuine no-UV-slot               : {n_dedup_genuine}')
-    for s in dedup_samples:
-        print(f'[f2c_dedup]{s}')
-    print(f'[f2c_multi] Multi-sheet (ci,v): faceSheetID match found : {n_multi_match[0]}')
-    print(f'[f2c_multi] Multi-sheet (ci,v): fell back to first sheet : {n_multi_fallback[0]}')
-    for s in multi_samples:
-        print(f'[f2c_multi]{s}')
-
-    # --- Query and stats ---
     f2c_v        = fineV.copy()
     tracked_mask = np.zeros(NF, dtype=bool)
+    n_moved      = 0
+    n_stationary = 0
+    n_zero       = 0
+    step_counts  = []
+    total_skips  = 0
+    skip_log     = []
 
-    n_zero_steps  = NF - len(vtx_steps)
-    n_all_skipped = 0
-    n_moved       = 0
-    n_stationary  = 0
-    step_counts   = []
-
-    for v, steps in vtx_steps.items():
-        positions = query_vertex_f2c_intermediates(steps, fineV, fineV[v])
-        step_counts.append(len(positions) - 1)
-        final = positions[-1]
-        f2c_v[v]        = final
-        tracked_mask[v] = True
-
-        if len(positions) == 1:
-            n_all_skipped += 1
-        elif np.allclose(final, fineV[v], atol=1e-10):
-            n_stationary += 1
+    for vi in range(NF):
+        positions, n_sk, _, _ = query_vertex_f2c_intermediates(vi, bundle, _skip_log=skip_log)
+        n_steps = len(positions) - 1
+        total_skips += n_sk
+        if n_steps > 0:
+            final = positions[-1]
+            f2c_v[vi]        = final
+            tracked_mask[vi] = True
+            step_counts.append(n_steps)
+            if np.allclose(final, fineV[vi], atol=1e-10):
+                n_stationary += 1
+            else:
+                n_moved += 1
         else:
-            n_moved += 1
+            n_zero += 1
 
-    n_in_map = len(vtx_steps)
-    sc = np.array(step_counts, dtype=np.int32) if step_counts else np.array([0])
+    sc       = np.array(step_counts, dtype=np.int32) if step_counts else np.array([0])
+    n_in_map = int(tracked_mask.sum())
 
-    print(f'\n[f2c_batch] ---- F2C batch stats (incident-gated) ----')
-    print(f'[f2c_batch] Fine vertices total         : {NF}')
-    print(f'[f2c_batch] Zero steps (not in gate)   : {n_zero_steps} / {NF}  ({100*n_zero_steps/NF:.1f}%)')
-    print(f'[f2c_batch] In map (≥1 valid UV step)  : {n_in_map} / {NF}  ({100*n_in_map/NF:.1f}%)')
-    print(f'[f2c_batch]   all skipped (no valid UV) : {n_all_skipped}')
-    print(f'[f2c_batch]   stationary (final==start) : {n_stationary}')
-    print(f'[f2c_batch]   moved                     : {n_moved}')
+    print(f'\n[f2c_batch] ---- F2C batch stats (correct shadow-cast) ----')
+    print(f'[f2c_batch] Fine vertices total  : {NF}')
+    print(f'[f2c_batch] Zero steps           : {n_zero} / {NF}  ({100*n_zero/NF:.1f}%)')
+    print(f'[f2c_batch] Tracked (≥1 step)    : {n_in_map} / {NF}  ({100*n_in_map/NF:.1f}%)')
+    print(f'[f2c_batch]   stationary          : {n_stationary}')
+    print(f'[f2c_batch]   moved               : {n_moved}')
+    print(f'[f2c_batch] Total SKIPs (all verts): {total_skips}')
     if len(sc) > 0 and sc.max() > 0:
         nz = sc[sc > 0]
-        print(f'[f2c_batch] Steps/vertex (moved): '
+        print(f'[f2c_batch] Steps/vertex: '
               f'min={nz.min()}  median={int(np.median(nz))}  max={nz.max()}  mean={nz.mean():.1f}')
-    print(f'[f2c_batch] -------------------------------------------\n')
+    print(f'[f2c_batch] --------------------------------------------------\n')
 
-    bundle._f2c_vtx_steps = vtx_steps
+    # Write SKIP-pre log to file
+    if skip_log:
+        import os
+        log_path = os.path.join(os.path.dirname(__file__), 'skip_pre_log.txt')
+        n_bf_changed = sum(1 for e in skip_log if e['bf_changed'])
+        with open(log_path, 'w') as lf:
+            lf.write(f'SKIP-pre log — {len(skip_log)} events  '
+                     f'({n_bf_changed} changed BF, {len(skip_log)-n_bf_changed} no BF change)\n')
+            lf.write(f'{"vi":>6}  {"ci":>6}  {"face":>6}  {"FIdx_pre":<14}  '
+                     f'{"global_d":>9}  {"global_s":>9}  {"BF_before":<20}  {"BF_after":<20}  changed\n')
+            lf.write('-' * 110 + '\n')
+            for e in skip_log:
+                changed = 'YES' if e['bf_changed'] else 'no'
+                lf.write(f'{e["vi"]:>6}  {e["ci"]:>6}  {e["face"]:>6}  '
+                         f'{str(e["FIdx_pre"]):<14}  '
+                         f'{e["global_d"]:>9}  {e["global_s"]:>9}  '
+                         f'{str(e["BF_before"]):<20}  {str(e["BF_after"]):<20}  {changed}\n')
+        print(f'[f2c_batch] SKIP-pre log written → {log_path}')
+        print(f'[f2c_batch]   {len(skip_log)} SKIPs: {n_bf_changed} changed BF  '
+              f'{len(skip_log)-n_bf_changed} no change')
+
+    # Verbose trace of first tracked vertex to spot any remaining cast issues
+    first_tracked = next((vi for vi in range(NF) if tracked_mask[vi]), None)
+    if first_tracked is not None:
+        print(f'[f2c_batch] Verbose trace for vi={first_tracked}:')
+        query_vertex_f2c_intermediates(first_tracked, bundle, verbose=True)
+
     return f2c_v, tracked_mask
 
 
 # ---------------------------------------------------------------------------
-# compute_f2c_correspondences_incident  (batch F2C — incident faces method)
+# compute_f2c_correspondences_incident  (same correct walk — alias kept for API compat)
 # ---------------------------------------------------------------------------
 
 def compute_f2c_correspondences_incident(bundle):
     """
-    Same interface as compute_f2c_correspondences, but finds collapse steps for
-    each fine vertex using only its directly incident faces (via decIM), NOT the
-    full one-ring scan.  This mirrors what _find_vtx_collapse_steps does interactively.
+    Same as compute_f2c_correspondences.
 
-    Stores the per-vertex step lists on bundle._f2c_incident_vtx_steps so the
-    interactive tracker can reuse them when "incident faces only" mode is active.
+    With the correct face-tracking shadow cast, there is no distinct
+    "incident faces only" vs "full one-ring" algorithm — the walk naturally
+    follows the face topology via decIM[face] at each step.
 
     Returns
     -------
     f2c_v        : (NF, 3) float64
     tracked_mask : (NF,) bool
     """
-    if not bundle.has_ssp_data:
-        raise RuntimeError('Bundle has no SSP data (need a v2 .c2f file)')
-
-    NF    = bundle.fineV.shape[0]
-    fineV = bundle.fineV
-    fineF = bundle.fineF
-    decIM   = bundle.decIM
-    decInfo = bundle.decInfo
-    nFO     = len(decIM)
-
-    # Build incident maps (reuse shared helper)
-    v_incident_ci, v_incident_sids = _build_incident_maps(bundle)
-
-    vtx_steps = {}
-
-    for v, ci_set in v_incident_ci.items():
-        steps = []
-        for ci in sorted(ci_set):
-            cd    = decInfo[ci]
-            v_arr = np.int32(v)
-
-            # Collect all sheets where v has a valid UV slot
-            valid = []
-            for sheet in cd.sheets:
-                uvRows = len(sheet.UV_post)
-                hits   = np.where(sheet.subsetVIdx == v_arr)[0]
-                if len(hits) and int(hits[0]) < uvRows:
-                    valid.append((sheet, int(hits[0])))
-
-            if not valid:
-                # fallback: any sheet containing v (will be skipped in query)
-                for sheet in cd.sheets:
-                    hits = np.where(sheet.subsetVIdx == v_arr)[0]
-                    if len(hits):
-                        valid.append((sheet, int(hits[0])))
-                        break
-
-            if not valid:
-                continue
-
-            if len(valid) == 1:
-                chosen_sh, chosen_lv = valid[0]
-            else:
-                # Prefer sheet whose global_sheet_id matches v's incident face sheet IDs
-                incident_sids = v_incident_sids.get(v, set())
-                chosen_sh, chosen_lv = valid[0]
-                for sh, lv in valid:
-                    if sh.global_sheet_id in incident_sids:
-                        chosen_sh, chosen_lv = sh, lv
-                        break
-
-            steps.append((ci, chosen_sh, chosen_lv))
-
-        if steps:
-            vtx_steps[v] = steps
-
-    f2c_v        = fineV.copy()
-    tracked_mask = np.zeros(NF, dtype=bool)
-
-    n_zero_steps  = NF - len(vtx_steps)
-    n_all_skipped = 0
-    n_moved       = 0
-    n_stationary  = 0
-    step_counts   = []
-
-    for v, steps in vtx_steps.items():
-        positions = query_vertex_f2c_intermediates(steps, fineV, fineV[v])
-        step_counts.append(len(positions) - 1)
-        final = positions[-1]
-        f2c_v[v]        = final
-        tracked_mask[v] = True
-
-        if len(positions) == 1:
-            n_all_skipped += 1
-        elif np.allclose(final, fineV[v], atol=1e-10):
-            n_stationary += 1
-        else:
-            n_moved += 1
-
-    n_in_map = len(vtx_steps)
-    sc = np.array(step_counts, dtype=np.int32) if step_counts else np.array([0])
-
-    print(f'\n[f2c_incident] ---- F2C incident-faces batch stats ----')
-    print(f'[f2c_incident] Fine vertices total          : {NF}')
-    print(f'[f2c_incident] Zero steps (no incident col) : {n_zero_steps} / {NF}  ({100*n_zero_steps/NF:.1f}%)')
-    print(f'[f2c_incident] In map (≥1 step found)       : {n_in_map} / {NF}  ({100*n_in_map/NF:.1f}%)')
-    print(f'[f2c_incident]   all skipped (no valid UV)  : {n_all_skipped}')
-    print(f'[f2c_incident]   stationary (moved=0)       : {n_stationary}')
-    print(f'[f2c_incident]   moved                      : {n_moved}')
-    if len(sc) > 0 and sc.max() > 0:
-        nz = sc[sc > 0]
-        print(f'[f2c_incident] Steps/vertex (moved): '
-              f'min={nz.min()}  median={int(np.median(nz))}  max={nz.max()}  mean={nz.mean():.1f}')
-    print(f'[f2c_incident] ------------------------------------------\n')
-
-    bundle._f2c_incident_vtx_steps = vtx_steps
-    return f2c_v, tracked_mask
+    return compute_f2c_correspondences(bundle)
 
 
 # ---------------------------------------------------------------------------
