@@ -537,7 +537,6 @@ def query_vertex_f2c_intermediates(vi, bundle, verbose=False, _fi_seed_override=
     face    = fi_seed
     ci      = -1
     n_skips = 0
-    vid     = vi   # tracks which coarse vertex this sample represents; updated to global_s on each SNAP
 
     def _v(idx):
         ci = g2c.get(idx)
@@ -584,7 +583,6 @@ def query_vertex_f2c_intermediates(vi, bundle, verbose=False, _fi_seed_override=
             n_skips += 1
             continue
 
-        # Vertex fixup (mirrors C++ face_sample_tracker.cpp):
         # Relabel absorbed vertex global_d → survivor global_s in BF after UV cast.
         def _apply_vtx_fixup(sd):
             nonlocal BF
@@ -593,65 +591,40 @@ def query_vertex_f2c_intermediates(vi, bundle, verbose=False, _fi_seed_override=
                 global_s = int(sd.subsetVIdx[sd.b[0]])
                 BF = [global_s if BF[k] == global_d else BF[k] for k in range(3)]
 
-        # SNAP: fires whenever the tracked vertex (vid) IS the absorbed vertex (global_d),
-        # regardless of BC value.  vid tracks vertex identity across collapses, starting at vi
-        # and updated to global_s on each SNAP — mirrors C++ cur_vertex_id logic.
-        snapped = False
-        if len(sd.b) >= 2 and sd.b[0] >= 0 and sd.b[1] >= 0 and len(sd.FUV_post) > 0:
-            global_d = int(sd.subsetVIdx[sd.b[1]])
-            global_s = int(sd.subsetVIdx[sd.b[0]])
-            if vid == global_d:
-                for row in range(len(sd.FUV_post)):
-                    for col in range(3):
-                        if int(sd.subsetVIdx[sd.FUV_post[row, col]]) == global_s:
-                            new_bc      = np.zeros(3)
-                            new_bc[col] = 1.0
-                            BC   = new_bc
-                            BF   = [int(sd.subsetVIdx[sd.FUV_post[row, i]]) for i in range(3)]
-                            face = int(sd.FIdx_post[row])
-                            vid  = global_s   # update tracked vertex to survivor
-                            snapped = True
-                            break
-                    if snapped:
-                        break
+        # UV cast — always; no SNAP special-case (see snap_vs_uv_cast.md).
+        # argmax(B.min(axis=1)) picks the best containing face even when the query
+        # point lands inside the deleted-triangle region of UV_post.
+        a = int(sd.FUV_pre[pre_row, 0])
+        b = int(sd.FUV_pre[pre_row, 1])
+        c = int(sd.FUV_pre[pre_row, 2])
+        uv_q = BC[0]*sd.UV_pre[a] + BC[1]*sd.UV_pre[b] + BC[2]*sd.UV_pre[c]
 
-        if snapped:
-            if verbose:
-                print(f"  [SNAP] ci={ci_next} face={face} sid={sd.global_sheet_id} "
-                      f"global_d={global_d} → global_s={global_s}")
+        if verbose:
+            print(f"  [CAST] ci={ci_next} face={face} sid={sd.global_sheet_id} pre_row={pre_row} "
+                  f"uv_q=({uv_q[0]:.5f},{uv_q[1]:.5f})")
+
+        if len(sd.FUV_post) > 0:
+            B    = compute_barycentric_2d(uv_q, sd.UV_post, sd.FUV_post)
+            best = int(np.argmax(B.min(axis=1)))
+            b_row = np.maximum(0.0, B[best])
+            s_row = b_row.sum()
+            if s_row > 1e-12:
+                b_row /= s_row
+            BC   = b_row
+            BF   = [int(sd.subsetVIdx[sd.FUV_post[best, i]]) for i in range(3)]
+            face = int(sd.FIdx_post[best])
+            _apply_vtx_fixup(sd)
         else:
-            # Embed current BC into UV_pre → uv_query
-            a = int(sd.FUV_pre[pre_row, 0])
-            b = int(sd.FUV_pre[pre_row, 1])
-            c = int(sd.FUV_pre[pre_row, 2])
-            uv_q = BC[0]*sd.UV_pre[a] + BC[1]*sd.UV_pre[b] + BC[2]*sd.UV_pre[c]
-
-            if verbose:
-                print(f"  [CAST] ci={ci_next} face={face} sid={sd.global_sheet_id} pre_row={pre_row} "
-                      f"uv_q=({uv_q[0]:.5f},{uv_q[1]:.5f})")
-
-            if len(sd.FUV_post) > 0:
-                B    = compute_barycentric_2d(uv_q, sd.UV_post, sd.FUV_post)
-                best = int(np.argmax(B.min(axis=1)))
-                b_row = np.maximum(0.0, B[best])
-                s_row = b_row.sum()
-                if s_row > 1e-12:
-                    b_row /= s_row
-                BC   = b_row
-                BF   = [int(sd.subsetVIdx[sd.FUV_post[best, i]]) for i in range(3)]
-                face = int(sd.FIdx_post[best])
-                _apply_vtx_fixup(sd)
-            else:
-                B    = compute_barycentric_2d(uv_q, sd.UV_post, sd.FUV_pre)
-                best = int(np.argmax(B.min(axis=1)))
-                b_row = np.maximum(0.0, B[best])
-                s_row = b_row.sum()
-                if s_row > 1e-12:
-                    b_row /= s_row
-                BC   = b_row
-                BF   = [int(sd.subsetVIdx[sd.FUV_pre[best, i]]) for i in range(3)]
-                face = int(sd.FIdx_pre[best])
-                _apply_vtx_fixup(sd)
+            B    = compute_barycentric_2d(uv_q, sd.UV_post, sd.FUV_pre)
+            best = int(np.argmax(B.min(axis=1)))
+            b_row = np.maximum(0.0, B[best])
+            s_row = b_row.sum()
+            if s_row > 1e-12:
+                b_row /= s_row
+            BC   = b_row
+            BF   = [int(sd.subsetVIdx[sd.FUV_pre[best, i]]) for i in range(3)]
+            face = int(sd.FIdx_pre[best])
+            _apply_vtx_fixup(sd)
 
         if verbose:
             print(f"         → new face={face}  BC=({BC[0]:.4f},{BC[1]:.4f},{BC[2]:.4f})"

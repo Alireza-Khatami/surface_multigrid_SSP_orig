@@ -253,64 +253,9 @@ void sample_tracker_update()
             const bool should_trace = gTraceFile.is_open() && s.is_vertex &&
                 (gTraceVIDSet.empty() || gTraceVIDSet.count(s.fine_vertex_id));
 
-            // ---- ABSORBED-VERTEX SNAP ----
-            // When this sample is sitting EXACTLY at the absorbed vertex (one-hot BC at the
-            // corner whose cur_BF entry == global_d), skip the UV cast and snap directly to
-            // the survivor.  This avoids ambiguous face selection when the absorbed vertex's
-            // UV position lands exactly on a shared edge in UV_post (FP tie-breaking can then
-            // diverge from C++).  We check cur_BF/cur_BC, NOT cur_vertex_id, because after
-            // several collapses cur_vertex_id lives in coarse-mesh index space and a naive
-            // equality check against global_d produces false positives.
-            if (s.is_vertex && global_d >= 0) {
-                // Is this sample one-hot at a corner that holds global_d?
-                int pre_corner_d = -1;
-                for (int c = 0; c < 3; c++)
-                    if (s.cur_BF(c) == global_d && s.cur_BC(c) > 0.999)
-                        { pre_corner_d = c; break; }
-
-                if (pre_corner_d >= 0) {
-                // Find a post-collapse face that has global_s as a corner.
-                int snap_row = -1, snap_corner = -1;
-                for (int r = 0; r < (int)sd.FIdx_post.size() && snap_row < 0; r++)
-                    for (int c = 0; c < 3; c++)
-                        if ((int)sd.subsetVIdx(sd.FUV_post(r, c)) == global_s) {
-                            snap_row = r; snap_corner = c; break;
-                        }
-
-                if (snap_row >= 0) {
-                    RowVector3d snap_bc = RowVector3d::Zero();
-                    snap_bc(snap_corner) = 1.0;
-                    RowVector3i snap_bf;
-                    snap_bf << sd.subsetVIdx(sd.FUV_post(snap_row, 0)),
-                               sd.subsetVIdx(sd.FUV_post(snap_row, 1)),
-                               sd.subsetVIdx(sd.FUV_post(snap_row, 2));
-                    int new_FIdx = (int)sd.FIdx_post(snap_row);
-
-                    if (should_trace) {
-                        gTraceFile
-                            << ci << "  " << s.fine_vertex_id << "  " << shi
-                            << "  " << s.cur_FIdx
-                            << "  " << s.cur_BC(0) << " " << s.cur_BC(1) << " " << s.cur_BC(2)
-                            << "  " << s.cur_BF(0) << "/" << s.cur_BF(1) << "/" << s.cur_BF(2)
-                            << "  " << new_FIdx
-                            << "  " << snap_bc(0) << " " << snap_bc(1) << " " << snap_bc(2)
-                            << "  " << global_s
-                            << "  SNAP\n";
-                    }
-
-                    gLastRingRemap.push_back({pre_row, s.cur_BC, snap_row, snap_bc, on_snap});
-                    fs_remove(s.cur_FIdx, si);
-                    s.cur_FIdx = new_FIdx;
-                    s.cur_BC   = snap_bc;
-                    s.cur_BF   = snap_bf;
-                    fs_insert(new_FIdx, si);
-                    continue; // skip UV cast for this sample
-                }
-                // snap_row < 0: no post face found for global_s; fall through to UV cast.
-                } // end pre_corner_d >= 0
-            } // end is_vertex && global_d >= 0
-
-            // ---- GENERAL UV CAST ----
+            // ---- UV CAST (always; no SNAP special-case — see snap_vs_uv_cast.md) ----
+            // argmax(-B.rowwise().minCoeff()) picks the best face even when the query
+            // lands in the deleted-triangle region of UV_post (other faces expand to cover it).
             // Express sample position in UV_pre (uses this sheet's UV, not a global assumption)
             int lv0 = sd.FUV_pre(pre_row, 0);
             int lv1 = sd.FUV_pre(pre_row, 1);
