@@ -130,11 +130,8 @@ void sample_tracker_init(int n_total)
     int id = 0;
 
     // --- vertex samples ---
-    // If gTraceVIDSet is non-empty, only seed those specific vertices.
+    // Seed ALL fine-mesh vertices. gTraceVIDSet controls trace-file output only, not seeding.
     for (int vi = 0; vi < nVO; vi++) {
-        if (!gTraceVIDSet.empty() && gTraceVIDSet.find(vi) == gTraceVIDSet.end())
-            continue;
-
         int fi = vtxFace[vi];
         if (fi < 0) continue;
         int col = -1;
@@ -257,12 +254,21 @@ void sample_tracker_update()
                 (gTraceVIDSet.empty() || gTraceVIDSet.count(s.fine_vertex_id));
 
             // ---- ABSORBED-VERTEX SNAP ----
-            // When this sample IS exactly the absorbed vertex (cur_vertex_id == global_d),
-            // skip the UV cast entirely and directly remap to the survivor with a one-hot BC.
-            // This avoids ambiguous face selection when the absorbed vertex's UV position
-            // lies exactly on a shared edge in UV_post (the general cast lands there and
-            // may pick a different triangle than C++ due to FP tie-breaking).
-            if (s.is_vertex && global_d >= 0 && s.cur_vertex_id == global_d) {
+            // When this sample is sitting EXACTLY at the absorbed vertex (one-hot BC at the
+            // corner whose cur_BF entry == global_d), skip the UV cast and snap directly to
+            // the survivor.  This avoids ambiguous face selection when the absorbed vertex's
+            // UV position lands exactly on a shared edge in UV_post (FP tie-breaking can then
+            // diverge from C++).  We check cur_BF/cur_BC, NOT cur_vertex_id, because after
+            // several collapses cur_vertex_id lives in coarse-mesh index space and a naive
+            // equality check against global_d produces false positives.
+            if (s.is_vertex && global_d >= 0) {
+                // Is this sample one-hot at a corner that holds global_d?
+                int pre_corner_d = -1;
+                for (int c = 0; c < 3; c++)
+                    if (s.cur_BF(c) == global_d && s.cur_BC(c) > 0.999)
+                        { pre_corner_d = c; break; }
+
+                if (pre_corner_d >= 0) {
                 // Find a post-collapse face that has global_s as a corner.
                 int snap_row = -1, snap_corner = -1;
                 for (int r = 0; r < (int)sd.FIdx_post.size() && snap_row < 0; r++)
@@ -285,7 +291,7 @@ void sample_tracker_update()
                             << ci << "  " << s.fine_vertex_id << "  " << shi
                             << "  " << s.cur_FIdx
                             << "  " << s.cur_BC(0) << " " << s.cur_BC(1) << " " << s.cur_BC(2)
-                            << "  " << s.cur_vertex_id
+                            << "  " << s.cur_BF(0) << "/" << s.cur_BF(1) << "/" << s.cur_BF(2)
                             << "  " << new_FIdx
                             << "  " << snap_bc(0) << " " << snap_bc(1) << " " << snap_bc(2)
                             << "  " << global_s
@@ -294,15 +300,15 @@ void sample_tracker_update()
 
                     gLastRingRemap.push_back({pre_row, s.cur_BC, snap_row, snap_bc, on_snap});
                     fs_remove(s.cur_FIdx, si);
-                    s.cur_FIdx      = new_FIdx;
-                    s.cur_BC        = snap_bc;
-                    s.cur_BF        = snap_bf;
-                    s.cur_vertex_id = global_s;
+                    s.cur_FIdx = new_FIdx;
+                    s.cur_BC   = snap_bc;
+                    s.cur_BF   = snap_bf;
                     fs_insert(new_FIdx, si);
                     continue; // skip UV cast for this sample
                 }
-                // If no post face found for global_s, fall through to UV cast.
-            }
+                // snap_row < 0: no post face found for global_s; fall through to UV cast.
+                } // end pre_corner_d >= 0
+            } // end is_vertex && global_d >= 0
 
             // ---- GENERAL UV CAST ----
             // Express sample position in UV_pre (uses this sheet's UV, not a global assumption)
@@ -341,10 +347,9 @@ void sample_tracker_update()
                     << ci << "  " << s.fine_vertex_id << "  " << shi
                     << "  " << s.cur_FIdx
                     << "  " << s.cur_BC(0) << " " << s.cur_BC(1) << " " << s.cur_BC(2)
-                    << "  " << s.cur_vertex_id
+                    << "  " << s.cur_BF(0) << "/" << s.cur_BF(1) << "/" << s.cur_BF(2)
                     << "  " << new_FIdx
                     << "  " << new_BC(0) << " " << new_BC(1) << " " << new_BC(2)
-                    << "  " << s.cur_vertex_id  // vid_post same as pre (no vertex change here)
                     << "  CAST\n";
             }
 
@@ -361,16 +366,14 @@ void sample_tracker_update()
 
     // Vertex fixup: after UV remap, cur_BF may still reference the absorbed
     // vertex d (subsetVIdx was captured pre-collapse).  Patch d→s across all
-    // samples so gV lookups stay correct.  Also update cur_vertex_id.
+    // samples so gV lookups stay correct.
     for (const SheetData& sd : d.sheets) {
         if (sd.b.size() < 2) continue;
         int global_d = sd.subsetVIdx(sd.b(1)); // absorbed
         int global_s = sd.subsetVIdx(sd.b(0)); // survivor
-        for (Sample& s : gSamples) {
+        for (Sample& s : gSamples)
             for (int c = 0; c < 3; c++)
                 if (s.cur_BF(c) == global_d) s.cur_BF(c) = global_s;
-            if (s.cur_vertex_id == global_d) s.cur_vertex_id = global_s;
-        }
     }
 }
 
