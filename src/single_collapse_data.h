@@ -26,6 +26,9 @@ struct SheetData
     Eigen::MatrixXd UV_pre, UV_post;
     Eigen::MatrixXi FUV_pre, FUV_post;
     Eigen::VectorXi FIdx_pre, FIdx_post;
+    // 3D ring geometry in local index space (same indexing as FUV_pre/FUV_post).
+    // V_post has b(0) (survivor) moved to the collapse placement p; all other rows == V_pre.
+    Eigen::MatrixXd V_pre, V_post;
 };
 
 struct single_collapse_data

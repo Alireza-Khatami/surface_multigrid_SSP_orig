@@ -704,6 +704,8 @@ bool SSP_collapse_edge(
     sd.FUV_post   = FUV_post_si;
     sd.FIdx_pre   = FIdx_pre_si;
     sd.FIdx_post  = FIdx_post_si;
+    sd.V_pre      = V_pre_si;   // exact 3D ring geometry before collapse
+    sd.V_post     = V_post_si;  // exact 3D ring geometry after collapse (survivor at p)
     data.sheets.push_back(sd);
 
     // First successful sheet → set top-level 3D data (for display and Nsv/Ndv compat)
