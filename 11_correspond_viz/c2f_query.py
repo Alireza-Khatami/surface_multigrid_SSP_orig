@@ -510,6 +510,10 @@ def query_vertex_f2c_intermediates(vi, bundle, verbose=False, _fi_seed_override=
     -------
     positions   : List[np.ndarray(3,)]
         positions[0] = fine start;  positions[-1] = final coarse position
+    steps       : List[Tuple[int, SheetData, int]]
+        One entry per successful cast: (collapse_idx, SheetData, local_v).
+        len(steps) == len(positions) - 1 always.
+        local_v = local index (in SheetData.subsetVIdx) of the dominant corner.
     n_skips     : int
         number of collapses skipped (no sheet match or face not in FIdx_pre)
     final_bf    : List[int]  (3 global SSP vertex indices of the landing triangle)
@@ -542,7 +546,7 @@ def query_vertex_f2c_intermediates(vi, bundle, verbose=False, _fi_seed_override=
                 break
 
     if fi_seed < 0:
-        return [fineV[vi].copy()], 0, [int(fineF[0, i]) for i in range(3)], np.array([1/3, 1/3, 1/3])
+        return [fineV[vi].copy()], [], 0, [int(fineF[0, i]) for i in range(3)], np.array([1/3, 1/3, 1/3])
 
     BC      = np.zeros(3, dtype=np.float64)
     BC[col] = 1.0
@@ -559,6 +563,7 @@ def query_vertex_f2c_intermediates(vi, bundle, verbose=False, _fi_seed_override=
         return BC[0]*_v(BF[0]) + BC[1]*_v(BF[1]) + BC[2]*_v(BF[2])
 
     positions = [fineV[vi].copy()]  # positions[0] = exact fine-mesh start (not _v, which uses coarseV for survivors)
+    steps     = []                  # parallel to positions[1:]: (ci, SheetData, local_v)
 
     while True:
         # Step 1: first collapse index > ci that touched the current face
@@ -607,6 +612,8 @@ def query_vertex_f2c_intermediates(vi, bundle, verbose=False, _fi_seed_override=
         # UV cast — always; no SNAP special-case (see snap_vs_uv_cast.md).
         # argmax(B.min(axis=1)) picks the best containing face even when the query
         # point lands inside the deleted-triangle region of UV_post.
+        # Capture dominant corner in UV_pre for canonical-view local_v.
+        local_v = int(sd.FUV_pre[pre_row, int(np.argmax(BC))])
         a = int(sd.FUV_pre[pre_row, 0])
         b = int(sd.FUV_pre[pre_row, 1])
         c = int(sd.FUV_pre[pre_row, 2])
@@ -644,9 +651,10 @@ def query_vertex_f2c_intermediates(vi, bundle, verbose=False, _fi_seed_override=
                   f"  BF={BF}")
 
         ci = ci_next
+        steps.append((ci_next, sd, local_v))
         positions.append(pos3d())
 
-    return positions, n_skips, BF, BC.copy()
+    return positions, steps, n_skips, BF, BC.copy()
 
 
 # ---------------------------------------------------------------------------
@@ -683,7 +691,7 @@ def compute_f2c_correspondences(bundle):
     skip_log     = []
 
     for vi in range(NF):
-        positions, n_sk, _, _ = query_vertex_f2c_intermediates(vi, bundle, _skip_log=skip_log)
+        positions, _steps, n_sk, _, _ = query_vertex_f2c_intermediates(vi, bundle, _skip_log=skip_log)
         n_steps = len(positions) - 1
         total_skips += n_sk
         if n_steps > 0:

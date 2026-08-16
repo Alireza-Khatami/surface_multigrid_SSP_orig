@@ -231,7 +231,7 @@ def _compute_f2c_deformed_mesh():
         default_fi = incident[0][0] if incident else -1
         for fi_try, col_try in incident:
             dm_first = _bundle.decIM[fi_try][0] if _bundle.decIM[fi_try] else 'empty'
-            pos_list, _, _, _ = _qf2c(vi_worst, _bundle, _fi_seed_override=(fi_try, col_try))
+            pos_list, _, _, _, _ = _qf2c(vi_worst, _bundle, _fi_seed_override=(fi_try, col_try))
             final_pos = pos_list[-1]
             e = float(np.linalg.norm(final_pos - exp_worst))
             marker = '  <-- BEST' if e < best_fi_err else ''
@@ -616,11 +616,10 @@ def _log_step_info():
     step_idx = max(0, min(_current_step_idx, n_steps - 1))
 
     # intermediate position from F2C query
-    # Linearly remap step_idx → query position index so step 0 = fine start, last step = final coarse.
+    # steps[k] produced positions[k+1], so step_idx → positions[step_idx+1].
+    # positions[0] is the fine-mesh start (visible before any step is taken).
     if _vtx_query_positions:
-        n_pos = len(_vtx_query_positions)
-        qi = round(step_idx * (n_pos - 1) / max(n_steps - 1, 1)) if n_pos > 1 else 0
-        qi = max(0, min(qi, n_pos - 1))
+        qi = min(step_idx + 1, len(_vtx_query_positions) - 1)
         pos = _vtx_query_positions[qi]
     else:
         pos = _bundle.fineV[_selected_vtx]
@@ -660,12 +659,9 @@ def _rebuild_step_viz():
     _ci, sheet, _local_v = _vtx_collapse_steps[step_idx]
 
     # Use the actual C2F query intermediate position for this step.
-    # Linearly remap: step 0 → positions[0] (fine start), last step → positions[-1] (final coarse).
+    # walk_steps[k] produced positions[k+1]; last step → positions[-1] = final coarse.
     if _vtx_query_positions:
-        n_pos   = len(_vtx_query_positions)
-        n_steps = len(_vtx_collapse_steps)
-        qi = round(step_idx * (n_pos - 1) / max(n_steps - 1, 1)) if n_pos > 1 else 0
-        qi = max(0, min(qi, n_pos - 1))
+        qi = min(step_idx + 1, len(_vtx_query_positions) - 1)
         current_pos = _vtx_query_positions[qi]
     else:
         base_v = _deform_mesh_v if (not _use_f2c_deform and _deform_mesh_v is not None) else _bundle.fineV
@@ -1006,8 +1002,9 @@ def _run_query_intermediates(v: int):
     verbose = not _use_f2c_deform   # print UV diagnostics in bundle mode
     if verbose:
         print(f"\n[uv_diag] ---- vertex {v}  ({len(_vtx_collapse_steps)} collapse steps) ----")
-    _vtx_query_positions, n_sk, final_bf, final_bc = query_vertex_f2c_intermediates(v, _bundle, verbose=verbose)
-    print(f"[f2c_intermediates] vertex {v}: {len(_vtx_query_positions)} positions  skips={n_sk}  final_bf={final_bf}  final_bc=({final_bc[0]:.4f},{final_bc[1]:.4f},{final_bc[2]:.4f})")
+    _vtx_query_positions, walk_steps, n_sk, final_bf, final_bc = query_vertex_f2c_intermediates(v, _bundle, verbose=verbose)
+    _vtx_collapse_steps[:] = walk_steps  # replace with walk-derived steps (count always matches positions)
+    print(f"[f2c_intermediates] vertex {v}: {len(_vtx_query_positions)} positions  {len(walk_steps)} steps  skips={n_sk}  final_bf={final_bf}  final_bc=({final_bc[0]:.4f},{final_bc[1]:.4f},{final_bc[2]:.4f})")
 
 
 def _rebuild_vtx_trajectory():
@@ -1228,7 +1225,6 @@ def ui_callback():
         _rebuild_flipped_viz()     # recompute flipped faces + flipped vertex colors + flipped arrows
         if _selected_vtx >= 0:
             _current_step_idx = 0
-            _load_vtx_collapse_steps(_selected_vtx)
             _run_query_intermediates(_selected_vtx)
             _rebuild_step_viz()
             if _canonical_view:
@@ -1375,7 +1371,6 @@ def ui_callback():
                 if 0 <= vidx < nV:
                     _selected_vtx     = vidx
                     _current_step_idx = 0
-                    _load_vtx_collapse_steps(vidx)
                     _run_query_intermediates(vidx)
                     _rebuild_vtx_trajectory()
                     _rebuild_step_viz()
@@ -1415,7 +1410,7 @@ def ui_callback():
                             deform_pos = active_v[vid] if active_v is not None else fine_pos
                             if _use_f2c_deform:
                                 # run f2c query fresh for this vertex
-                                positions, _sk, _bf, _bc = query_vertex_f2c_intermediates(vid, _bundle)
+                                positions, _steps, _sk, _bf, _bc = query_vertex_f2c_intermediates(vid, _bundle)
                                 query_final = positions[-1]
                                 n_steps = len(positions) - 1
                                 print(f"  v{k}: fine_id={vid}  n_steps={n_steps}")
