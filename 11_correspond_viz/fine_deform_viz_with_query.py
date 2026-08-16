@@ -1533,9 +1533,17 @@ def _log_decim_stats():
 def main():
     global _bundle, _bundle_dir
 
-    c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\01_00040057_f8f78dbd17414efda75bc437_trimesh_000\\correspondence_01_00040057_f8f78dbd17414efda75bc437_trimesh_000_mat_initial.c2f"
+    # c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\01_00040057_f8f78dbd17414efda75bc437_trimesh_000\\correspondence_01_00040057_f8f78dbd17414efda75bc437_trimesh_000_mat_initial.c2f"
+    c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\0002000_partstudio_14_model_ste_00_1024\\correspondence_0002000_partstudio_14_model_ste_00_1024.c2f"
     _bundle_dir = os.path.dirname(os.path.abspath(c2f_path))
     _bundle     = load_bundle(c2f_path)
+
+    # Auto-scale z_offset to ~1× the mesh bounding-box diagonal so the deformed
+    # copy is visibly separated regardless of mesh scale.
+    fv = _bundle.fineV
+    mesh_span = float((fv.max(axis=0) - fv.min(axis=0)).max())
+    if mesh_span > 1e-10:
+        _z_offset = mesh_span
 
     print(f"Fine:   {_bundle.fineV.shape[0]} verts  {_bundle.fineF.shape[0]} faces")
     if _bundle.has_ssp_data:
