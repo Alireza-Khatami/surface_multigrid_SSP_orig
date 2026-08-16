@@ -616,8 +616,9 @@ def _log_step_info():
     step_idx = max(0, min(_current_step_idx, n_steps - 1))
 
     # intermediate position from F2C query
+    # qi=step_idx: positions[0]=fine-mesh start, positions[k]=pre-collapse-k position
     if _vtx_query_positions:
-        qi  = min(step_idx + 1, len(_vtx_query_positions) - 1)
+        qi  = min(step_idx, len(_vtx_query_positions) - 1)
         pos = _vtx_query_positions[qi]
     else:
         pos = _bundle.fineV[_selected_vtx]
@@ -657,8 +658,9 @@ def _rebuild_step_viz():
     _ci, sheet, _local_v = _vtx_collapse_steps[step_idx]
 
     # Use the actual C2F query intermediate position for this step.
+    # qi=step_idx so positions[0] (fine-mesh start) is shown at step 0.
     if _vtx_query_positions:
-        qi = min(step_idx + 1, len(_vtx_query_positions) - 1)
+        qi = min(step_idx, len(_vtx_query_positions) - 1)
         current_pos = _vtx_query_positions[qi]
     else:
         base_v = _deform_mesh_v if (not _use_f2c_deform and _deform_mesh_v is not None) else _bundle.fineV
@@ -1522,7 +1524,7 @@ def _log_decim_stats():
 def main():
     global _bundle, _bundle_dir
 
-    c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\correspondence_01_00040057_f8f78dbd17414efda75bc437_trimesh_000_mat_initial.c2f"
+    c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\01_00040057_f8f78dbd17414efda75bc437_trimesh_000\\correspondence_01_00040057_f8f78dbd17414efda75bc437_trimesh_000_mat_initial.c2f"
     _bundle_dir = os.path.dirname(os.path.abspath(c2f_path))
     _bundle     = load_bundle(c2f_path)
 
