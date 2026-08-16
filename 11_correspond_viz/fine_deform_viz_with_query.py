@@ -746,11 +746,14 @@ def _compute_canonical(sheet, local_v: int) -> dict:
 
     Returns a dict with everything needed to register the canonical structures.
     """
-    subV      = np.clip(sheet.subsetVIdx, 0, len(_bundle.fineV) - 1)
-    base_v    = _deform_mesh_v if (not _use_f2c_deform and _deform_mesh_v is not None) else _bundle.fineV
-    verts     = base_v[subV]   # (N, 3)
     uv_pre    = sheet.UV_pre          # (N, 2)
     uv_post   = sheet.UV_post         # (N, 2)
+    # subsetVIdx may have more entries than UV rows (sd_naf appends the survivor at index N
+    # for vertex-fixup only — it has no UV row).  Truncate to match UV_pre.
+    n_uv      = uv_pre.shape[0]
+    subV      = np.clip(sheet.subsetVIdx[:n_uv], 0, len(_bundle.fineV) - 1)
+    base_v    = _deform_mesh_v if (not _use_f2c_deform and _deform_mesh_v is not None) else _bundle.fineV
+    verts     = base_v[subV]   # (N, 3)
     F         = sheet.FUV_pre         # (M, 3)
 
     # ---- centroid and span ----
