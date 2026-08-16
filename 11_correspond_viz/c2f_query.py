@@ -558,7 +558,7 @@ def query_vertex_f2c_intermediates(vi, bundle, verbose=False, _fi_seed_override=
     def pos3d():
         return BC[0]*_v(BF[0]) + BC[1]*_v(BF[1]) + BC[2]*_v(BF[2])
 
-    positions = [pos3d()]
+    positions = [fineV[vi].copy()]  # positions[0] = exact fine-mesh start (not _v, which uses coarseV for survivors)
 
     while True:
         # Step 1: first collapse index > ci that touched the current face
