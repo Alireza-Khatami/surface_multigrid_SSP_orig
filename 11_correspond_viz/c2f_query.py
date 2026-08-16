@@ -650,13 +650,10 @@ def query_vertex_f2c_intermediates(vi, bundle, verbose=False, _fi_seed_override=
             print(f"         → new face={face}  BC=({BC[0]:.4f},{BC[1]:.4f},{BC[2]:.4f})"
                   f"  BF={BF}")
 
-        # Compute next 3D position from V_post (exact, v5+) or pos3d() (approximate fallback).
-        if sd.V_post.shape[0] > 0:
-            fuv = sd.FUV_post if len(sd.FUV_post) > 0 else sd.FUV_pre
-            pa, pb, pc = int(fuv[best, 0]), int(fuv[best, 1]), int(fuv[best, 2])
-            pos_next = BC[0]*sd.V_post[pa] + BC[1]*sd.V_post[pb] + BC[2]*sd.V_post[pc]
-        else:
-            pos_next = pos3d()  # approximate: uses coarseV for survivors (v2/v3/v4 bundles)
+        # Exact 3D position from V_post (bundle v5+).
+        fuv = sd.FUV_post if len(sd.FUV_post) > 0 else sd.FUV_pre
+        pa, pb, pc = int(fuv[best, 0]), int(fuv[best, 1]), int(fuv[best, 2])
+        pos_next = BC[0]*sd.V_post[pa] + BC[1]*sd.V_post[pb] + BC[2]*sd.V_post[pc]
 
         ci = ci_next
         steps.append((ci_next, sd, local_v))
