@@ -206,7 +206,7 @@ def load_bundle(path: str) -> Bundle:
             FUV_pre  = r.i32_array(fuvRows * 3).reshape(fuvRows, 3)
             FIdx_pre = r.i32_array(fuvRows)
 
-            if v3 or v4:
+            if v3 or v4 or v5:
                 fuvPostRows = r.u32()
                 FUV_post  = r.i32_array(fuvPostRows * 3).reshape(fuvPostRows, 3)
                 FIdx_post = r.i32_array(fuvPostRows)
