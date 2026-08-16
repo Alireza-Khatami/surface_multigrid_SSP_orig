@@ -34,6 +34,9 @@ class SheetData:
     FIdx_post: np.ndarray    # (fuvPostRows,)   int32 — global face indices, post-collapse
     b: np.ndarray = field(default_factory=lambda: np.empty((0,), dtype=np.int32))
     # b[0]=survivor_local, b[1]=absorbed_local  (v4+ only; empty for v2/v3)
+    V_pre:  np.ndarray = field(default_factory=lambda: np.empty((0, 3), dtype=np.float64))
+    V_post: np.ndarray = field(default_factory=lambda: np.empty((0, 3), dtype=np.float64))
+    # V_pre/V_post: 3D ring geometry in local index space (v5+ only; empty otherwise)
 
 
 @dataclass
@@ -126,11 +129,12 @@ def load_bundle(path: str) -> Bundle:
     r = _Reader(data)
 
     magic = r.u32()
-    if magic not in (0xC2F50001, 0xC2F50002, 0xC2F50003, 0xC2F50004):
+    if magic not in (0xC2F50001, 0xC2F50002, 0xC2F50003, 0xC2F50004, 0xC2F50005):
         raise ValueError(f'Bad magic: 0x{magic:08X}')
     v2 = (magic == 0xC2F50002)
     v3 = (magic == 0xC2F50003)
     v4 = (magic == 0xC2F50004)
+    v5 = (magic == 0xC2F50005)
 
     NC = r.u32()
     FC = r.u32()
@@ -161,11 +165,11 @@ def load_bundle(path: str) -> Bundle:
                fineV=fineV, fineF=fineF,
                corrVec=corrVec, corrBC=corrBC, corrFV=corrFV)
 
-    if not v2 and not v3 and not v4:
+    if not v2 and not v3 and not v4 and not v5:
         print(f'[bundle] Loaded v1  NC={NC} FC={FC} NF={NF} FF={FF}')
         return b
 
-    # ---- v2/v3/v4 SSP data ----
+    # ---- v2/v3/v4/v5 SSP data ----
     nV_total = r.u32()
     nF_decIM = r.u32()
     nFO      = r.u32()
@@ -210,10 +214,17 @@ def load_bundle(path: str) -> Bundle:
                 FUV_post  = np.empty((0, 3), dtype=np.int32)
                 FIdx_post = np.empty((0,),   dtype=np.int32)
 
-            if v4:
+            if v4 or v5:
                 b_arr = r.i32_array(2)  # [survivor_local, absorbed_local]
             else:
                 b_arr = np.empty((0,), dtype=np.int32)
+
+            if v5:
+                V_pre  = r.f64_array(uvRows * 3).reshape(uvRows, 3)
+                V_post = r.f64_array(uvRows * 3).reshape(uvRows, 3)
+            else:
+                V_pre  = np.empty((0, 3), dtype=np.float64)
+                V_post = np.empty((0, 3), dtype=np.float64)
 
             cd.sheets.append(SheetData(
                 global_sheet_id=sid,
@@ -225,11 +236,13 @@ def load_bundle(path: str) -> Bundle:
                 FUV_post=FUV_post,
                 FIdx_post=FIdx_post,
                 b=b_arr,
+                V_pre=V_pre,
+                V_post=V_post,
             ))
         b.decInfo.append(cd)
 
     b.has_ssp_data = True
-    ver = 4 if v4 else (3 if v3 else 2)
+    ver = 5 if v5 else (4 if v4 else (3 if v3 else 2))
     print(f'[bundle] Loaded v{ver}  NC={NC} FC={FC} NF={NF} FF={FF}'
           f'  nDec={nDec}  nFO={nFO}')
 

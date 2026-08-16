@@ -634,7 +634,7 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
     std::ofstream out(bundlePath, std::ios::binary);
     if (!out) { std::cerr << "[bundle] Cannot write " << bundlePath << "\n"; return; }
 
-    const uint32_t magic = 0xC2F50004;  // v4: adds sd.b (survivor/absorbed local indices) per sheet
+    const uint32_t magic = 0xC2F50005;  // v5: adds V_pre/V_post (3D ring geometry) per sheet
     out.write((const char*)&magic, 4);
     out.write((const char*)&NC, 4);
     out.write((const char*)&FC, 4);
@@ -765,6 +765,16 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
             int32_t b1 = (sd.b.size() >= 2) ? (int32_t)sd.b(1) : -1;
             out.write((const char*)&b0, 4);
             out.write((const char*)&b1, 4);
+
+            // v5: V_pre/V_post — 3D ring geometry in local index space (uvRows × 3 float64 each)
+            for (uint32_t r = 0; r < uvRows; r++) {
+                double xyz[3] = { sd.V_pre(r,0), sd.V_pre(r,1), sd.V_pre(r,2) };
+                out.write((const char*)xyz, 24);
+            }
+            for (uint32_t r = 0; r < uvRows; r++) {
+                double xyz[3] = { sd.V_post(r,0), sd.V_post(r,1), sd.V_post(r,2) };
+                out.write((const char*)xyz, 24);
+            }
         }
     }
 
