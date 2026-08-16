@@ -38,7 +38,6 @@
 #include <string>
 #include <cmath>
 #include <cstdint>
-#include <filesystem>
 
 #ifdef C2F_VIZ_DIAGNOSTIC
 #include "visualizer.h"
@@ -484,10 +483,6 @@ int main(int argc, char * argv[])
     std::string out_dir = namedOutDir.empty() ? "." : namedOutDir;
     if (!out_dir.empty() && out_dir.back() != '/' && out_dir.back() != '\\')
         out_dir += '/';
-    // Place all outputs in a subfolder named after the mesh stem.
-    out_dir += stem + '/';
-    std::filesystem::create_directories(out_dir);
-    fprintf(stderr, "[OUTPUT] dir = %s\n", out_dir.c_str());
 
     init_ssp(meshPath.c_str(), targetFaces, out_dir);
 
