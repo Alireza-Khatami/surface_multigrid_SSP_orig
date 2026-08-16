@@ -246,6 +246,8 @@ bool SSP_random_collapse_edge(
     sd.FUV_post  = FUV_post;
     sd.FIdx_pre  = FIdx_onering_pre;
     sd.FIdx_post = FIdx_onering_post;
+    sd.V_pre     = V_pre;
+    sd.V_post    = V_post;
     data.sheets.push_back(sd);
     data.V_pre  = V_pre;
     data.V_post = V_post;

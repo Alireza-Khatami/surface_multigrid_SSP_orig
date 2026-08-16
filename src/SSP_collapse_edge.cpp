@@ -835,6 +835,12 @@ bool SSP_collapse_edge(
           sd_naf.b(0) = 3;       // subsetVIdx(3) = s (survivor)
           sd_naf.b(1) = d_local; // subsetVIdx(d_local) = d (absorbed)
 
+          // v5: 3D ring geometry (3 rows matching UV_pre/UV_post from embed_tri)
+          sd_naf.V_pre.resize(3, 3);
+          sd_naf.V_pre.row(0) = naf.p0; sd_naf.V_pre.row(1) = naf.p1; sd_naf.V_pre.row(2) = naf.p2;
+          sd_naf.V_post.resize(3, 3);
+          sd_naf.V_post.row(0) = post_p0; sd_naf.V_post.row(1) = post_p1; sd_naf.V_post.row(2) = post_p2;
+
           data.sheets.push_back(sd_naf);
           FIdx_combined.insert(f);
         }

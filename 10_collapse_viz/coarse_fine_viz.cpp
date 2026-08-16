@@ -767,13 +767,23 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
             out.write((const char*)&b1, 4);
 
             // v5: V_pre/V_post — 3D ring geometry in local index space (uvRows × 3 float64 each)
-            for (uint32_t r = 0; r < uvRows; r++) {
-                double xyz[3] = { sd.V_pre(r,0), sd.V_pre(r,1), sd.V_pre(r,2) };
-                out.write((const char*)xyz, 24);
-            }
-            for (uint32_t r = 0; r < uvRows; r++) {
-                double xyz[3] = { sd.V_post(r,0), sd.V_post(r,1), sd.V_post(r,2) };
-                out.write((const char*)xyz, 24);
+            if ((uint32_t)sd.V_pre.rows() != uvRows || (uint32_t)sd.V_post.rows() != uvRows) {
+                std::cerr << "[bundle] WARNING: V_pre/V_post unpopulated for sheet "
+                          << sd.global_sheet_id << " (uvRows=" << uvRows
+                          << " V_pre.rows()=" << sd.V_pre.rows()
+                          << " V_post.rows()=" << sd.V_post.rows() << ") — writing zeros\n";
+                const double z3[3] = {0,0,0};
+                for (uint32_t r = 0; r < uvRows; r++) out.write((const char*)z3, 24);
+                for (uint32_t r = 0; r < uvRows; r++) out.write((const char*)z3, 24);
+            } else {
+                for (uint32_t r = 0; r < uvRows; r++) {
+                    double xyz[3] = { sd.V_pre(r,0), sd.V_pre(r,1), sd.V_pre(r,2) };
+                    out.write((const char*)xyz, 24);
+                }
+                for (uint32_t r = 0; r < uvRows; r++) {
+                    double xyz[3] = { sd.V_post(r,0), sd.V_post(r,1), sd.V_post(r,2) };
+                    out.write((const char*)xyz, 24);
+                }
             }
         }
     }
