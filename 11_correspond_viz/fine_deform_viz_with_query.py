@@ -616,9 +616,11 @@ def _log_step_info():
     step_idx = max(0, min(_current_step_idx, n_steps - 1))
 
     # intermediate position from F2C query
-    # qi=step_idx: positions[0]=fine-mesh start, positions[k]=pre-collapse-k position
+    # Linearly remap step_idx → query position index so step 0 = fine start, last step = final coarse.
     if _vtx_query_positions:
-        qi  = min(step_idx, len(_vtx_query_positions) - 1)
+        n_pos = len(_vtx_query_positions)
+        qi = round(step_idx * (n_pos - 1) / max(n_steps - 1, 1)) if n_pos > 1 else 0
+        qi = max(0, min(qi, n_pos - 1))
         pos = _vtx_query_positions[qi]
     else:
         pos = _bundle.fineV[_selected_vtx]
@@ -658,9 +660,12 @@ def _rebuild_step_viz():
     _ci, sheet, _local_v = _vtx_collapse_steps[step_idx]
 
     # Use the actual C2F query intermediate position for this step.
-    # qi=step_idx so positions[0] (fine-mesh start) is shown at step 0.
+    # Linearly remap: step 0 → positions[0] (fine start), last step → positions[-1] (final coarse).
     if _vtx_query_positions:
-        qi = min(step_idx, len(_vtx_query_positions) - 1)
+        n_pos   = len(_vtx_query_positions)
+        n_steps = len(_vtx_collapse_steps)
+        qi = round(step_idx * (n_pos - 1) / max(n_steps - 1, 1)) if n_pos > 1 else 0
+        qi = max(0, min(qi, n_pos - 1))
         current_pos = _vtx_query_positions[qi]
     else:
         base_v = _deform_mesh_v if (not _use_f2c_deform and _deform_mesh_v is not None) else _bundle.fineV
