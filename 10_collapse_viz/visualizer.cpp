@@ -495,19 +495,19 @@ static void show_canonical_view()
     register_ring_geometry(gc);
 
     // Apply two-group canonical visibility (overrides register_ring_geometry defaults).
-    // Ring group: one-ring meshes, ring points, corr pts, 3-D collapsed edge
-    polyscope::getSurfaceMesh("one_ring_pre") ->setEnabled(gShowCanonRing);
-    polyscope::getSurfaceMesh("one_ring_post")->setEnabled(gShowCanonRing);
-    polyscope::getPointCloud ("ring_pre_pts") ->setEnabled(gShowCanonRing);
-    polyscope::getPointCloud ("ring_post_pts")->setEnabled(gShowCanonRing);
-    polyscope::getPointCloud ("corr_pts")     ->setEnabled(gShowCanonRing);
-    polyscope::getCurveNetwork("collapsed_edge")->setEnabled(gShowCanonRing);
-    // UV group: UV meshes, UV points, UV collapsed edge
-    polyscope::getSurfaceMesh("uv_pre")        ->setEnabled(gShowCanonUV);
-    polyscope::getSurfaceMesh("uv_post")       ->setEnabled(gShowCanonUV);
-    polyscope::getPointCloud ("uv_pre_pts")    ->setEnabled(gShowCanonUV);
-    polyscope::getPointCloud ("uv_post_pts")   ->setEnabled(gShowCanonUV);
-    polyscope::getCurveNetwork("uv_collapsed_edge")->setEnabled(gShowCanonUV);
+    // Ring group: one-ring meshes, corr pts, 3-D collapsed edge, non-active sheets
+    polyscope::getSurfaceMesh("one_ring_pre")    ->setEnabled(gShowCanonRing);
+    polyscope::getSurfaceMesh("one_ring_post")   ->setEnabled(gShowCanonRing);
+    polyscope::getPointCloud ("corr_pts")        ->setEnabled(gShowCanonRing);
+    polyscope::getCurveNetwork("collapsed_edge") ->setEnabled(gShowCanonRing);
+    // UV group: UV meshes, UV points, ring sample points (pre+post), UV collapsed edge
+    polyscope::getSurfaceMesh("uv_pre")              ->setEnabled(gShowCanonUV);
+    polyscope::getSurfaceMesh("uv_post")             ->setEnabled(gShowCanonUV);
+    polyscope::getPointCloud ("uv_pre_pts")          ->setEnabled(gShowCanonUV);
+    polyscope::getPointCloud ("uv_post_pts")         ->setEnabled(gShowCanonUV);
+    polyscope::getPointCloud ("ring_pre_pts")        ->setEnabled(gShowCanonUV);
+    polyscope::getPointCloud ("ring_post_pts")       ->setEnabled(gShowCanonUV);
+    polyscope::getCurveNetwork("uv_collapsed_edge")  ->setEnabled(gShowCanonUV);
 
     // Non-active sheet faces: faces incident to d that belong to sheets NOT
     // processed by this collapse.  Rendered in purple at their pre-collapse
