@@ -31,21 +31,57 @@
 #include <limits>
 #include <cmath>
 
+// Double cover visualization data — populated for boundary LSCM cases (lscm_case >= 1).
+// FUV_dc_* has 2*nF rows (top sheet original + bottom sheet reversed winding).
+// UV_dc_* has nV rows (same vertex set as UV_pre/UV_post).
+struct DCVizData {
+    bool has_data = false;
+    Eigen::MatrixXi FUV_dc_pre, FUV_dc_post;
+    Eigen::MatrixXd UV_dc_pre, UV_dc_post;
+};
+
+// Build double cover: F_dc = [F; F_reversed] where F_reversed swaps columns 1 and 2.
+// The vertex set is unchanged — boundary vertices are shared between the two sheets.
+void build_double_cover_faces(
+    const Eigen::MatrixXi & F,
+    Eigen::MatrixXi & F_dc);
+
+// Joint LSCM using double cover for boundary cases (replaces cases 1 & 2).
+// Builds double covers of pre and post one-rings, then solves with 2-point pinning:
+//   vi pinned to UV (0,0), vj pinned to UV (1,0).
+// UV_pre, UV_post: UV coords for original (top-sheet) faces only.
+// FUV_dc_pre/post, UV_dc_pre/post: full double cover for visualization.
+void joint_lscm_double_cover(
+    const Eigen::MatrixXd & V_pre,
+    const Eigen::MatrixXi & FUV_pre,
+    const Eigen::MatrixXd & V_post,
+    const Eigen::MatrixXi & FUV_post,
+    const int & vi,
+    const int & vj,
+    const bool isDebug,
+    Eigen::MatrixXd & UV_pre,
+    Eigen::MatrixXd & UV_post,
+    Eigen::MatrixXi & FUV_dc_pre,
+    Eigen::MatrixXi & FUV_dc_post,
+    Eigen::MatrixXd & UV_dc_pre,
+    Eigen::MatrixXd & UV_dc_post);
+
 // Compute a joinit Least-squares conformal map parametrization for the edge onering mesh before an edge collapse (V_pre, FUV_pre)and the vertex onering mesh after the collapse (V_post, FUV_post). We constrain both meshes to have the same boundary curve for bijectivity
-// 
+//
 // Inputs:
 // V_pre    #V_pre by 3 list of mesh vertex positions
-// FUV_pre  #F_pre by 3 list of mesh faces 
+// FUV_pre  #F_pre by 3 list of mesh faces
 // V_post   #V_post by 3 list of mesh vertex positions
-// FUV_post #F_post by 3 list of mesh faces 
+// FUV_post #F_post by 3 list of mesh faces
 // vi       one of the vertex indices of the edge to be collapsed
 // vj       the other vertex index of the edge to be collapsed
-// Nsv      ordered neighboring vertex indices of vi 
+// Nsv      ordered neighboring vertex indices of vi
 // Ndv      ordered neighboring vertex indices of vj
-// 
+//
 // Outputs:
 // UV_pre    #V_pre by 2 list of UV mesh vertex positions of V_pre
 // UV_post   #V_post by 2 list of UV mesh vertex positions of V_post
+// dc_viz    if non-null and a boundary case is detected, filled with double cover data
 bool joint_lscm(
   const Eigen::MatrixXd & V_pre,
   const Eigen::MatrixXi & FUV_pre,
@@ -57,7 +93,8 @@ bool joint_lscm(
   const std::vector<int> & Ndv,
   Eigen::MatrixXd & UV_pre,
   Eigen::MatrixXd & UV_post,
-  std::optional<int> * out_case = nullptr);
+  std::optional<int> * out_case = nullptr,
+  DCVizData * dc_viz = nullptr);
 
 bool check_valid_UV_lscm(
   const Eigen::MatrixXd & V_pre,

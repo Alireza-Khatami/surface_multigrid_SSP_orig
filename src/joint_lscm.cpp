@@ -1,5 +1,94 @@
 #include "joint_lscm.h"
 
+void build_double_cover_faces(
+    const Eigen::MatrixXi & F,
+    Eigen::MatrixXi & F_dc)
+{
+    int nF = F.rows();
+    F_dc.resize(2 * nF, 3);
+    F_dc.topRows(nF) = F;
+    for (int r = 0; r < nF; r++) {
+        F_dc(nF + r, 0) = F(r, 0);
+        F_dc(nF + r, 1) = F(r, 2);  // swap 1↔2 to reverse winding
+        F_dc(nF + r, 2) = F(r, 1);
+    }
+}
+
+void joint_lscm_double_cover(
+    const Eigen::MatrixXd & V_pre,
+    const Eigen::MatrixXi & FUV_pre,
+    const Eigen::MatrixXd & V_post,
+    const Eigen::MatrixXi & FUV_post,
+    const int & vi,
+    const int & vj,
+    const bool isDebug,
+    Eigen::MatrixXd & UV_pre,
+    Eigen::MatrixXd & UV_post,
+    Eigen::MatrixXi & FUV_dc_pre,
+    Eigen::MatrixXi & FUV_dc_post,
+    Eigen::MatrixXd & UV_dc_pre,
+    Eigen::MatrixXd & UV_dc_post)
+{
+    using namespace Eigen;
+    using namespace std;
+
+    int nV = V_pre.rows();
+    // Add one extra vertex for the post-collapse position of vi (same as case 0).
+    int nVjoint = nV + 1;
+
+    MatrixXd Vjoint(nVjoint, 3);
+    VectorXi I = VectorXi::LinSpaced(nV, 0, nV - 1);
+    igl::slice_into(V_pre, I, 1, Vjoint);
+    Vjoint.row(nV) = V_post.row(vi);
+
+    MatrixXd Vjoint_pre = Vjoint;
+    MatrixXd Vjoint_post = Vjoint;
+
+    // Remap vi → nV in post face connectivity.
+    MatrixXi Fjoint_pre  = FUV_pre;
+    MatrixXi Fjoint_post = FUV_post;
+    for (int r = 0; r < Fjoint_post.rows(); r++)
+        for (int c = 0; c < 3; c++)
+            if (Fjoint_post(r, c) == vi) Fjoint_post(r, c) = nV;
+
+    // Build double covers: [original faces; reversed faces].
+    MatrixXi Fjoint_dc_pre, Fjoint_dc_post;
+    build_double_cover_faces(Fjoint_pre,  Fjoint_dc_pre);
+    build_double_cover_faces(Fjoint_post, Fjoint_dc_post);
+
+    // 2-point pinning: vi → (0,0), vj → (1,0) (same anchor as case 0).
+    VectorXi b_UV(4);
+    VectorXd bc_UV(4);
+    b_UV  << vi, vj, vi + nVjoint, vj + nVjoint;
+    bc_UV << 0,  1,  0,            0;
+
+    VectorXd UVjoint_flat;
+    flatten(Vjoint_pre, Fjoint_dc_pre, Vjoint_post, Fjoint_dc_post,
+            b_UV, bc_UV, nVjoint, isDebug, UVjoint_flat);
+
+    // Reshape flat → nVjoint × 2.
+    MatrixXd UVjoint(nVjoint, 2);
+    for (unsigned col = 0; col < (unsigned)UVjoint.cols(); col++)
+        UVjoint.col(UVjoint.cols() - col - 1) =
+            UVjoint_flat.block(UVjoint.rows() * col, 0, UVjoint.rows(), 1);
+
+    // UV_pre: rows 0..nV-1.
+    VectorXi Iall = VectorXi::LinSpaced(nV, 0, nV - 1);
+    igl::slice(UVjoint, Iall, 1, UV_pre);
+
+    // UV_post: same as UV_pre, vi row replaced by the collapsed position UV.
+    UV_post = UV_pre;
+    UV_post.row(vi) = UVjoint.row(nV);
+
+    // Double cover faces for visualization (using original FUV indices, not Fjoint).
+    build_double_cover_faces(FUV_pre,  FUV_dc_pre);
+    build_double_cover_faces(FUV_post, FUV_dc_post);
+
+    // UV for viz: same nV rows (FUV_dc uses original 0..nV-1 indices including vi).
+    UV_dc_pre  = UV_pre;
+    UV_dc_post = UV_post;
+}
+
 bool joint_lscm(
   const Eigen::MatrixXd & V_pre,
   const Eigen::MatrixXi & FUV_pre,
@@ -11,7 +100,8 @@ bool joint_lscm(
   const std::vector<int> & Ndv,
   Eigen::MatrixXd & UV_pre,
   Eigen::MatrixXd & UV_post,
-  std::optional<int> * out_case)
+  std::optional<int> * out_case,
+  DCVizData * dc_viz)
 {
   using namespace Eigen;
 	using namespace std;
@@ -232,11 +322,81 @@ bool joint_lscm(
 			joint_lscm_case0(V_pre,FUV_pre,V_post,FUV_post,vi,vj,bdLoop,verbose,isDebug,onBd,UV_pre,UV_post);
 			break;
 		case 1:
-			joint_lscm_case1(V_pre,FUV_pre,V_post,FUV_post,vi,vj,bdLoop,verbose,isDebug,onBd,UV_pre,UV_post);
-			break;
 		case 2:
-			joint_lscm_case2(V_pre,FUV_pre,V_post,FUV_post,vi,vj,bdLoop,verbose,isDebug,onBd,UV_pre,UV_post);
+		{
+			// All boundary cases use double cover + 2-point pinning.
+			// Falls back to original handler if DC UV fails validation.
+			static int dc_log_count = 0;
+			bool is_seam_inj = (!Nsv.empty() && Nsv[0] == -1) ||
+			                   (!Ndv.empty() && Ndv[0] == -1);
+
+			Eigen::MatrixXi dc_F_pre, dc_F_post;
+			Eigen::MatrixXd dc_UV_pre, dc_UV_post;
+			Eigen::MatrixXd UV_pre_dc, UV_post_dc;
+			joint_lscm_double_cover(V_pre, FUV_pre, V_post, FUV_post,
+			                        vi, vj, isDebug,
+			                        UV_pre_dc, UV_post_dc,
+			                        dc_F_pre, dc_F_post, dc_UV_pre, dc_UV_post);
+
+			bool dc_ok = check_valid_UV_lscm(V_pre, UV_pre_dc, FUV_pre,
+			                                  V_post, UV_post_dc, FUV_post,
+			                                  vi, vj, Nsv, Ndv);
+
+			if (dc_log_count < 40) {
+				dc_log_count++;
+				if (!dc_ok) {
+					// diagnose the exact failure reason
+					bool has_nan = UV_pre_dc.array().isNaN().any() ||
+					               UV_post_dc.array().isNaN().any();
+					auto signed_area_2d = [](const Eigen::MatrixXd & UV,
+					                         const Eigen::MatrixXi & F, int fi) {
+						double ax = UV(F(fi,0),0), ay = UV(F(fi,0),1);
+						double bx = UV(F(fi,1),0), by = UV(F(fi,1),1);
+						double cx = UV(F(fi,2),0), cy = UV(F(fi,2),1);
+						return (bx-ax)*(cy-ay) - (by-ay)*(cx-ax);
+					};
+					bool pre_flip = false, post_flip = false;
+					for (int fi = 0; fi < FUV_pre.rows()  && !pre_flip;  fi++) {
+						double sa = signed_area_2d(UV_pre_dc,  FUV_pre,  fi);
+						if (sa < 1e-10 || std::isnan(sa)) pre_flip = true;
+					}
+					for (int fi = 0; fi < FUV_post.rows() && !post_flip; fi++) {
+						double sa = signed_area_2d(UV_post_dc, FUV_post, fi);
+						if (sa < 1e-10 || std::isnan(sa)) post_flip = true;
+					}
+					fprintf(stderr,
+					  "[DC-FAIL #%d] case=%d seam=%d vi=%d vj=%d nFpre=%d nFpost=%d nV=%d"
+					  "  nan=%d pre_flip=%d post_flip=%d\n",
+					  dc_log_count, whichCase, (int)is_seam_inj, vi, vj,
+					  (int)FUV_pre.rows(), (int)FUV_post.rows(), (int)V_pre.rows(),
+					  (int)has_nan, (int)pre_flip, (int)post_flip);
+				} else {
+					fprintf(stderr,
+					  "[DC-PASS #%d] case=%d seam=%d vi=%d vj=%d nFpre=%d nFpost=%d nV=%d\n",
+					  dc_log_count, whichCase, (int)is_seam_inj, vi, vj,
+					  (int)FUV_pre.rows(), (int)FUV_post.rows(), (int)V_pre.rows());
+				}
+			}
+
+			if (dc_ok) {
+				UV_pre  = UV_pre_dc;
+				UV_post = UV_post_dc;
+				if (dc_viz) {
+					dc_viz->has_data    = true;
+					dc_viz->FUV_dc_pre  = dc_F_pre;
+					dc_viz->FUV_dc_post = dc_F_post;
+					dc_viz->UV_dc_pre   = dc_UV_pre;
+					dc_viz->UV_dc_post  = dc_UV_post;
+				}
+			} else {
+				// DC failed — fall back to original handler.
+				if (whichCase == 1)
+					joint_lscm_case1(V_pre,FUV_pre,V_post,FUV_post,vi,vj,bdLoop,verbose,isDebug,onBd,UV_pre,UV_post);
+				else
+					joint_lscm_case2(V_pre,FUV_pre,V_post,FUV_post,vi,vj,bdLoop,verbose,isDebug,onBd,UV_pre,UV_post);
+			}
 			break;
+		}
 	}
 	// return true;
 	return check_valid_UV_lscm(V_pre, UV_pre, FUV_pre, V_post, UV_post, FUV_post, vi, vj, Nsv, Ndv);

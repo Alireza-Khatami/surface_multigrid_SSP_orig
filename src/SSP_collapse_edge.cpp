@@ -572,13 +572,15 @@ bool SSP_collapse_edge(
         Ndv_local.insert(Ndv_local.begin(), -1);
     }
 
-    // joint_lscm (DO NOT MODIFY — uses infVtx=-1 sentinel and winding-order Nsv/Ndv)
+    // joint_lscm — boundary cases (1/2) use double cover + 2-point pinning.
     MatrixXd UV_pre_si, UV_post_si;
+    DCVizData dc_viz_si;
     bool isValid = joint_lscm(
         V_pre_si, FUV_pre_si, V_post_si, FUV_post_si,
         b_si(0), b_si(1), Nsv_local, Ndv_local,
         UV_pre_si, UV_post_si,
-        any_sheet_ok ? nullptr : &data.lscm_case);
+        any_sheet_ok ? nullptr : &data.lscm_case,
+        &dc_viz_si);
     if (!isValid) {
       if (is_seam_collapse)
         SEAM_LOG("[SEAM-FAIL-LSCM]  sid=%d  e=(%d,%d) vi=%d vj=%d\n",
@@ -706,6 +708,11 @@ bool SSP_collapse_edge(
     sd.FIdx_post  = FIdx_post_si;
     sd.V_pre      = V_pre_si;   // exact 3D ring geometry before collapse
     sd.V_post     = V_post_si;  // exact 3D ring geometry after collapse (survivor at p)
+    sd.has_double_cover = dc_viz_si.has_data;
+    sd.FUV_dc_pre  = dc_viz_si.FUV_dc_pre;
+    sd.FUV_dc_post = dc_viz_si.FUV_dc_post;
+    sd.UV_dc_pre   = dc_viz_si.UV_dc_pre;
+    sd.UV_dc_post  = dc_viz_si.UV_dc_post;
     data.sheets.push_back(sd);
 
     // First successful sheet → set top-level 3D data (for display and Nsv/Ndv compat)

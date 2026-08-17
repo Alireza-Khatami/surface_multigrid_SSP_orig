@@ -47,6 +47,7 @@ static float gStepDelayMs       = 0.0f;
 static bool  gRunning           = false;
 static bool  gRunToSeam         = false;
 static bool  gRunToBdCase       = false;  // stop at LSCM Case 1 or 2 (one/both endpoints on boundary)
+static bool  gStopAtDC         = false;  // persistent: stop + enter canonical view on every double cover case
 static int   gBreakAtCollapse   = -1;     // stop when gCollapseCount reaches this; -1 = disabled
 static char  gBreakAtBuf[16]    = "";
 static bool  gCanonicalView     = false;
@@ -84,6 +85,10 @@ struct DisplaySnap {
     MatrixXi FUV_pre, FUV_post;
     MatrixXd UV_pre,  UV_post;
     VectorXi b;
+    // Double cover (boundary cases only)
+    bool has_dc = false;
+    MatrixXi FUV_dc_pre, FUV_dc_post;
+    MatrixXd UV_dc_pre, UV_dc_post;
 } gSnap;
 
 // ---- helpers ----
@@ -156,6 +161,11 @@ static void refresh_snap()
         gSnap.FUV_post = sd.FUV_post;
         gSnap.UV_pre   = sd.UV_pre;
         gSnap.UV_post  = sd.UV_post;
+        gSnap.has_dc       = sd.has_double_cover;
+        gSnap.FUV_dc_pre   = sd.FUV_dc_pre;
+        gSnap.FUV_dc_post  = sd.FUV_dc_post;
+        gSnap.UV_dc_pre    = sd.UV_dc_pre;
+        gSnap.UV_dc_post   = sd.UV_dc_post;
     }
 }
 
@@ -173,6 +183,10 @@ struct DisplayGeometry {
     Vector3d avg_normal;   // one-ring average face normal
     Vector3d centroid;     // one-ring centroid
     double   ring_span;
+    // Double cover UV panels (boundary cases only)
+    bool     has_dc = false;
+    MatrixXd dc_uv_pre_3d;
+    MatrixXd dc_uv_post_3d;
 };
 
 static DisplayGeometry compute_ring_geometry()
@@ -341,6 +355,12 @@ static DisplayGeometry compute_ring_geometry()
     g.uv_pre_3d  = make3d(gSnap.UV_pre);
     g.uv_post_3d = make3d(gSnap.UV_post);
 
+    if (gSnap.has_dc && gSnap.UV_dc_pre.rows() > 0) {
+        g.has_dc = true;
+        g.dc_uv_pre_3d  = make3d(gSnap.UV_dc_pre);
+        g.dc_uv_post_3d = make3d(gSnap.UV_dc_post);
+    }
+
     // arrow vectors
     int nV = gSnap.V_pre.rows();
     g.arrows_pre.resize(nV, 3);  g.arrows_pre.setZero();
@@ -468,13 +488,27 @@ static void show_canonical_view()
     // Move UV_pre to the floor (Y=0, same level as ring_pre) and
     // UV_post to ring_post height (Y = -gPostHeight * ring_span).
     // This must be done before the arrow vectors below are computed.
+    double y_panel_canon, y_post_canon;
     {
         double y_panel = -(double)gUVOffset   * g.ring_span; // current Y of both UV panels
         double y_post  = -(double)gPostHeight * g.ring_span; // desired Y for UV_post
+        y_panel_canon = y_panel;
+        y_post_canon  = y_post;
         for (int i = 0; i < gc.uv_pre_3d.rows(); i++)
             gc.uv_pre_3d(i, 1) -= y_panel;          // cancel panel offset → Y = 0
         for (int i = 0; i < gc.uv_post_3d.rows(); i++)
             gc.uv_post_3d(i, 1) += y_post - y_panel; // bring to ring_post Y
+    }
+
+    // Rotate + Y-adjust double cover panels (same offsets as regular UV panels).
+    if (g.has_dc) {
+        gc.has_dc = true;
+        gc.dc_uv_pre_3d  = rot(g.dc_uv_pre_3d);
+        gc.dc_uv_post_3d = rot(g.dc_uv_post_3d);
+        for (int i = 0; i < gc.dc_uv_pre_3d.rows(); i++)
+            gc.dc_uv_pre_3d(i, 1)  -= y_panel_canon;
+        for (int i = 0; i < gc.dc_uv_post_3d.rows(); i++)
+            gc.dc_uv_post_3d(i, 1) += y_post_canon - y_panel_canon;
     }
 
     int nV = gc.V_ring.rows();
@@ -540,6 +574,18 @@ static void show_canonical_view()
                 ->setTransparency(0.45f)
                 ->setEnabled(gShowCanonRing);
         }
+    }
+
+    // Double cover visualization (boundary cases): flat overlay on UV panels.
+    if (gc.has_dc) {
+        polyscope::registerSurfaceMesh("dc_uv_pre", gc.dc_uv_pre_3d, gSnap.FUV_dc_pre)
+            ->setSurfaceColor({0.2f, 0.85f, 0.85f})   // teal — top+bottom sheet pre
+            ->setEdgeWidth(1.0)->setSmoothShade(false)->setTransparency(0.45f)
+            ->setEnabled(gShowCanonUV);
+        polyscope::registerSurfaceMesh("dc_uv_post", gc.dc_uv_post_3d, gSnap.FUV_dc_post)
+            ->setSurfaceColor({0.85f, 0.65f, 0.2f})   // amber — top+bottom sheet post
+            ->setEdgeWidth(1.0)->setSmoothShade(false)->setTransparency(0.45f)
+            ->setEnabled(gShowCanonUV);
     }
 
     sample_tracker_show_canonical(gc.uv_pre_3d, gc.uv_post_3d, gSnap.FUV_pre, gSnap.FUV_post);
@@ -677,7 +723,8 @@ void ui_callback()
 
             if (!gDecInfo.empty()) {
                 const auto & lc = gDecInfo.back().lscm_case;
-                if (lc.has_value() && lc.value() >= 1) {
+                bool is_bd_case = lc.has_value() && lc.value() >= 1;
+                if (is_bd_case) {
 #ifdef SSP_LSCM_LOG
                     fprintf(stderr, "[joint_lscm] case %d triggered (%s)\n",
                         lc.value() + 1,
@@ -689,6 +736,12 @@ void ui_callback()
                         gRunning     = false;
                     }
                 }
+            }
+            // Stop at DC: fires only when the successful collapse actually used the
+            // double cover solve (true geometric boundary, not seam-injected).
+            if (gStopAtDC && gSnap.has_dc) {
+                gRunning       = false;
+                gCanonicalView = true;
             }
 
             if (gBreakAtCollapse > 0 && gCollapseCount >= gBreakAtCollapse) {
@@ -743,6 +796,10 @@ void ui_callback()
         if (ImGui::Button("Next seam"))      { gRunToSeam   = true; gRunning = true; }
         ImGui::SameLine();
         if (ImGui::Button("Next bd case"))   { gRunToBdCase = true; gRunning = true; }
+        ImGui::SameLine();
+        ImGui::Checkbox("Stop at DC", &gStopAtDC);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Halt + switch to canonical view on every double cover (boundary) case");
 
         ImGui::SetNextItemWidth(80);
         ImGui::InputText("##breakat", gBreakAtBuf, sizeof(gBreakAtBuf),

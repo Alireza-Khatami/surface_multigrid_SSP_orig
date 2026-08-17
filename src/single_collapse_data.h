@@ -29,6 +29,12 @@ struct SheetData
     // 3D ring geometry in local index space (same indexing as FUV_pre/FUV_post).
     // V_post has b(0) (survivor) moved to the collapse placement p; all other rows == V_pre.
     Eigen::MatrixXd V_pre, V_post;
+    // Double cover data (boundary cases: lscm_case >= 1 or seam edge).
+    // FUV_dc_* has 2*nF rows: top sheet (original) then bottom sheet (reversed winding).
+    // UV_dc_* has the same nV rows as UV_pre/UV_post (shared vertex set).
+    bool has_double_cover = false;
+    Eigen::MatrixXi FUV_dc_pre, FUV_dc_post;
+    Eigen::MatrixXd UV_dc_pre, UV_dc_post;
 };
 
 struct single_collapse_data
