@@ -37,7 +37,6 @@ FINE_MESH     = "fine_mesh"
 DEFORM_MESH   = "deformed_fine_mesh"
 DEFORM_PC     = "deformed_fine_verts"
 ARROWS_PC     = "fine_to_deformed"
-SEL_ARROWS_PC = "sel_fine_to_deformed"
 FLIPPED_PC    = "flipped_face_verts"
 FLIPPED_MESH  = "flipped_faces_mesh"
 TRACKED_VTX_PC = "tracked_vtx"
@@ -55,7 +54,8 @@ CV_UV_PRE      = "cv_uv_pre"         # canonical: UV_pre panel (blue)
 CV_UV_POST     = "cv_uv_post"        # canonical: UV_post panel (orange)
 CV_TRACKED     = "cv_tracked_vtx"    # canonical: tracked vertex dot + arrow
 CV_TRACKED_POST = "cv_tracked_post"  # canonical: tracked vertex dot at UV_post
-_CV_NAMES      = [CV_RING_MESH, CV_UV_PRE, CV_UV_POST, CV_TRACKED]
+CV_EDGE_PRE    = "cv_edge_pre"       # canonical: collapsed edge in UV_pre (yellow)
+_CV_NAMES      = [CV_RING_MESH, CV_UV_PRE, CV_UV_POST, CV_TRACKED, CV_TRACKED_POST, CV_EDGE_PRE]
 
 # ---- mutable state ----
 _bundle        = None
@@ -70,10 +70,10 @@ _deform_mesh_v = None   # (nFineV,3)  full deformed fine mesh vertices (no offse
 _fine_id_to_row = None  # dict: fine_vertex_id -> row index in _fine_ids
 
 _z_offset               = 1.0
+_mesh_span              = 1.0   # set at load time; used to scale UI sliders
 _sample_step            = 10
 _show_arrows            = False
 _selected_deform_face   = -1
-_face_highlight_active  = False
 _show_flipped             = True
 _show_flipped_verts       = True
 _show_flipped_arrows      = True
@@ -363,8 +363,6 @@ def _rebuild_arrows():
 
     if _fine_pts is None or _deform_pts is None:
         return
-    if _selected_deform_face >= 0:
-        return  # selection arrows take over
 
     step = max(1, _sample_step)
     src  = _fine_pts[::step]
@@ -379,70 +377,6 @@ def _rebuild_arrows():
                            vectortype="ambient",
                            enabled=_show_arrows,
                            color=(1.0, 0.55, 0.05))
-
-
-def _rebuild_selection():
-    """
-    When a deformed face is selected:
-      1. Show arrows only for the (up to 3) tracked corner vertices.
-      2. Highlight all fine mesh faces that share any of those vertex indices.
-    """
-    global _face_highlight_active
-
-    # --- clear selection arrows ---
-    if ps.has_point_cloud(SEL_ARROWS_PC):
-        ps.remove_point_cloud(SEL_ARROWS_PC)
-
-    # --- clear fine mesh highlight ---
-    if ps.has_surface_mesh(FINE_MESH):
-        fine_mesh = ps.get_surface_mesh(FINE_MESH)
-        if _face_highlight_active:
-            fine_mesh.remove_quantity("face_highlight")
-            _face_highlight_active = False
-
-    if _selected_deform_face < 0 or _fine_id_to_row is None:
-        return
-
-    # 3 corner fine vertex indices of the selected deformed face
-    corner_vids = _bundle.fineF[_selected_deform_face]  # shape (3,)
-
-    # ---- selection arrows: only the tracked corners ----
-    rows = [_fine_id_to_row[int(vid)]
-            for vid in corner_vids if int(vid) in _fine_id_to_row]
-
-    if rows:
-        src  = _fine_pts[rows]
-        dst  = _deform_pts[rows].copy()
-        dst[:, 2] += _z_offset
-        vecs = dst - src
-
-        pc = ps.register_point_cloud(SEL_ARROWS_PC, src)
-        pc.set_color((1.0, 0.10, 0.10))
-        pc.set_radius(0.008, relative=True)
-        pc.add_vector_quantity("to_deformed", vecs,
-                               vectortype="ambient",
-                               enabled=True,
-                               color=(1.0, 0.20, 0.20))
-        print(f"[sel] deformed face {_selected_deform_face}: "
-              f"{len(rows)}/3 corners tracked, arrows shown")
-    else:
-        print(f"[sel] deformed face {_selected_deform_face}: no tracked corners")
-
-    # ---- highlight fine faces sharing any corner vertex ----
-    if ps.has_surface_mesh(FINE_MESH):
-        fine_mesh = ps.get_surface_mesh(FINE_MESH)
-        corner_set = set(int(v) for v in corner_vids)
-        fineF = _bundle.fineF
-        nF    = fineF.shape[0]
-
-        # face colour: yellow-highlight if it touches a corner vertex, else default grey
-        fc = np.tile([0.55, 0.55, 0.55], (nF, 1))
-        for fi in range(nF):
-            if corner_set & {int(fineF[fi, 0]), int(fineF[fi, 1]), int(fineF[fi, 2])}:
-                fc[fi] = [1.0, 0.85, 0.0]
-
-        fine_mesh.add_color_quantity("face_highlight", fc, defined_on='faces')
-        _face_highlight_active = True
 
 
 def _rebuild_flipped_viz():
@@ -598,6 +532,46 @@ def _rebuild_flipped_arrows():
                            enabled=_show_flipped_arrows, color=(1.0, 0.30, 0.30))
 
 
+def _rebuild_deform_face_sel():
+    """
+    Color + vector quantities on FINE_VTX_PC for the selected deformed face.
+    Mirrors the flipped-face selection path: no separate point cloud.
+      "deform_sel_colors"  — 3 corner vertices yellow, rest grey
+      "deform_sel_arrows"  — fine → deformed vectors for those 3 corners, zero elsewhere
+    Cleared when no face is selected.
+    """
+    if not ps.has_point_cloud(FINE_VTX_PC):
+        return
+    pc = ps.get_point_cloud(FINE_VTX_PC)
+
+    if _selected_deform_face < 0:
+        for q in ("deform_sel_colors", "deform_sel_arrows"):
+            try:
+                pc.remove_quantity(q)
+            except Exception:
+                pass
+        return
+
+    active_v = _active_deform_mesh_v()
+    NV       = _bundle.fineV.shape[0]
+    vids     = _bundle.fineF[_selected_deform_face]   # 3 corner global vertex indices
+
+    colors = np.tile(np.array([0.75, 0.75, 0.75], dtype=np.float32), (NV, 1))
+    colors[vids] = [1.0, 0.85, 0.0]   # yellow highlight
+    pc.add_color_quantity("deform_sel_colors", colors, enabled=True)
+
+    vecs = np.zeros((NV, 3), dtype=np.float32)
+    if active_v is not None:
+        dv = active_v.copy()
+        dv[:, 2] += _z_offset
+        vecs[vids] = (dv[vids] - _bundle.fineV[vids]).astype(np.float32)
+    pc.add_vector_quantity("deform_sel_arrows", vecs, vectortype="ambient",
+                           enabled=True, color=(1.0, 0.85, 0.0))
+
+    print(f"[sel] deformed face {_selected_deform_face}  "
+          f"verts=({int(vids[0])}, {int(vids[1])}, {int(vids[2])})")
+
+
 def _rebuild_fine_vtx_pc():
     """Selectable point cloud over all fine mesh vertices."""
     if ps.has_point_cloud(FINE_VTX_PC):
@@ -658,7 +632,7 @@ def _rebuild_step_viz():
         return
 
     step_idx = max(0, min(_current_step_idx, len(_vtx_collapse_steps) - 1))
-    _ci, sheet, _local_v = _vtx_collapse_steps[step_idx]
+    _ci, sheet, _local_v = _vtx_collapse_steps[step_idx][:3]
 
     # Use the actual C2F query intermediate position for this step.
     # step 0 → positions[0] = fineV[vi] (fine-mesh start)
@@ -676,6 +650,22 @@ def _rebuild_step_viz():
     pc = ps.register_point_cloud(STEP_POS_PC, current_pos[np.newaxis])
     pc.set_color((1.0, 0.35, 0.0))
     pc.set_radius(0.009, relative=True)
+
+    # Arrow from current step position → final deformed correspondence
+    final_pos = None
+    if _vtx_query_positions:
+        final_pos = np.array(_vtx_query_positions[-1], dtype=np.float64)
+        final_pos[2] += _z_offset
+    elif _f2c_deform_mesh_v is not None:
+        final_pos = _f2c_deform_mesh_v[_selected_vtx].copy()
+        final_pos[2] += _z_offset
+    elif _fine_id_to_row is not None and _selected_vtx in _fine_id_to_row:
+        final_pos = _deform_pts[_fine_id_to_row[_selected_vtx]].copy()
+        final_pos[2] += _z_offset
+    if final_pos is not None:
+        vec = (final_pos - current_pos)[np.newaxis]
+        pc.add_vector_quantity("to_correspondence", vec, vectortype="ambient",
+                               enabled=True, color=(1.0, 0.85, 0.0))
 
     # Ring point cloud: all subsetVIdx vertices for this step
     # subV     = np.clip(sheet.subsetVIdx, 0, _bundle.fineV.shape[0] - 1)
@@ -736,7 +726,7 @@ def _vtx_world_pos_after_collapse(sheet, local_v: int) -> np.ndarray:
     return centroid + dU * t1 + dV * t2
 
 
-def _compute_canonical(sheet, local_v: int) -> dict:
+def _compute_canonical(sheet, local_v: int, **kwargs) -> dict:
     """
     Port of compute_ring_geometry() + show_canonical_view() from visualizer.cpp.
 
@@ -827,15 +817,46 @@ def _compute_canonical(sheet, local_v: int) -> dict:
     upr  = rot_norm(uv_pre_3d)
     upor = rot_norm(uv_post_3d)
 
+    # ---- tracked point: true interpolated UV position (not just the dominant corner) ----
+    # BC / FUV_pre / FUV_post come from the step tuple stored in _vtx_collapse_steps.
+    # _compute_canonical receives the SheetData but not the per-step BC — the caller
+    # must pass them in via tracked_uv_pre / tracked_uv_post kwargs if available.
+    # Fallback: dominant corner vertex (legacy behaviour).
+    tracked_uv_pre_2d  = kwargs.get('tracked_uv_pre')   # (2,) or None
+    tracked_uv_post_2d = kwargs.get('tracked_uv_post')  # (2,) or None
+
+    def _uv_to_canonical(uv2d, panel_origin):
+        pt = np.array([[uv2d[0], uv2d[1]]])
+        return rot_norm(to3d(pt, panel_origin))[0]
+
+    if tracked_uv_pre_2d is not None:
+        tracked_pre_pt  = _uv_to_canonical(tracked_uv_pre_2d,  centroid)
+        tracked_post_pt = _uv_to_canonical(tracked_uv_post_2d, centroid + nrm * _uv_post_offset * span) \
+                          if tracked_uv_post_2d is not None else rot_norm(uv_post_3d)[local_v]
+    else:
+        tracked_pre_pt  = upr[local_v]
+        tracked_post_pt = upor[local_v]
+
+    # ---- collapsed edge in UV_pre ----
+    # b[0]=survivor, b[1]=absorbed; both are local indices into UV_pre.
+    edge_pts_pre = None
+    if len(sheet.b) >= 2 and sheet.b[0] >= 0 and sheet.b[1] >= 0:
+        b0, b1 = int(sheet.b[0]), int(sheet.b[1])
+        if b0 < uv_pre.shape[0] and b1 < uv_pre.shape[0]:
+            edge_uv_pre = uv_pre[[b0, b1]]          # (2, 2) — survivor, absorbed
+            edge_3d_pre = to3d(edge_uv_pre, centroid)
+            edge_pts_pre = rot_norm(edge_3d_pre)     # (2, 3) in canonical space
+
     return {
-        'V_ring':       vr,
-        'uv_pre':       upr,
-        'uv_post':      upor,
-        'F':            F,
-        'tracked_ring': vr[local_v],
-        'tracked_pre':  upr[local_v],
-        'tracked_post': upor[local_v],
-        'span':         span,
+        'V_ring':        vr,
+        'uv_pre':        upr,
+        'uv_post':       upor,
+        'F':             F,
+        'tracked_ring':  vr[local_v],
+        'tracked_pre':   tracked_pre_pt,   # interpolated tracked point on UV_pre panel
+        'tracked_post':  tracked_post_pt,  # interpolated tracked point on UV_post panel
+        'span':          span,
+        'edge_pts_pre':  edge_pts_pre,
     }
 
 
@@ -845,6 +866,71 @@ def _clear_canonical():
             ps.remove_surface_mesh(name)
         if ps.has_point_cloud(name):
             ps.remove_point_cloud(name)
+        if ps.has_curve_network(name):
+            ps.remove_curve_network(name)
+    # edge overlay uses an extra _pts point cloud not in _CV_NAMES
+    pts_name = CV_EDGE_PRE + "_pts"
+    if ps.has_point_cloud(pts_name):
+        ps.remove_point_cloud(pts_name)
+
+
+def _print_step_bc_info():
+    """Print UV-space barycentric info for the current canonical step."""
+    step_idx = max(0, min(_current_step_idx, len(_vtx_collapse_steps) - 1))
+    entry    = _vtx_collapse_steps[step_idx]
+    ci, sd, local_v = entry[:3]
+    if len(entry) < 9:
+        print(f"[BC info] step {step_idx}: no cast data (old bundle?)")
+        return
+
+    _ci, _sd, _lv, pre_row, BC_pre, uv_q, best_row, BC_post, BF_post = entry
+
+    # Global vertex indices at the pre triangle corners
+    pre_tri     = sd.FUV_pre[pre_row]           # local indices
+    pre_verts   = [int(sd.subsetVIdx[pre_tri[i]]) for i in range(3)]
+    pre_uv_verts = [sd.UV_pre[pre_tri[i]] for i in range(3)]
+
+    # Post triangle
+    fuv_post    = sd.FUV_post if len(sd.FUV_post) > 0 else sd.FUV_pre
+    post_tri    = fuv_post[best_row]
+    post_verts  = [int(sd.subsetVIdx[post_tri[i]]) for i in range(3)]
+    post_uv_verts = [sd.UV_post[post_tri[i]] for i in range(3)]
+
+    # Survivor / absorbed edge
+    b0 = int(sd.b[0]) if len(sd.b) >= 2 else -1
+    b1 = int(sd.b[1]) if len(sd.b) >= 2 else -1
+    g_survivor = int(sd.subsetVIdx[b0]) if b0 >= 0 else -1
+    g_absorbed = int(sd.subsetVIdx[b1]) if b1 >= 0 else -1
+
+    print(f"\n{'='*60}")
+    print(f"[BC info] vtx={_selected_vtx}  step={step_idx}/{len(_vtx_collapse_steps)-1}  ci={ci}  sheet={sd.global_sheet_id}")
+    print(f"  Collapsed edge:  survivor g{g_survivor} (local {b0})  →  absorbed g{g_absorbed} (local {b1})")
+    # Reconstruct the UV coordinate from BC weights — both should equal uv_q
+    uv_pre_reconst  = sum(BC_pre[i]  * pre_uv_verts[i]  for i in range(3))
+    uv_post_reconst = sum(BC_post[i] * post_uv_verts[i] for i in range(3))
+    uv_delta = uv_post_reconst - uv_pre_reconst
+
+    print(f"  ── UV_pre ──")
+    print(f"    face row : {pre_row}")
+    print(f"    tri verts: g{pre_verts[0]}  g{pre_verts[1]}  g{pre_verts[2]}")
+    for i in range(3):
+        uv = pre_uv_verts[i]
+        print(f"    corner {i}: UV=({uv[0]:.6f}, {uv[1]:.6f})  w={BC_pre[i]:.6f}")
+    print(f"    tracked UV  (BC·UV_pre) : ({uv_pre_reconst[0]:.6f}, {uv_pre_reconst[1]:.6f})")
+    print(f"    query UV used for cast  : ({uv_q[0]:.6f}, {uv_q[1]:.6f})")
+    print(f"  ── UV_post ──")
+    print(f"    face row : {best_row}")
+    print(f"    tri verts: g{post_verts[0]}  g{post_verts[1]}  g{post_verts[2]}")
+    for i in range(3):
+        uv = post_uv_verts[i]
+        print(f"    corner {i}: UV=({uv[0]:.6f}, {uv[1]:.6f})  w={BC_post[i]:.6f}")
+    print(f"    tracked UV  (BC·UV_post): ({uv_post_reconst[0]:.6f}, {uv_post_reconst[1]:.6f})")
+    print(f"  ── consistency ──")
+    err = max(abs(float(uv_delta[0])), abs(float(uv_delta[1])))
+    flag = 'OK' if err < 1e-4 else '<<< MISMATCH'
+    print(f"    Δ UV (post − pre): ({uv_delta[0]:.2e}, {uv_delta[1]:.2e})  {flag}")
+    print(f"  BF (global, post): {BF_post}")
+    print(f"{'='*60}\n")
 
 
 def _rebuild_canonical_view():
@@ -853,9 +939,26 @@ def _rebuild_canonical_view():
         return
 
     step_idx = max(0, min(_current_step_idx, len(_vtx_collapse_steps) - 1))
-    _ci, sheet, local_v = _vtx_collapse_steps[step_idx]
+    entry    = _vtx_collapse_steps[step_idx]
+    _ci, sheet, local_v = entry[:3]
 
-    geo = _compute_canonical(sheet, local_v)
+    # Extract per-step UV positions if stored (tuples with len>=9 have cast data)
+    tracked_uv_pre  = None
+    tracked_uv_post = None
+    if len(entry) >= 9:
+        _ci2, _sd, _lv, pre_row, BC_pre, uv_q, best_row, BC_post, _BF = entry
+        fuv_pre  = sheet.FUV_pre
+        fuv_post = sheet.FUV_post if len(sheet.FUV_post) > 0 else sheet.FUV_pre
+        # Interpolated UV in pre panel (= uv_q exactly; BC_pre · UV_pre corners)
+        a, b, c = int(fuv_pre[pre_row, 0]), int(fuv_pre[pre_row, 1]), int(fuv_pre[pre_row, 2])
+        tracked_uv_pre = BC_pre[0]*sheet.UV_pre[a] + BC_pre[1]*sheet.UV_pre[b] + BC_pre[2]*sheet.UV_pre[c]
+        # Interpolated UV in post panel (BC_post · UV_post corners — should equal tracked_uv_pre)
+        pa, pb, pc = int(fuv_post[best_row, 0]), int(fuv_post[best_row, 1]), int(fuv_post[best_row, 2])
+        tracked_uv_post = BC_post[0]*sheet.UV_post[pa] + BC_post[1]*sheet.UV_post[pb] + BC_post[2]*sheet.UV_post[pc]
+
+    geo = _compute_canonical(sheet, local_v,
+                             tracked_uv_pre=tracked_uv_pre,
+                             tracked_uv_post=tracked_uv_post)
 
     if _canonical_domain == 'ring':
         # Spatial domain — show the 3D one-ring only
@@ -893,11 +996,26 @@ def _rebuild_canonical_view():
         pc.add_vector_quantity("uv_disp", arrow, vectortype="ambient",
                                enabled=True, color=(1.0, 0.85, 0.0))
 
-        # Tracked vertex: red  dot at UV_post  position  
+        # Tracked vertex: red  dot at UV_post  position
         pt3d  = geo['tracked_post'][np.newaxis]
         pc    = ps.register_point_cloud(CV_TRACKED_POST, pt3d)
         pc.set_color((1.0, 0.0, 0.0))
         pc.set_radius(0.015, relative=True)
+
+        # Collapsed edge: yellow curve + endpoint dots on UV_pre panel
+        # [0]=survivor (b[0]), [1]=absorbed (b[1])
+        edge_pts = geo.get('edge_pts_pre')
+        if edge_pts is not None:
+            net = ps.register_curve_network(CV_EDGE_PRE,
+                                            edge_pts,
+                                            np.array([[0, 1]]))
+            net.set_color((1.0, 0.9, 0.0))
+            net.set_radius(0.008, relative=True)
+            # Survivor = green dot, absorbed = red dot
+            ep = ps.register_point_cloud(CV_EDGE_PRE + "_pts", edge_pts)
+            ep.set_radius(0.018, relative=True)
+            ep.add_scalar_quantity("role", np.array([0.0, 1.0]),
+                                   enabled=True, cmap="blues")
 
 
 def _find_vtx_collapse_steps(v: int):
@@ -1067,7 +1185,7 @@ def _rebuild_uv_sheet_viz():
         return
 
     step_idx = max(0, min(_current_step_idx, len(_vtx_collapse_steps) - 1))
-    ci, sheet, local_v = _vtx_collapse_steps[step_idx]
+    ci, sheet, local_v = _vtx_collapse_steps[step_idx][:3]
 
     uv     = sheet.UV_pre          # (uvRows, 2)
     center = uv.mean(axis=0)
@@ -1105,9 +1223,9 @@ def _rebuild_all():
     _rebuild_meshes()
     _rebuild_deform_pc()
     _rebuild_arrows()
-    _rebuild_selection()
     _rebuild_flipped_viz()
     _rebuild_fine_vtx_pc()
+    _rebuild_deform_face_sel()
     _rebuild_vtx_trajectory()
     _rebuild_step_viz()
     # _rebuild_uv_sheet_viz()
@@ -1118,7 +1236,7 @@ def _rebuild_all():
 # ---------------------------------------------------------------------------
 
 def ui_callback():
-    global _z_offset, _sample_step, _show_arrows, _selected_deform_face, _show_flipped
+    global _z_offset, _mesh_span, _sample_step, _show_arrows, _selected_deform_face, _show_flipped
     global _show_flipped_verts, _show_flipped_arrows, _selected_flipped_face, _flipped_vtx_colors, _flipped_vtx_arrows
     global _selected_vtx, _current_step_idx, _uv_scale, _uv_plane_z, _canonical_view, _uv_post_offset, _canonical_domain, _vtx_query_positions
     global _use_f2c_deform, _use_incident_steps
@@ -1141,7 +1259,8 @@ def ui_callback():
 
     psim.Separator()
 
-    c, v = psim.SliderFloat("Z offset (deformed)", _z_offset, -2.0, 2.0)
+    _slider_range = max(2.0, _mesh_span * 5)
+    c, v = psim.SliderFloat("Z offset (deformed)", _z_offset, -_slider_range, _slider_range)
     if c:
         _z_offset = v
         changed = True
@@ -1167,11 +1286,10 @@ def ui_callback():
         corner_vids = _bundle.fineF[_selected_deform_face]
         psim.TextUnformatted(
             f"Deformed face {_selected_deform_face}  "
-            f"(fine verts {corner_vids[0]}, {corner_vids[1]}, {corner_vids[2]})")
-        if psim.Button("Clear selection"):
+            f"(verts {int(corner_vids[0])}, {int(corner_vids[1])}, {int(corner_vids[2])})")
+        if psim.Button("Clear face selection"):
             _selected_deform_face = -1
-            _rebuild_arrows()
-            _rebuild_selection()
+            _rebuild_deform_face_sel()
     else:
         psim.TextUnformatted("Click a deformed mesh face to inspect")
 
@@ -1230,7 +1348,7 @@ def ui_callback():
         _apply_f2c_active()        # swap active deformed mesh vertices
         _rebuild_meshes()          # update deformed_fine_mesh in the viewport
         _rebuild_arrows()          # recalculate fine→deformed global arrows
-        _rebuild_selection()       # recalculate selection arrows if a face is selected
+        _rebuild_deform_face_sel() # update face-selection color+vector on FINE_VTX_PC
         _rebuild_flipped_viz()     # recompute flipped faces + flipped vertex colors + flipped arrows
         if _selected_vtx >= 0:
             _current_step_idx = 0
@@ -1305,6 +1423,7 @@ def ui_callback():
                 except Exception:
                     pass
                 _rebuild_all()
+                ps.reset_camera_to_home_view()
             # Domain toggle — only one active at a time
             c, chk = psim.Checkbox("UV domain (pre/post panels)", _canonical_domain == 'uv')
             if c and chk:
@@ -1322,6 +1441,9 @@ def ui_callback():
                 if c:
                     _uv_post_offset = v
                     _rebuild_canonical_view()
+
+                if psim.Button("Print step BC info") and _vtx_collapse_steps:
+                    _print_step_bc_info()
             else:
                 psim.TextDisabled("Blue = 3-D one-ring")
 
@@ -1339,6 +1461,7 @@ def ui_callback():
                 except Exception:
                     pass
                 _rebuild_all()
+                ps.reset_camera_to_home_view()
             else:
                 _rebuild_vtx_trajectory()
                 _rebuild_step_viz()
@@ -1392,10 +1515,9 @@ def ui_callback():
                 etype = sdata.get('element_type', None)
                 fidx  = int(sdata.get('index', -1))
                 nF    = _bundle.fineF.shape[0]
-                if etype == 'face' and 0 <= fidx < nF and fidx != _selected_deform_face:
-                    _selected_deform_face = fidx
-                    _rebuild_arrows()
-                    _rebuild_selection()
+                if etype == 'face' and 0 <= fidx < nF:
+                    _selected_deform_face = -1 if fidx == _selected_deform_face else fidx
+                    _rebuild_deform_face_sel()
 
             elif sname == FLIPPED_MESH:
                 etype = sdata.get('element_type', None)
@@ -1531,10 +1653,12 @@ def _log_decim_stats():
 # ---------------------------------------------------------------------------
 
 def main():
-    global _bundle, _bundle_dir
+    global _bundle, _bundle_dir, _z_offset, _mesh_span
 
     # c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\01_00040057_f8f78dbd17414efda75bc437_trimesh_000\\correspondence_01_00040057_f8f78dbd17414efda75bc437_trimesh_000_mat_initial.c2f"
-    c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\0002000_partstudio_14_model_ste_00_1024\\correspondence_0002000_partstudio_14_model_ste_00_1024.c2f"
+    # c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\0002000_partstudio_14_model_ste_00_1024\\correspondence_0002000_partstudio_14_model_ste_00_1024.c2f"
+    # c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\hand\\correspondence_hand.c2f"
+    c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\non_manifold_planes\\correspondence_non_manifold_planes.c2f"
     _bundle_dir = os.path.dirname(os.path.abspath(c2f_path))
     _bundle     = load_bundle(c2f_path)
 
@@ -1543,7 +1667,8 @@ def main():
     fv = _bundle.fineV
     mesh_span = float((fv.max(axis=0) - fv.min(axis=0)).max())
     if mesh_span > 1e-10:
-        _z_offset = mesh_span
+        _z_offset   = mesh_span
+        _mesh_span  = mesh_span
 
     print(f"Fine:   {_bundle.fineV.shape[0]} verts  {_bundle.fineF.shape[0]} faces")
     if _bundle.has_ssp_data:

@@ -613,6 +613,7 @@ def query_vertex_f2c_intermediates(vi, bundle, verbose=False, _fi_seed_override=
         # argmax(B.min(axis=1)) picks the best containing face even when the query
         # point lands inside the deleted-triangle region of UV_post.
         # Capture dominant corner in UV_pre for canonical-view local_v.
+        BC_pre  = BC.copy()   # BC entering this step (in UV_pre of this sheet)
         local_v = int(sd.FUV_pre[pre_row, int(np.argmax(BC))])
         a = int(sd.FUV_pre[pre_row, 0])
         b = int(sd.FUV_pre[pre_row, 1])
@@ -656,7 +657,8 @@ def query_vertex_f2c_intermediates(vi, bundle, verbose=False, _fi_seed_override=
         pos_next = BC[0]*sd.V_post[pa] + BC[1]*sd.V_post[pb] + BC[2]*sd.V_post[pc]
 
         ci = ci_next
-        steps.append((ci_next, sd, local_v))
+        # Tuple layout: (ci, sd, local_v, pre_row, BC_pre, uv_q, best_row, BC_post, BF_post)
+        steps.append((ci_next, sd, local_v, pre_row, BC_pre, uv_q, best, BC.copy(), list(BF)))
         positions.append(pos_next)
 
     return positions, steps, n_skips, BF, BC.copy()
