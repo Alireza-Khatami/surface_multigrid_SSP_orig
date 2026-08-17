@@ -49,6 +49,8 @@ STEP_RING_PC   = "step_ring_pts"     # main view: one-ring vertices for current 
 F2C_DEFORM_MESH = "f2c_deformed_fine_mesh"   # F2C-query-based deformed mesh (green)
 F2C_DEFORM_PC   = "f2c_deformed_fine_verts"  # F2C tracked vertex positions
 FLIPPED_F2C_PC  = "flipped_face_f2c_query"  # on-the-fly F2C final positions for clicked flipped face
+# Simplified (coarse) mesh — name is set at load time from the c2f path
+_simplified_ps_name = "simplified_mesh"      # overwritten in main()
 CV_RING_MESH   = "cv_ring"           # canonical: 3D one-ring (blue)
 CV_UV_PRE      = "cv_uv_pre"         # canonical: UV_pre panel (blue)
 CV_UV_POST     = "cv_uv_post"        # canonical: UV_post panel (orange)
@@ -73,6 +75,7 @@ _z_offset               = 1.0
 _mesh_span              = 1.0   # set at load time; used to scale UI sliders
 _sample_step            = 10
 _show_arrows            = False
+_show_deform_pc         = True
 _selected_deform_face   = -1
 _show_flipped             = True
 _show_flipped_verts       = True
@@ -90,6 +93,8 @@ _f2c_onering_mesh_v     = None   # full one-ring batch (compute_f2c_corresponden
 _f2c_incident_mesh_v    = None   # incident-faces batch (compute_f2c_correspondences_incident)
 _use_f2c_deform         = True  # True = F2C mode, False = bundle mode
 _use_incident_steps     = True   # True = incident faces only; False = full one-ring
+_show_simplified        = False  # show coarse (simplified) mesh overlaid at deformed Z
+_vtx_input_id           = 0      # vertex ID text-input state
 
 # collapse-trace state
 _selected_vtx         = -1
@@ -334,11 +339,28 @@ def _rebuild_meshes():
         dm.set_transparency(0.7)
 
 
+def _rebuild_simplified_mesh():
+    if ps.has_surface_mesh(_simplified_ps_name):
+        ps.remove_surface_mesh(_simplified_ps_name)
+    if not _show_simplified or _bundle is None:
+        return
+    if _bundle.coarseV is None or _bundle.coarseF is None:
+        print("[simplified] coarse mesh not available in bundle")
+        return
+    sv = _bundle.coarseV.copy()
+    sv[:, 2] += _z_offset
+    sm = ps.register_surface_mesh(_simplified_ps_name, sv, _bundle.coarseF)
+    sm.set_color((0.15, 0.75, 0.35))
+    sm.set_edge_width(1.5)
+    sm.set_smooth_shade(False)
+    sm.set_transparency(0.55)
+
+
 def _rebuild_deform_pc():
     if ps.has_point_cloud(DEFORM_PC):
         ps.remove_point_cloud(DEFORM_PC)
 
-    if _deform_pts is None:
+    if not _show_deform_pc or _deform_pts is None:
         return
 
     step = max(1, _sample_step)
@@ -744,7 +766,8 @@ def _compute_canonical(sheet, local_v: int, **kwargs) -> dict:
     subV      = np.clip(sheet.subsetVIdx[:n_uv], 0, len(_bundle.fineV) - 1)
     base_v    = _deform_mesh_v if (not _use_f2c_deform and _deform_mesh_v is not None) else _bundle.fineV
     verts     = base_v[subV]   # (N, 3)
-    F         = sheet.FUV_pre         # (M, 3)
+    F         = sheet.FUV_pre         # (M, 3) — pre-collapse triangulation
+    F_post    = sheet.FUV_post if len(sheet.FUV_post) > 0 else sheet.FUV_pre
 
     # ---- centroid and span ----
     centroid = verts.mean(axis=0)
@@ -851,10 +874,11 @@ def _compute_canonical(sheet, local_v: int, **kwargs) -> dict:
         'V_ring':        vr,
         'uv_pre':        upr,
         'uv_post':       upor,
-        'F':             F,
+        'F':             F,       # FUV_pre — for UV_pre panel and 3-D ring
+        'F_post':        F_post,  # FUV_post — for UV_post panel (may differ from F)
         'tracked_ring':  vr[local_v],
-        'tracked_pre':   tracked_pre_pt,   # interpolated tracked point on UV_pre panel
-        'tracked_post':  tracked_post_pt,  # interpolated tracked point on UV_post panel
+        'tracked_pre':   tracked_pre_pt,
+        'tracked_post':  tracked_post_pt,
         'span':          span,
         'edge_pts_pre':  edge_pts_pre,
     }
@@ -930,6 +954,57 @@ def _print_step_bc_info():
     flag = 'OK' if err < 1e-4 else '<<< MISMATCH'
     print(f"    Δ UV (post − pre): ({uv_delta[0]:.2e}, {uv_delta[1]:.2e})  {flag}")
     print(f"  BF (global, post): {BF_post}")
+
+    # ── full collapse geometry ──
+    n_pre  = len(sd.FUV_pre)
+    fuv_post_arr = sd.FUV_post if len(sd.FUV_post) > 0 else sd.FUV_pre
+    n_post = len(fuv_post_arr)
+    n_uv_pre  = sd.UV_pre.shape[0]
+    n_uv_post = sd.UV_post.shape[0]
+    print(f"\n  ── collapse geometry  (ci={ci}  sheet={sd.global_sheet_id}) ──")
+    print(f"    UV_pre  : {n_uv_pre} verts  {n_pre} tris")
+    print(f"    UV_post : {n_uv_post} verts  {n_post} tris")
+
+    # All UV_pre vertices with 3-D position
+    n_uv = sd.UV_pre.shape[0]
+    subV = np.clip(sd.subsetVIdx[:n_uv], 0, len(_bundle.fineV) - 1)
+    print(f"\n    UV_pre vertices (local → global → 3-D pos → UV):")
+    for li in range(n_uv):
+        gi  = int(sd.subsetVIdx[li]) if li < len(sd.subsetVIdx) else -1
+        pos = _bundle.fineV[gi] if 0 <= gi < len(_bundle.fineV) else np.zeros(3)
+        uv  = sd.UV_pre[li]
+        role = ''
+        if li == b0: role = ' [SURVIVOR]'
+        if li == b1: role = ' [ABSORBED]'
+        uv_post_str = ''
+        if li < sd.UV_post.shape[0]:
+            up = sd.UV_post[li]
+            uv_post_str = f"  UV_post=({up[0]:.4f},{up[1]:.4f})"
+        print(f"      local {li:2d}  g{gi:<5d}  "
+              f"pos=({pos[0]:.4f},{pos[1]:.4f},{pos[2]:.4f})  "
+              f"UV_pre=({uv[0]:.4f},{uv[1]:.4f}){uv_post_str}{role}")
+
+    # All UV_pre triangles
+    print(f"\n    UV_pre triangles:")
+    for fi in range(n_pre):
+        tri = sd.FUV_pre[fi]
+        gvs = [int(sd.subsetVIdx[tri[k]]) if tri[k] < len(sd.subsetVIdx) else -1 for k in range(3)]
+        marker = ' <-- tracked (pre_row)' if fi == pre_row else ''
+        print(f"      [{fi}] local({tri[0]},{tri[1]},{tri[2]})  "
+              f"global(g{gvs[0]},g{gvs[1]},g{gvs[2]}){marker}")
+
+    # All UV_post triangles
+    print(f"\n    UV_post triangles:")
+    for fi in range(n_post):
+        tri = fuv_post_arr[fi]
+        gvs = [int(sd.subsetVIdx[tri[k]]) if tri[k] < len(sd.subsetVIdx) else -1 for k in range(3)]
+        marker = ' <-- tracked (best_row)' if fi == best_row else ''
+        print(f"      [{fi}] local({tri[0]},{tri[1]},{tri[2]})  "
+              f"global(g{gvs[0]},g{gvs[1]},g{gvs[2]}){marker}")
+
+    # Check whether the absorbed vertex local index appears in UV_post faces
+    abs_in_post = any(b1 in fuv_post_arr[fi] for fi in range(n_post)) if b1 >= 0 else False
+    print(f"\n    Absorbed local {b1} (g{g_absorbed}) present in UV_post faces: {abs_in_post}")
     print(f"{'='*60}\n")
 
 
@@ -981,7 +1056,7 @@ def _rebuild_canonical_view():
         pm.set_smooth_shade(False)
         pm.set_transparency(1.0)
 
-        qm = ps.register_surface_mesh(CV_UV_POST, geo['uv_post'], geo['F'])
+        qm = ps.register_surface_mesh(CV_UV_POST, geo['uv_post'], geo['F_post'])
         qm.set_color((1.0, 0.5, 0.15))
         qm.set_edge_width(1.5)
         qm.set_smooth_shade(False)
@@ -1221,6 +1296,7 @@ def _rebuild_uv_sheet_viz():
 
 def _rebuild_all():
     _rebuild_meshes()
+    _rebuild_simplified_mesh()
     _rebuild_deform_pc()
     _rebuild_arrows()
     _rebuild_flipped_viz()
@@ -1236,10 +1312,10 @@ def _rebuild_all():
 # ---------------------------------------------------------------------------
 
 def ui_callback():
-    global _z_offset, _mesh_span, _sample_step, _show_arrows, _selected_deform_face, _show_flipped
+    global _z_offset, _mesh_span, _sample_step, _show_arrows, _show_deform_pc, _selected_deform_face, _show_flipped
     global _show_flipped_verts, _show_flipped_arrows, _selected_flipped_face, _flipped_vtx_colors, _flipped_vtx_arrows
     global _selected_vtx, _current_step_idx, _uv_scale, _uv_plane_z, _canonical_view, _uv_post_offset, _canonical_domain, _vtx_query_positions
-    global _use_f2c_deform, _use_incident_steps
+    global _use_f2c_deform, _use_incident_steps, _show_simplified, _vtx_input_id
 
     changed = False
 
@@ -1270,6 +1346,11 @@ def ui_callback():
         _sample_step = v
         changed = True
 
+    c, v = psim.Checkbox("Show deformed verts PC", _show_deform_pc)
+    if c:
+        _show_deform_pc = v
+        _rebuild_deform_pc()
+    psim.SameLine()
     c, v = psim.Checkbox("Show arrows", _show_arrows)
     if c:
         _show_arrows = v
@@ -1341,7 +1422,30 @@ def ui_callback():
             psim.TextDisabled("Click a flipped face to isolate its vertices")
 
     psim.Separator()
-    psim.TextUnformatted("Collapse Trace  (click fine_mesh_verts point cloud)")
+    c, v = psim.Checkbox(f"Show simplified mesh  [{_simplified_ps_name}]", _show_simplified)
+    if c:
+        _show_simplified = v
+        _rebuild_simplified_mesh()
+    if _show_simplified and _bundle is not None and _bundle.coarseV is not None:
+        psim.SameLine()
+        psim.TextDisabled(f"({_bundle.coarseV.shape[0]}v / {_bundle.coarseF.shape[0]}f)")
+
+    psim.Separator()
+    psim.TextUnformatted("Collapse Trace")
+    nV = _bundle.fineV.shape[0] if _bundle is not None else 0
+    c, v = psim.InputInt("Vertex ID", _vtx_input_id)
+    if c:
+        _vtx_input_id = max(0, min(v, nV - 1))
+    psim.SameLine()
+    if psim.Button("Go") and 0 <= _vtx_input_id < nV:
+        _selected_vtx     = _vtx_input_id
+        _current_step_idx = 0
+        _run_query_intermediates(_selected_vtx)
+        _rebuild_vtx_trajectory()
+        _rebuild_step_viz()
+        _rebuild_canonical_view()
+        _rebuild_fine_vtx_pc()
+
     c, v = psim.Checkbox("Direct one-ring (incident faces)", _use_incident_steps)
     if c:
         _use_incident_steps = v
@@ -1467,7 +1571,7 @@ def ui_callback():
                 _rebuild_step_viz()
                 _clear_canonical()
     else:
-        psim.TextUnformatted("No vertex selected — click fine_mesh_verts")
+        psim.TextUnformatted("No vertex selected — type ID above or click fine_mesh_verts")
 
     psim.End()
 
@@ -1477,14 +1581,14 @@ def ui_callback():
     # ---- pick detection ----
     io = psim.GetIO()
 
-    # Double-click: recenter camera on the clicked primitive (look_at with fly)
+    # Double-click: recenter camera on the clicked primitive
     if io.MouseDoubleClicked[0]:
         try:
             pr = ps.pick(screen_coords=io.MousePos)
         except Exception:
             pr = None
         if pr is not None and getattr(pr, 'is_hit', False):
-            target = pr.position   # (3,) world position of hit point
+            target  = pr.position
             cam_pos = ps.get_view_camera_parameters().get_position()
             ps.look_at(cam_pos, target, fly_to=True)
 
@@ -1653,14 +1757,18 @@ def _log_decim_stats():
 # ---------------------------------------------------------------------------
 
 def main():
-    global _bundle, _bundle_dir, _z_offset, _mesh_span
+    global _bundle, _bundle_dir, _z_offset, _mesh_span, _simplified_ps_name
 
-    # c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\01_00040057_f8f78dbd17414efda75bc437_trimesh_000\\correspondence_01_00040057_f8f78dbd17414efda75bc437_trimesh_000_mat_initial.c2f"
+    c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\01_00040057_f8f78dbd17414efda75bc437_trimesh_000_200\\correspondence_01_00040057_f8f78dbd17414efda75bc437_trimesh_000_mat_initial.c2f"
     # c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\0002000_partstudio_14_model_ste_00_1024\\correspondence_0002000_partstudio_14_model_ste_00_1024.c2f"
     # c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\hand\\correspondence_hand.c2f"
-    c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\non_manifold_planes\\correspondence_non_manifold_planes.c2f"
+    # c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\non_manifold_planes\\correspondence_non_manifold_planes.c2f"
     _bundle_dir = os.path.dirname(os.path.abspath(c2f_path))
     _bundle     = load_bundle(c2f_path)
+
+    # Derive Polyscope display name for the simplified (coarse) mesh from the directory name
+    mesh_dir_name       = os.path.basename(_bundle_dir)
+    _simplified_ps_name = f"simplified_{mesh_dir_name}"
 
     # Auto-scale z_offset to ~1× the mesh bounding-box diagonal so the deformed
     # copy is visibly separated regardless of mesh scale.
