@@ -1,5 +1,7 @@
 #include "coarse_fine_viz.h"
 
+#include <limits>
+
 #include <polyscope/polyscope.h>
 #include <polyscope/surface_mesh.h>
 #include <polyscope/curve_network.h>
@@ -1066,9 +1068,22 @@ void ring_post_c2f_diagnostic()
         results.push_back(traced_walk(gv));
 
     // Compute final 3D fine-mesh positions
-    std::vector<Eigen::Vector3d> fine_pos(results.size());
+    // Skip entries where traced_walk failed (init_ok=false) — final_BF is
+    // uninitialized and may contain the infinity-cap vertex index (>= gVO.rows()).
+    std::vector<Eigen::Vector3d> fine_pos(results.size(),
+        Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN()));
     for (int i = 0; i < (int)results.size(); i++) {
         const auto & r = results[i];
+        if (!r.init_ok) continue;
+        if (r.final_BF(0) >= (int)gVO.rows() ||
+            r.final_BF(1) >= (int)gVO.rows() ||
+            r.final_BF(2) >= (int)gVO.rows()) {
+            fprintf(stderr,
+                "[RING-POST-DIAG] collapse=%d vtx=%d: final_BF(%d,%d,%d) out of gVO range %d — skipped\n",
+                collapse_idx, r.global_vtx,
+                r.final_BF(0), r.final_BF(1), r.final_BF(2), (int)gVO.rows());
+            continue;
+        }
         fine_pos[i] = r.final_BC(0) * gVO.row(r.final_BF(0)).transpose()
                     + r.final_BC(1) * gVO.row(r.final_BF(1)).transpose()
                     + r.final_BC(2) * gVO.row(r.final_BF(2)).transpose();
@@ -1080,7 +1095,7 @@ void ring_post_c2f_diagnostic()
     bool any_dup = false;
 
     for (int i = 0; i < (int)results.size(); i++) {
-        if (grouped[i]) continue;
+        if (grouped[i] || !results[i].init_ok) continue;
         std::vector<int> grp = {i};
         for (int j = i+1; j < (int)results.size(); j++) {
             if (!grouped[j] && (fine_pos[i] - fine_pos[j]).norm() < tol)

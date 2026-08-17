@@ -482,6 +482,203 @@ void sample_tracker_show_vertices()
 #endif
 }
 
+// ---- face flip tracker ----
+
+static int    gFFT_faceIdx       = -1;
+static int    gFFT_sampleIdx[3]  = {-1, -1, -1};
+static Eigen::Vector3d gFFT_origNormal;
+static Eigen::Vector3d gFFT_posBefore[3];
+static std::vector<Eigen::Vector3d> gFFT_traj[3];
+static bool   gFFT_flipDetected  = false;
+static int    gFFT_flipAtCollapse = -1;
+
+extern int gCollapseCount;
+
+static Eigen::Vector3d fft_sample_pos(const Sample& s)
+{
+    return s.cur_BC(0) * gV.row(s.cur_BF(0)).transpose()
+         + s.cur_BC(1) * gV.row(s.cur_BF(1)).transpose()
+         + s.cur_BC(2) * gV.row(s.cur_BF(2)).transpose();
+}
+
+void face_flip_tracker_init(int face_idx)
+{
+    gFFT_faceIdx        = -1;
+    gFFT_flipDetected   = false;
+    gFFT_flipAtCollapse = -1;
+    for (int i = 0; i < 3; i++) { gFFT_sampleIdx[i] = -1; gFFT_traj[i].clear(); }
+
+    if (face_idx < 0 || face_idx >= gFO.rows()) {
+        fprintf(stderr, "[face_flip_tracker] face %d out of range\n", face_idx);
+        return;
+    }
+    gFFT_faceIdx = face_idx;
+
+    int verts[3] = { gFO(face_idx,0), gFO(face_idx,1), gFO(face_idx,2) };
+
+    for (int si = 0; si < (int)gSamples.size(); si++) {
+        const Sample& s = gSamples[si];
+        if (!s.is_vertex) continue;
+        for (int i = 0; i < 3; i++)
+            if (s.fine_vertex_id == verts[i] && gFFT_sampleIdx[i] < 0)
+                gFFT_sampleIdx[i] = si;
+    }
+
+    Eigen::Vector3d p0 = gVO.row(verts[0]).transpose();
+    Eigen::Vector3d p1 = gVO.row(verts[1]).transpose();
+    Eigen::Vector3d p2 = gVO.row(verts[2]).transpose();
+    gFFT_origNormal = (p1 - p0).cross(p2 - p0).normalized();
+
+    for (int i = 0; i < 3; i++)
+        gFFT_traj[i].push_back(gVO.row(verts[i]).transpose());
+
+    fprintf(stderr,
+        "[face_flip_tracker] tracking face %d  verts=(%d,%d,%d)  samples=(%d,%d,%d)\n",
+        face_idx, verts[0], verts[1], verts[2],
+        gFFT_sampleIdx[0], gFFT_sampleIdx[1], gFFT_sampleIdx[2]);
+}
+
+void face_flip_tracker_pre_update()
+{
+    if (gFFT_faceIdx < 0) return;
+    for (int i = 0; i < 3; i++) {
+        int si = gFFT_sampleIdx[i];
+        if (si < 0) continue;
+        gFFT_posBefore[i] = fft_sample_pos(gSamples[si]);
+    }
+}
+
+void face_flip_tracker_post_update()
+{
+    if (gFFT_faceIdx < 0 || gFFT_flipDetected) return;
+
+    Eigen::Vector3d posAfter[3];
+    bool any_moved = false;
+    for (int i = 0; i < 3; i++) {
+        int si = gFFT_sampleIdx[i];
+        if (si < 0) { posAfter[i] = gFFT_posBefore[i]; continue; }
+        posAfter[i] = fft_sample_pos(gSamples[si]);
+        if ((posAfter[i] - gFFT_posBefore[i]).norm() > 1e-15) {
+            any_moved = true;
+            gFFT_traj[i].push_back(posAfter[i]);
+        }
+    }
+
+    if (!any_moved) return;
+
+    Eigen::Vector3d curNormal =
+        (posAfter[1] - posAfter[0]).cross(posAfter[2] - posAfter[0]);
+    if (curNormal.dot(gFFT_origNormal) < 0.0) {
+        gFFT_flipDetected   = true;
+        gFFT_flipAtCollapse = gCollapseCount;
+        fprintf(stderr,
+            "[face_flip_tracker] *** FLIP DETECTED at collapse #%d — original face %d ***\n",
+            gCollapseCount, gFFT_faceIdx);
+    }
+}
+
+bool face_flip_tracker_enabled()         { return gFFT_faceIdx >= 0; }
+bool face_flip_tracker_flip_detected()   { return gFFT_flipDetected; }
+int  face_flip_tracker_flip_at_collapse(){ return gFFT_flipAtCollapse; }
+int  face_flip_tracker_face_idx()        { return gFFT_faceIdx; }
+
+Eigen::Vector3d face_flip_tracker_cur_pos(int i)
+{
+    if (i < 0 || i > 2 || gFFT_sampleIdx[i] < 0) return Eigen::Vector3d::Zero();
+    return fft_sample_pos(gSamples[gFFT_sampleIdx[i]]);
+}
+
+const std::vector<Eigen::Vector3d>& face_flip_tracker_traj(int i)
+{
+    static const std::vector<Eigen::Vector3d> empty;
+    if (i < 0 || i > 2) return empty;
+    return gFFT_traj[i];
+}
+
+// ---- end face flip tracker ----
+
+// ---- vertex watch tracker ----
+
+static int           gVWT_fineVtxId  = -1;
+static int           gVWT_sampleIdx  = -1;
+static Eigen::RowVector3i gVWT_snapBF;          // cur_BF snapshot before tries loop
+static bool          gVWT_triggered  = false;
+static int           gVWT_triggerAt  = -1;
+
+void vertex_watch_set(int fine_vtx_id)
+{
+    gVWT_fineVtxId = -1;
+    gVWT_sampleIdx = -1;
+    gVWT_triggered = false;
+    gVWT_triggerAt = -1;
+    gVWT_snapBF    = Eigen::RowVector3i(-1, -1, -1);
+
+    if (fine_vtx_id < 0 || fine_vtx_id >= (int)gVO.rows()) {
+        fprintf(stderr, "[vertex_watch] vertex %d out of range (gVO has %d rows)\n",
+                fine_vtx_id, (int)gVO.rows());
+        return;
+    }
+    for (int si = 0; si < (int)gSamples.size(); si++) {
+        const Sample& s = gSamples[si];
+        if (s.is_vertex && s.fine_vertex_id == fine_vtx_id) {
+            gVWT_sampleIdx = si;
+            break;
+        }
+    }
+    if (gVWT_sampleIdx < 0) {
+        fprintf(stderr, "[vertex_watch] no sample found for fine vertex %d\n", fine_vtx_id);
+        return;
+    }
+    gVWT_fineVtxId = fine_vtx_id;
+    fprintf(stderr, "[vertex_watch] watching fine vertex %d  sample_idx=%d\n",
+            fine_vtx_id, gVWT_sampleIdx);
+}
+
+void vertex_watch_clear()
+{
+    gVWT_fineVtxId = -1;
+    gVWT_sampleIdx = -1;
+    gVWT_triggered = false;
+    gVWT_triggerAt = -1;
+}
+
+void vertex_watch_pre_step()
+{
+    if (gVWT_fineVtxId < 0 || gVWT_sampleIdx < 0) return;
+    gVWT_snapBF = gSamples[gVWT_sampleIdx].cur_BF;
+}
+
+void vertex_watch_check_collapse(int s_vtx, int d_vtx)
+{
+    if (gVWT_fineVtxId < 0 || gVWT_sampleIdx < 0 || gVWT_triggered) return;
+    for (int k = 0; k < 3; k++) {
+        int bfv = gVWT_snapBF(k);
+        if (bfv == s_vtx || bfv == d_vtx) {
+            gVWT_triggered = true;
+            gVWT_triggerAt = gCollapseCount;
+            fprintf(stderr,
+                "[vertex_watch] *** TRIGGERED at collapse #%d ***"
+                "  fine_vtx=%d  cur_BF[%d]=%d  matched_%s\n",
+                gCollapseCount, gVWT_fineVtxId, k, bfv,
+                (bfv == s_vtx) ? "survivor" : "absorbed");
+            return;
+        }
+    }
+}
+
+bool vertex_watch_active()             { return gVWT_fineVtxId >= 0; }
+bool vertex_watch_triggered()          { return gVWT_triggered; }
+int  vertex_watch_trigger_at_collapse(){ return gVWT_triggerAt; }
+int  vertex_watch_fine_vtx()           { return gVWT_fineVtxId; }
+
+Eigen::Vector3i vertex_watch_cur_BF()
+{
+    if (gVWT_sampleIdx < 0) return Eigen::Vector3i(-1, -1, -1);
+    return gSamples[gVWT_sampleIdx].cur_BF.transpose();
+}
+
+// ---- end vertex watch tracker ----
+
 void sample_tracker_show_canonical(const Eigen::MatrixXd& uv_pre_3d,
                                    const Eigen::MatrixXd& uv_post_3d,
                                    const Eigen::MatrixXi& FUV_pre,

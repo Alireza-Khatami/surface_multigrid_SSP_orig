@@ -54,6 +54,9 @@ static bool  gShowRingPre       = true;
 static bool  gShowRingPost      = true;
 static bool  gShowUVPre         = false;
 static bool  gShowUVPost        = false;
+// Canonical-view two-group toggles
+static bool  gShowCanonRing     = true;   // one-ring + non-active sheets
+static bool  gShowCanonUV       = true;   // UV meshes + UV collapsed edge
 static bool  gShowArrowPre      = false;
 static bool  gShowArrowPost     = false;
 static bool  gShowCorrArrows    = true;
@@ -491,15 +494,20 @@ static void show_canonical_view()
     clear_seam_onering();  // structures are gone; keep name list consistent
     register_ring_geometry(gc);
 
-    // In canonical view the UV surfaces are the primary geometry — hide the 3D ring meshes.
-    polyscope::getSurfaceMesh("one_ring_pre") ->setEnabled(false);
-    polyscope::getSurfaceMesh("one_ring_post")->setEnabled(false);
-    polyscope::getPointCloud ("ring_pre_pts") ->setEnabled(false);
-    polyscope::getPointCloud ("ring_post_pts")->setEnabled(false);
-    polyscope::getSurfaceMesh("uv_pre") ->setEnabled(true);
-    polyscope::getSurfaceMesh("uv_post")->setEnabled(true);
-    polyscope::getPointCloud ("uv_pre_pts") ->setEnabled(true);
-    polyscope::getPointCloud ("uv_post_pts")->setEnabled(true);
+    // Apply two-group canonical visibility (overrides register_ring_geometry defaults).
+    // Ring group: one-ring meshes, ring points, corr pts, 3-D collapsed edge
+    polyscope::getSurfaceMesh("one_ring_pre") ->setEnabled(gShowCanonRing);
+    polyscope::getSurfaceMesh("one_ring_post")->setEnabled(gShowCanonRing);
+    polyscope::getPointCloud ("ring_pre_pts") ->setEnabled(gShowCanonRing);
+    polyscope::getPointCloud ("ring_post_pts")->setEnabled(gShowCanonRing);
+    polyscope::getPointCloud ("corr_pts")     ->setEnabled(gShowCanonRing);
+    polyscope::getCurveNetwork("collapsed_edge")->setEnabled(gShowCanonRing);
+    // UV group: UV meshes, UV points, UV collapsed edge
+    polyscope::getSurfaceMesh("uv_pre")        ->setEnabled(gShowCanonUV);
+    polyscope::getSurfaceMesh("uv_post")       ->setEnabled(gShowCanonUV);
+    polyscope::getPointCloud ("uv_pre_pts")    ->setEnabled(gShowCanonUV);
+    polyscope::getPointCloud ("uv_post_pts")   ->setEnabled(gShowCanonUV);
+    polyscope::getCurveNetwork("uv_collapsed_edge")->setEnabled(gShowCanonUV);
 
     // Non-active sheet faces: faces incident to d that belong to sheets NOT
     // processed by this collapse.  Rendered in purple at their pre-collapse
@@ -529,11 +537,70 @@ static void show_canonical_view()
                 ->setSurfaceColor({0.55f, 0.3f, 0.85f})
                 ->setEdgeWidth(1.5)
                 ->setSmoothShade(false)
-                ->setTransparency(0.45f);
+                ->setTransparency(0.45f)
+                ->setEnabled(gShowCanonRing);
         }
     }
 
     sample_tracker_show_canonical(gc.uv_pre_3d, gc.uv_post_3d, gSnap.FUV_pre, gSnap.FUV_post);
+}
+
+// ---- face flip tracker visualization ----
+static void face_flip_tracker_show_viz()
+{
+    if (!face_flip_tracker_enabled()) return;
+
+    // Colors per vertex: red, green, blue
+    static const float kColors[3][3] = {
+        {0.9f, 0.2f, 0.2f},
+        {0.2f, 0.85f, 0.3f},
+        {0.3f, 0.5f, 1.0f}
+    };
+    static const char* kNames[3] = {
+        "fft_traj_0", "fft_traj_1", "fft_traj_2"
+    };
+
+    // Current triangle — green if ok, red if flipped
+    {
+        MatrixXd triV(3, 3);
+        for (int i = 0; i < 3; i++)
+            triV.row(i) = face_flip_tracker_cur_pos(i).transpose();
+        MatrixXi triF(1, 3); triF << 0, 1, 2;
+        bool flipped = face_flip_tracker_flip_detected();
+        auto* triMesh = polyscope::registerSurfaceMesh("fft_triangle", triV, triF);
+        if (flipped) triMesh->setSurfaceColor({0.95f, 0.2f, 0.15f});
+        else         triMesh->setSurfaceColor({0.2f,  0.9f, 0.35f});
+        triMesh
+            ->setEdgeWidth(2.0)
+            ->setSmoothShade(false)
+            ->setTransparency(0.35f);
+    }
+
+    // Trajectory curve + current position for each of the 3 tracked vertices
+    for (int i = 0; i < 3; i++) {
+        const auto& traj = face_flip_tracker_traj(i);
+        if (traj.size() < 2) {
+            // Just a point cloud for the seed position
+            if (!traj.empty()) {
+                MatrixXd pt(1, 3); pt.row(0) = traj[0].transpose();
+                polyscope::registerPointCloud(kNames[i], pt)
+                    ->setPointColor({kColors[i][0], kColors[i][1], kColors[i][2]})
+                    ->setPointRadius(0.006, true);
+            }
+            continue;
+        }
+
+        int nPts = (int)traj.size();
+        MatrixXd nodes(nPts, 3);
+        for (int k = 0; k < nPts; k++) nodes.row(k) = traj[k].transpose();
+
+        MatrixXi edges(nPts - 1, 2);
+        for (int k = 0; k < nPts - 1; k++) edges.row(k) << k, k + 1;
+
+        polyscope::registerCurveNetwork(kNames[i], nodes, edges)
+            ->setColor({kColors[i][0], kColors[i][1], kColors[i][2]})
+            ->setRadius(0.003, true);
+    }
 }
 
 // ---- update polyscope display ----
@@ -576,6 +643,7 @@ void update_display()
 
     sample_tracker_show();
     sample_tracker_show_vertices();
+    face_flip_tracker_show_viz();
 
     if (!gSnap.valid) return;
 
@@ -633,6 +701,13 @@ void ui_callback()
                     std::chrono::milliseconds(static_cast<int>(gStepDelayMs)));
         }
         if (gFinished)
+            gRunning = false;
+
+        // Stop immediately if the face flip tracker detected a flip this step
+        if (face_flip_tracker_flip_detected())
+            gRunning = false;
+        // Stop if the vertex watch tracker triggered this step
+        if (vertex_watch_triggered())
             gRunning = false;
     }
 
@@ -724,18 +799,23 @@ void ui_callback()
     ImGui::Separator();
     ImGui::Text("Visibility:");
     bool vis = false;
-    vis |= ImGui::Checkbox("Ring pre",        &gShowRingPre);   ImGui::SameLine();
-    vis |= ImGui::Checkbox("Ring post",       &gShowRingPost);
-    vis |= ImGui::Checkbox("UV pre",          &gShowUVPre);     ImGui::SameLine();
-    vis |= ImGui::Checkbox("UV post",         &gShowUVPost);
-    vis |= ImGui::Checkbox("Arrows pre",      &gShowArrowPre);  ImGui::SameLine();
-    vis |= ImGui::Checkbox("Arrows post",     &gShowArrowPost);
-    vis |= ImGui::Checkbox("Pre→Post corr",   &gShowCorrArrows); ImGui::SameLine();
-    vis |= ImGui::Checkbox("Corr pts",        &gShowCorrPts);
-    vis |= ImGui::Checkbox("Collapsed edges", &gShowCollapsedEdge);
-    if (gHasPreMesh)
-        vis |= ImGui::Checkbox("Mesh before collapse", &gShowMeshPre);
-    vis |= ImGui::Checkbox("Fine mesh orient (red=CW, green=CCW)", &gShowOrigOrient);
+    if (gCanonicalView) {
+        vis |= ImGui::Checkbox("UV", &gShowCanonUV);
+        vis |= ImGui::Checkbox("One ring (+ non-active sheets)", &gShowCanonRing);
+    } else {
+        vis |= ImGui::Checkbox("Ring pre",        &gShowRingPre);   ImGui::SameLine();
+        vis |= ImGui::Checkbox("Ring post",       &gShowRingPost);
+        vis |= ImGui::Checkbox("UV pre",          &gShowUVPre);     ImGui::SameLine();
+        vis |= ImGui::Checkbox("UV post",         &gShowUVPost);
+        vis |= ImGui::Checkbox("Arrows pre",      &gShowArrowPre);  ImGui::SameLine();
+        vis |= ImGui::Checkbox("Arrows post",     &gShowArrowPost);
+        vis |= ImGui::Checkbox("Pre→Post corr",   &gShowCorrArrows); ImGui::SameLine();
+        vis |= ImGui::Checkbox("Corr pts",        &gShowCorrPts);
+        vis |= ImGui::Checkbox("Collapsed edges", &gShowCollapsedEdge);
+        if (gHasPreMesh)
+            vis |= ImGui::Checkbox("Mesh before collapse", &gShowMeshPre);
+        vis |= ImGui::Checkbox("Fine mesh orient (red=CW, green=CCW)", &gShowOrigOrient);
+    }
     if (vis && gSnap.valid) update_display();
 
     ImGui::Separator();
@@ -751,6 +831,65 @@ void ui_callback()
     ImGui::SameLine();
     if (ImGui::Button("Save now")) export_current_mesh();
     ImGui::TextDisabled("Auto-saved before every collapse.");
+
+    if (face_flip_tracker_enabled()) {
+        ImGui::Separator();
+        ImGui::Text("Face Flip Tracker  (face %d)", face_flip_tracker_face_idx());
+        if (face_flip_tracker_flip_detected()) {
+            ImGui::TextColored({1.0f, 0.2f, 0.2f, 1.0f},
+                "*** FLIP at collapse #%d ***", face_flip_tracker_flip_at_collapse());
+        } else {
+            ImGui::TextColored({0.3f, 1.0f, 0.4f, 1.0f}, "OK — no flip yet");
+        }
+        ImGui::TextDisabled("v0 cur: (%.3f, %.3f, %.3f)",
+            face_flip_tracker_cur_pos(0).x(),
+            face_flip_tracker_cur_pos(0).y(),
+            face_flip_tracker_cur_pos(0).z());
+        ImGui::TextDisabled("v1 cur: (%.3f, %.3f, %.3f)",
+            face_flip_tracker_cur_pos(1).x(),
+            face_flip_tracker_cur_pos(1).y(),
+            face_flip_tracker_cur_pos(1).z());
+        ImGui::TextDisabled("v2 cur: (%.3f, %.3f, %.3f)",
+            face_flip_tracker_cur_pos(2).x(),
+            face_flip_tracker_cur_pos(2).y(),
+            face_flip_tracker_cur_pos(2).z());
+    }
+
+    // ---- Vertex Watch Tracker UI ----
+    {
+        ImGui::Separator();
+        ImGui::Text("Vertex Watch Tracker");
+
+        static char gVWTInputBuf[16] = "";
+        ImGui::SetNextItemWidth(100);
+        ImGui::InputText("Fine vtx ID", gVWTInputBuf, sizeof(gVWTInputBuf),
+                         ImGuiInputTextFlags_CharsDecimal);
+        ImGui::SameLine();
+        if (ImGui::Button("Watch")) {
+            int vid = atoi(gVWTInputBuf);
+            vertex_watch_set(vid);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Clear")) {
+            vertex_watch_clear();
+            gVWTInputBuf[0] = '\0';
+        }
+
+        if (vertex_watch_active()) {
+            Eigen::Vector3i bf = vertex_watch_cur_BF();
+            ImGui::TextDisabled("vtx %d  coarse face: (%d, %d, %d)",
+                vertex_watch_fine_vtx(), bf(0), bf(1), bf(2));
+            if (vertex_watch_triggered()) {
+                ImGui::TextColored({1.0f, 0.3f, 0.1f, 1.0f},
+                    "*** HIT: fine vtx %d in one-ring of collapse #%d ***",
+                    vertex_watch_fine_vtx(), vertex_watch_trigger_at_collapse());
+            } else {
+                ImGui::TextColored({0.3f, 1.0f, 0.4f, 1.0f}, "Watching — no hit yet");
+            }
+        } else {
+            ImGui::TextDisabled("(inactive)");
+        }
+    }
 
     ImGui::End();
 }

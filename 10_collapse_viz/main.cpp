@@ -338,6 +338,9 @@ bool do_next_step()
 {
     if (gFinished) return false;
 
+    face_flip_tracker_pre_update();
+    vertex_watch_pre_step();
+
     for (int tries = 0; tries < 1'000'000; tries++) {
         if (gQ.empty() || std::get<0>(gQ.top()) == std::numeric_limits<double>::infinity()) {
             gFinished = true;
@@ -359,14 +362,15 @@ bool do_next_step()
         if (ok) {
             gCollapseCount++;
             if (gLastCollapseWasSeam) gSeamCollapseCount++;
-            sample_tracker_update();
-
             // s = survivor (lower vertex index, kept + repositioned)
             // d = absorbed  (higher index, all face refs remapped to s, then gone)
             // f1, f2 = the two flap faces NULLed out by this collapse
             // gV.row(s) is already at the new placement position at this point
             int s = std::min(gE(e,0), gE(e,1));
             int d = std::max(gE(e,0), gE(e,1));
+            vertex_watch_check_collapse(s, d);
+            sample_tracker_update();
+            face_flip_tracker_post_update();
             fprintf(stderr,
                 "[COLLAPSE #%d] e=%d  kept=v%d  gone=v%d"
                 "  new_pos=(%.4g,%.4g,%.4g)"
@@ -411,6 +415,7 @@ int main(int argc, char * argv[])
     std::string matstructPath;      // optional: path to .ma_struct file for struct-ID collapse gating
     bool        matStructCheck = false;  // --mat_struct_check: enable struct-ID collapse gate
     std::string traceVerticesPath;  // optional: text file with one fine_vertex_id per line
+    int         trackFaceFlip     = -1;  // --track_face_flip <idx>
 
 
     //usage
@@ -438,6 +443,7 @@ int main(int argc, char * argv[])
             else if (a == "--output_dir")       namedOutDir       = argv[i+1];
             else if (a == "--matstruct_path")   matstructPath     = argv[i+1];
             else if (a == "--trace_vertices")   traceVerticesPath = argv[i+1];
+            else if (a == "--track_face_flip")  trackFaceFlip     = std::stoi(argv[i+1]);
             else { continue; }
             ++i;
         }
@@ -562,6 +568,8 @@ int main(int argc, char * argv[])
         sample_tracker_set_trace(traceVerticesPath, trace_out);
     }
     sample_tracker_init(gNSamplesTotal);
+    if (trackFaceFlip >= 0)
+        face_flip_tracker_init(trackFaceFlip);
 
     print_seam_edge_costs(out_dir + "seam_edge_costs_" + stem + ".txt");
     SSP_seam_log_open((out_dir + "seam_diag_" + stem + ".txt").c_str());
