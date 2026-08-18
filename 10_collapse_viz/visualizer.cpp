@@ -658,7 +658,7 @@ static void show_canonical_view()
             vivj_pts.row(1) = gc.dc_uv_pre_3d.row(local_vj);
             polyscope::registerPointCloud("dc_vi_vj", vivj_pts)
                 ->setPointColor({1.0f, 0.3f, 0.3f})
-                ->setPointRadius(pts_radius * 2.5, false)
+                ->setPointRadius(pts_radius * 2.0, true)
                 ->setEnabled(gShowDCVertVi);
 
             // B_glued: arc endpoints shared between sheets (green)
@@ -667,7 +667,7 @@ static void show_canonical_view()
                 bg_pts.row(k) = gc.dc_uv_pre_3d.row(Bg[k]);
             polyscope::registerPointCloud("dc_B_glued", bg_pts)
                 ->setPointColor({0.2f, 1.0f, 0.3f})
-                ->setPointRadius(pts_radius * 2.5, false)
+                ->setPointRadius(pts_radius * 2.0, true)
                 ->setEnabled(gShowDCVertBglued);
 
             if (nBref > 0) {
@@ -677,7 +677,7 @@ static void show_canonical_view()
                     brt_pts.row(k) = gc.dc_uv_pre_3d.row(Brt[k]);
                 polyscope::registerPointCloud("dc_B_ref_top", brt_pts)
                     ->setPointColor({0.3f, 0.5f, 1.0f})
-                    ->setPointRadius(pts_radius * 2.5, false)
+                    ->setPointRadius(pts_radius * 2.0, true)
                     ->setEnabled(gShowDCBrefTop);
 
                 // B_reflected bottom sheet: UV rows nVjoint..nVjoint+nBref-1 (gold)
@@ -691,7 +691,7 @@ static void show_canonical_view()
                 }
                 polyscope::registerPointCloud("dc_B_ref_bot", brb_pts)
                     ->setPointColor({1.0f, 0.8f, 0.1f})
-                    ->setPointRadius(pts_radius * 2.5, false)
+                    ->setPointRadius(pts_radius * 2.0, true)
                     ->setEnabled(gShowDCBrefBot);
             }
         }
