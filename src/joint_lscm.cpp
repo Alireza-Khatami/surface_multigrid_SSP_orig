@@ -509,42 +509,65 @@ bool joint_lscm(
 			                                  V_post, UV_post_dc, FUV_post,
 			                                  vi, vj, Nsv, Ndv);
 
-			if (dc_log_count < 40) {
-				dc_log_count++;
-				if (!dc_ok) {
-					// diagnose the exact failure reason
-					bool has_nan = UV_pre_dc.array().isNaN().any() ||
-					               UV_post_dc.array().isNaN().any();
-					auto signed_area_2d = [](const Eigen::MatrixXd & UV,
-					                         const Eigen::MatrixXi & F, int fi) {
-						double ax = UV(F(fi,0),0), ay = UV(F(fi,0),1);
-						double bx = UV(F(fi,1),0), by = UV(F(fi,1),1);
-						double cx = UV(F(fi,2),0), cy = UV(F(fi,2),1);
-						return (bx-ax)*(cy-ay) - (by-ay)*(cx-ax);
-					};
-					bool pre_flip = false, post_flip = false;
-					for (int fi = 0; fi < FUV_pre.rows()  && !pre_flip;  fi++) {
-						double sa = signed_area_2d(UV_pre_dc,  FUV_pre,  fi);
-						if (sa < 1e-10 || std::isnan(sa)) pre_flip = true;
-					}
-					for (int fi = 0; fi < FUV_post.rows() && !post_flip; fi++) {
-						double sa = signed_area_2d(UV_post_dc, FUV_post, fi);
-						if (sa < 1e-10 || std::isnan(sa)) post_flip = true;
-					}
-					fprintf(dc_log(),
-					  "[DC-FAIL #%d] case=%d seam=%d vi=%d vj=%d nFpre=%d nFpost=%d nV=%d"
-					  "  nan=%d pre_flip=%d post_flip=%d\n",
-					  dc_log_count, whichCase, (int)is_seam_inj, vi, vj,
-					  (int)FUV_pre.rows(), (int)FUV_post.rows(), (int)V_pre.rows(),
-					  (int)has_nan, (int)pre_flip, (int)post_flip);
-					fflush(dc_log());
-				} else {
-					fprintf(dc_log(),
-					  "[DC-PASS #%d] case=%d seam=%d vi=%d vj=%d nFpre=%d nFpost=%d nV=%d\n",
-					  dc_log_count, whichCase, (int)is_seam_inj, vi, vj,
-					  (int)FUV_pre.rows(), (int)FUV_post.rows(), (int)V_pre.rows());
-					fflush(dc_log());
+			dc_log_count++;
+			if (!dc_ok) {
+				// diagnose the exact failure reason
+				bool has_nan = UV_pre_dc.array().isNaN().any() ||
+				               UV_post_dc.array().isNaN().any();
+				auto signed_area_2d = [](const Eigen::MatrixXd & UV,
+				                         const Eigen::MatrixXi & F, int fi) {
+					double ax = UV(F(fi,0),0), ay = UV(F(fi,0),1);
+					double bx = UV(F(fi,1),0), by = UV(F(fi,1),1);
+					double cx = UV(F(fi,2),0), cy = UV(F(fi,2),1);
+					return (bx-ax)*(cy-ay) - (by-ay)*(cx-ax);
+				};
+				bool pre_flip = false, post_flip = false;
+				for (int fi = 0; fi < FUV_pre.rows()  && !pre_flip;  fi++) {
+					double sa = signed_area_2d(UV_pre_dc,  FUV_pre,  fi);
+					if (sa < 1e-10 || std::isnan(sa)) pre_flip = true;
 				}
+				for (int fi = 0; fi < FUV_post.rows() && !post_flip; fi++) {
+					double sa = signed_area_2d(UV_post_dc, FUV_post, fi);
+					if (sa < 1e-10 || std::isnan(sa)) post_flip = true;
+				}
+				fprintf(dc_log(),
+				  "[DC-FAIL #%d] case=%d seam=%d vi=%d vj=%d nFpre=%d nFpost=%d nV=%d"
+				  "  nan=%d pre_flip=%d post_flip=%d\n",
+				  dc_log_count, whichCase, (int)is_seam_inj, vi, vj,
+				  (int)FUV_pre.rows(), (int)FUV_post.rows(), (int)V_pre.rows(),
+				  (int)has_nan, (int)pre_flip, (int)post_flip);
+				fflush(dc_log());
+			} else {
+				// Passed flip check — measure quasi-conformal distortion on the
+				// top-sheet UV to catch collapses that pass but are poorly conditioned.
+				// UV_pre_dc/UV_post_dc both have nVjoint = nV+1 rows (top-sheet only).
+				// FUV_pre uses indices 0..nV-1; FUV_post may reference index nV (vi post).
+				int nV_loc      = (int)V_pre.rows();
+				int nVjoint_loc = nV_loc + 1;
+				Eigen::MatrixXd Vpad(nVjoint_loc, 3);
+				Vpad.topRows(nV_loc) = V_pre;
+				Vpad.row(nV_loc)     = V_post.row(vi);
+
+				Eigen::VectorXd qce_pre, qce_post;
+				quasi_conformal_error(V_pre, FUV_pre,
+				                      UV_pre_dc.topRows(nV_loc),        qce_pre);
+				quasi_conformal_error(Vpad,  FUV_post,
+				                      UV_post_dc.topRows(nVjoint_loc),  qce_post);
+
+				double max_pre  = qce_pre.maxCoeff(),  mean_pre  = qce_pre.mean();
+				double max_post = qce_post.maxCoeff(), mean_post = qce_post.mean();
+				bool high_dist  = (max_pre > 3.0 || max_post > 3.0);
+
+				fprintf(dc_log(),
+				  "[DC-%s #%d] case=%d seam=%d vi=%d vj=%d nFpre=%d nFpost=%d nV=%d"
+				  "  B_glued=%d B_ref=%d"
+				  "  QCE_pre(max=%.3f mean=%.3f) QCE_post(max=%.3f mean=%.3f)\n",
+				  high_dist ? "HIGH-DISTORTION" : "PASS",
+				  dc_log_count, whichCase, (int)is_seam_inj, vi, vj,
+				  (int)FUV_pre.rows(), (int)FUV_post.rows(), (int)V_pre.rows(),
+				  (int)dc_B_glued.size(), (int)dc_B_reflected.size(),
+				  max_pre, mean_pre, max_post, mean_post);
+				fflush(dc_log());
 			}
 
 			if (dc_ok) {
