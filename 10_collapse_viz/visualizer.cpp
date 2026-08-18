@@ -561,14 +561,16 @@ static void show_canonical_view()
     polyscope::getSurfaceMesh("one_ring_post")   ->setEnabled(gShowCanonRing);
     polyscope::getPointCloud ("corr_pts")        ->setEnabled(gShowCanonRing);
     polyscope::getCurveNetwork("collapsed_edge") ->setEnabled(gShowCanonRing);
-    // UV group: UV meshes, UV points, ring sample points (pre+post), UV collapsed edge
-    polyscope::getSurfaceMesh("uv_pre")              ->setEnabled(gShowCanonUV);
-    polyscope::getSurfaceMesh("uv_post")             ->setEnabled(gShowCanonUV);
-    polyscope::getPointCloud ("uv_pre_pts")          ->setEnabled(gShowCanonUV);
-    polyscope::getPointCloud ("uv_post_pts")         ->setEnabled(gShowCanonUV);
+    // UV group: UV meshes, UV points, ring sample points (pre+post), UV collapsed edge.
+    // When DC data is present the DC overlay replaces the regular UV panels.
+    bool showRegularUV = gShowCanonUV && !gc.has_dc;
+    polyscope::getSurfaceMesh("uv_pre")              ->setEnabled(showRegularUV);
+    polyscope::getSurfaceMesh("uv_post")             ->setEnabled(showRegularUV);
+    polyscope::getPointCloud ("uv_pre_pts")          ->setEnabled(showRegularUV);
+    polyscope::getPointCloud ("uv_post_pts")         ->setEnabled(showRegularUV);
     polyscope::getPointCloud ("ring_pre_pts")        ->setEnabled(gShowCanonUV);
     polyscope::getPointCloud ("ring_post_pts")       ->setEnabled(gShowCanonUV);
-    polyscope::getCurveNetwork("uv_collapsed_edge")  ->setEnabled(gShowCanonUV);
+    polyscope::getCurveNetwork("uv_collapsed_edge")  ->setEnabled(showRegularUV);
 
     // Non-active sheet faces: faces incident to d that belong to sheets NOT
     // processed by this collapse, PLUS all extra active sheets (sheets[1...]).
