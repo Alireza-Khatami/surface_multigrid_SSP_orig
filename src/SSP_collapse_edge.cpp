@@ -709,10 +709,12 @@ bool SSP_collapse_edge(
     sd.V_pre      = V_pre_si;   // exact 3D ring geometry before collapse
     sd.V_post     = V_post_si;  // exact 3D ring geometry after collapse (survivor at p)
     sd.has_double_cover = dc_viz_si.has_data;
-    sd.FUV_dc_pre  = dc_viz_si.FUV_dc_pre;
-    sd.FUV_dc_post = dc_viz_si.FUV_dc_post;
-    sd.UV_dc_pre   = dc_viz_si.UV_dc_pre;
-    sd.UV_dc_post  = dc_viz_si.UV_dc_post;
+    sd.FUV_dc_pre    = dc_viz_si.FUV_dc_pre;
+    sd.FUV_dc_post   = dc_viz_si.FUV_dc_post;
+    sd.UV_dc_pre     = dc_viz_si.UV_dc_pre;
+    sd.UV_dc_post    = dc_viz_si.UV_dc_post;
+    sd.dc_B_glued    = dc_viz_si.B_glued;
+    sd.dc_B_reflected = dc_viz_si.B_reflected;
     data.sheets.push_back(sd);
 
     // First successful sheet → set top-level 3D data (for display and Nsv/Ndv compat)

@@ -31,10 +31,13 @@ struct SheetData
     Eigen::MatrixXd V_pre, V_post;
     // Double cover data (boundary cases: lscm_case >= 1 or seam edge).
     // FUV_dc_* has 2*nF rows: top sheet (original) then bottom sheet (reversed winding).
-    // UV_dc_* has the same nV rows as UV_pre/UV_post (shared vertex set).
+    // UV_dc_* has nVjoint_dc rows (top-sheet slots + bottom-sheet B_reflected copies).
     bool has_double_cover = false;
     Eigen::MatrixXi FUV_dc_pre, FUV_dc_post;
     Eigen::MatrixXd UV_dc_pre, UV_dc_post;
+    // B vertex classification (local one-ring indices, same space as FUV_pre/UV_pre).
+    std::vector<int> dc_B_glued;       // arc endpoints shared between DC sheets
+    std::vector<int> dc_B_reflected;   // middle arc vertices (top-sheet local indices)
 };
 
 struct single_collapse_data

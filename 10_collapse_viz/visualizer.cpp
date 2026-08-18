@@ -58,6 +58,11 @@ static bool  gShowUVPost        = false;
 // Canonical-view two-group toggles
 static bool  gShowCanonRing     = true;   // one-ring + non-active sheets
 static bool  gShowCanonUV       = true;   // UV meshes + UV collapsed edge
+// DC vertex group toggles
+static bool  gShowDCVertVi      = true;   // vi and vj (collapse endpoints)
+static bool  gShowDCVertBglued  = true;   // B_glued: arc endpoints shared between sheets
+static bool  gShowDCBrefTop     = true;   // B_reflected top-sheet copies
+static bool  gShowDCBrefBot     = true;   // B_reflected bottom-sheet copies
 static bool  gShowArrowPre      = false;
 static bool  gShowArrowPost     = false;
 static bool  gShowCorrArrows    = true;
@@ -89,6 +94,8 @@ struct DisplaySnap {
     bool has_dc = false;
     MatrixXi FUV_dc_pre, FUV_dc_post;
     MatrixXd UV_dc_pre, UV_dc_post;
+    std::vector<int> dc_B_glued;      // arc endpoint indices (local one-ring space)
+    std::vector<int> dc_B_reflected;  // middle B indices (top-sheet local indices)
 } gSnap;
 
 // ---- helpers ----
@@ -161,11 +168,13 @@ static void refresh_snap()
         gSnap.FUV_post = sd.FUV_post;
         gSnap.UV_pre   = sd.UV_pre;
         gSnap.UV_post  = sd.UV_post;
-        gSnap.has_dc       = sd.has_double_cover;
-        gSnap.FUV_dc_pre   = sd.FUV_dc_pre;
-        gSnap.FUV_dc_post  = sd.FUV_dc_post;
-        gSnap.UV_dc_pre    = sd.UV_dc_pre;
-        gSnap.UV_dc_post   = sd.UV_dc_post;
+        gSnap.has_dc          = sd.has_double_cover;
+        gSnap.FUV_dc_pre      = sd.FUV_dc_pre;
+        gSnap.FUV_dc_post     = sd.FUV_dc_post;
+        gSnap.UV_dc_pre       = sd.UV_dc_pre;
+        gSnap.UV_dc_post      = sd.UV_dc_post;
+        gSnap.dc_B_glued      = sd.dc_B_glued;
+        gSnap.dc_B_reflected  = sd.dc_B_reflected;
     }
 }
 
@@ -334,7 +343,7 @@ static DisplayGeometry compute_ring_geometry()
             A += x * u + y * v;
             B += y * u - x * v;
         }
-        double beta = std::atan2(B, A);
+        double beta = std::atan2(-B, A);  // maps UV→3D: R*(u,v)=(x,y), β = atan2(xv-yu, xu+yv)
         double cb = std::cos(beta), sb = std::sin(beta);
         Vector3d t1_new =  cb * t1 + sb * t2;
         Vector3d t2_new = -sb * t1 + cb * t2;
@@ -357,8 +366,26 @@ static DisplayGeometry compute_ring_geometry()
 
     if (gSnap.has_dc && gSnap.UV_dc_pre.rows() > 0) {
         g.has_dc = true;
-        g.dc_uv_pre_3d  = make3d(gSnap.UV_dc_pre);
-        g.dc_uv_post_3d = make3d(gSnap.UV_dc_post);
+        // Recompute center/scale from the full DC UV (includes bottom-sheet B rows)
+        // so the DC panel is centered and scaled correctly.
+        const Eigen::MatrixXd & UVdc = gSnap.UV_dc_pre;
+        double dc_u_center = (UVdc.col(0).maxCoeff() + UVdc.col(0).minCoeff()) * 0.5;
+        double dc_v_center = (UVdc.col(1).maxCoeff() + UVdc.col(1).minCoeff()) * 0.5;
+        double dc_span = std::max(UVdc.col(0).maxCoeff() - UVdc.col(0).minCoeff(),
+                                  UVdc.col(1).maxCoeff() - UVdc.col(1).minCoeff());
+        double dc_scale = (dc_span > 1e-10) ? g.ring_span / dc_span : 1.0;
+        dc_scale *= (double)gRingScale;
+        auto make3d_dc = [&](const Eigen::MatrixXd & UV) {
+            Eigen::MatrixXd P(UV.rows(), 3);
+            for (int i = 0; i < UV.rows(); i++) {
+                double u = (UV(i,0) - dc_u_center) * dc_scale;
+                double v = (UV(i,1) - dc_v_center) * dc_scale;
+                P.row(i) = (panel_center + t1*u + t2*v).transpose();
+            }
+            return P;
+        };
+        g.dc_uv_pre_3d  = make3d_dc(gSnap.UV_dc_pre);
+        g.dc_uv_post_3d = make3d_dc(gSnap.UV_dc_post);
     }
 
     // arrow vectors
@@ -544,13 +571,21 @@ static void show_canonical_view()
     polyscope::getCurveNetwork("uv_collapsed_edge")  ->setEnabled(gShowCanonUV);
 
     // Non-active sheet faces: faces incident to d that belong to sheets NOT
-    // processed by this collapse.  Rendered in purple at their pre-collapse
-    // 3D positions, rotated into the same canonical frame.  Infinity faces skipped.
+    // processed by this collapse, PLUS all extra active sheets (sheets[1...]).
+    //
+    // Why include extra active sheets here: for a seam collapse every sheet that
+    // contains the seam edge has BOTH endpoints and becomes "active" (LSCM runs for
+    // each).  Their faces all go into FIdx_combined inside SSP_collapse_edge, so they
+    // are excluded from data.non_active_faces even though they are NOT the primary
+    // sheet shown in the one-ring/UV panels.  We fold them in explicitly so all
+    // non-primary-sheet faces appear together in this purple overlay.
     if (!gDecInfo.empty()) {
-        const auto & naf_list = gDecInfo.back().non_active_faces;
+        const auto & collapse = gDecInfo.back();
         std::vector<std::array<double,3>> verts;
         std::vector<std::array<int,3>>    faces;
-        for (const auto & naf : naf_list) {
+
+        // (a) d's faces in truly inactive sheets (classic non-active faces)
+        for (const auto & naf : collapse.non_active_faces) {
             if (naf.is_infinity_face) continue;
             if (!naf.p0.allFinite() || !naf.p1.allFinite() || !naf.p2.allFinite()) continue;
             int base = (int)verts.size();
@@ -560,6 +595,27 @@ static void show_canonical_view()
             }
             faces.push_back({base, base+1, base+2});
         }
+
+        // (b) extra active sheets (sheets[1...]) — seam collapses only.
+        // Their pre-collapse one-ring faces, transformed into the canonical frame.
+        for (int si = 1; si < (int)collapse.sheets.size(); si++) {
+            const SheetData & es = collapse.sheets[si];
+            for (int fi = 0; fi < es.FUV_pre.rows(); fi++) {
+                int i0 = es.FUV_pre(fi,0), i1 = es.FUV_pre(fi,1), i2 = es.FUV_pre(fi,2);
+                if (i0 >= es.V_pre.rows() || i1 >= es.V_pre.rows() || i2 >= es.V_pre.rows()) continue;
+                Vector3d p0 = es.V_pre.row(i0).transpose();
+                Vector3d p1 = es.V_pre.row(i1).transpose();
+                Vector3d p2 = es.V_pre.row(i2).transpose();
+                if (!p0.allFinite() || !p1.allFinite() || !p2.allFinite()) continue;
+                int base = (int)verts.size();
+                for (const Vector3d & pt : {p0, p1, p2}) {
+                    Vector3d rp = R * (pt - g.centroid);
+                    verts.push_back({rp.x(), rp.y(), rp.z()});
+                }
+                faces.push_back({base, base+1, base+2});
+            }
+        }
+
         if (!faces.empty()) {
             MatrixXd nafV((int)verts.size(), 3);
             MatrixXi nafF((int)faces.size(), 3);
@@ -586,6 +642,59 @@ static void show_canonical_view()
             ->setSurfaceColor({0.85f, 0.65f, 0.2f})   // amber — top+bottom sheet post
             ->setEdgeWidth(1.0)->setSmoothShade(false)->setTransparency(0.45f)
             ->setEnabled(gShowCanonUV);
+
+        // DC vertex group point clouds — use pre-computed B classification from LSCM.
+        if (gc.dc_uv_pre_3d.rows() > 0 &&
+            !gSnap.dc_B_glued.empty()) {
+            int nVjoint = (int)gSnap.V_pre.rows() + 1;  // UV index space: 0..nV-1 + post-vi at nV
+            const auto & Bg  = gSnap.dc_B_glued;
+            const auto & Brt = gSnap.dc_B_reflected;
+            int nBref = (int)Brt.size();
+
+            // vi / vj (red) — use local one-ring indices (gSnap.b), not global gSnap.vi/vj
+            int local_vi = gSnap.b(0), local_vj = gSnap.b(1);
+            MatrixXd vivj_pts(2, 3);
+            vivj_pts.row(0) = gc.dc_uv_pre_3d.row(local_vi);
+            vivj_pts.row(1) = gc.dc_uv_pre_3d.row(local_vj);
+            polyscope::registerPointCloud("dc_vi_vj", vivj_pts)
+                ->setPointColor({1.0f, 0.3f, 0.3f})
+                ->setPointRadius(pts_radius * 2.5, false)
+                ->setEnabled(gShowDCVertVi);
+
+            // B_glued: arc endpoints shared between sheets (green)
+            MatrixXd bg_pts((int)Bg.size(), 3);
+            for (int k = 0; k < (int)Bg.size(); k++)
+                bg_pts.row(k) = gc.dc_uv_pre_3d.row(Bg[k]);
+            polyscope::registerPointCloud("dc_B_glued", bg_pts)
+                ->setPointColor({0.2f, 1.0f, 0.3f})
+                ->setPointRadius(pts_radius * 2.5, false)
+                ->setEnabled(gShowDCVertBglued);
+
+            if (nBref > 0) {
+                // B_reflected top sheet (blue)
+                MatrixXd brt_pts(nBref, 3);
+                for (int k = 0; k < nBref; k++)
+                    brt_pts.row(k) = gc.dc_uv_pre_3d.row(Brt[k]);
+                polyscope::registerPointCloud("dc_B_ref_top", brt_pts)
+                    ->setPointColor({0.3f, 0.5f, 1.0f})
+                    ->setPointRadius(pts_radius * 2.5, false)
+                    ->setEnabled(gShowDCBrefTop);
+
+                // B_reflected bottom sheet: UV rows nVjoint..nVjoint+nBref-1 (gold)
+                MatrixXd brb_pts(nBref, 3);
+                for (int k = 0; k < nBref; k++) {
+                    int bot_idx = nVjoint + k;
+                    if (bot_idx < (int)gc.dc_uv_pre_3d.rows())
+                        brb_pts.row(k) = gc.dc_uv_pre_3d.row(bot_idx);
+                    else
+                        brb_pts.row(k).setZero();
+                }
+                polyscope::registerPointCloud("dc_B_ref_bot", brb_pts)
+                    ->setPointColor({1.0f, 0.8f, 0.1f})
+                    ->setPointRadius(pts_radius * 2.5, false)
+                    ->setEnabled(gShowDCBrefBot);
+            }
+        }
     }
 
     sample_tracker_show_canonical(gc.uv_pre_3d, gc.uv_post_3d, gSnap.FUV_pre, gSnap.FUV_post);
@@ -859,6 +968,22 @@ void ui_callback()
     if (gCanonicalView) {
         vis |= ImGui::Checkbox("UV", &gShowCanonUV);
         vis |= ImGui::Checkbox("One ring (+ non-active sheets)", &gShowCanonRing);
+        if (gSnap.has_dc) {
+            ImGui::Separator();
+            ImGui::Text("DC vertex groups:");
+            // vi / vj row
+            vis |= ImGui::Checkbox("vi / vj", &gShowDCVertVi);
+            ImGui::SameLine(); ImGui::TextColored({1.0f, 0.3f, 0.3f, 1.0f}, "[red]");
+            // B_glued row
+            vis |= ImGui::Checkbox("B0 / Bn  (arc endpoints, glued)", &gShowDCVertBglued);
+            ImGui::SameLine(); ImGui::TextColored({0.2f, 1.0f, 0.3f, 1.0f}, "[green]");
+            // B_reflected top row
+            vis |= ImGui::Checkbox("B_mid  top sheet", &gShowDCBrefTop);
+            ImGui::SameLine(); ImGui::TextColored({0.3f, 0.5f, 1.0f, 1.0f}, "[blue]");
+            // B_reflected bot row
+            vis |= ImGui::Checkbox("B_mid  bottom sheet", &gShowDCBrefBot);
+            ImGui::SameLine(); ImGui::TextColored({1.0f, 0.8f, 0.1f, 1.0f}, "[gold]");
+        }
     } else {
         vis |= ImGui::Checkbox("Ring pre",        &gShowRingPre);   ImGui::SameLine();
         vis |= ImGui::Checkbox("Ring post",       &gShowRingPost);

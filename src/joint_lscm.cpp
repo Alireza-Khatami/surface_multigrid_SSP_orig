@@ -1,5 +1,11 @@
 #include "joint_lscm.h"
 
+// All DC-related log messages go to dc_log.txt in the working directory.
+static FILE* dc_log() {
+    static FILE* f = fopen("dc_log.txt", "w");
+    return f ? f : stderr;
+}
+
 void build_double_cover_faces(
     const Eigen::MatrixXi & F,
     Eigen::MatrixXi & F_dc)
@@ -21,72 +27,229 @@ void joint_lscm_double_cover(
     const Eigen::MatrixXi & FUV_post,
     const int & vi,
     const int & vj,
+    const std::set<int> & mesh_bd_verts,  // currently unused; caller passes {vi,vj}
     const bool isDebug,
     Eigen::MatrixXd & UV_pre,
     Eigen::MatrixXd & UV_post,
     Eigen::MatrixXi & FUV_dc_pre,
     Eigen::MatrixXi & FUV_dc_post,
     Eigen::MatrixXd & UV_dc_pre,
-    Eigen::MatrixXd & UV_dc_post)
+    Eigen::MatrixXd & UV_dc_post,
+    std::vector<int> & out_B_glued,
+    std::vector<int> & out_B_reflected)
 {
     using namespace Eigen;
     using namespace std;
 
-    int nV = V_pre.rows();
-    // Add one extra vertex for the post-collapse position of vi (same as case 0).
-    int nVjoint = nV + 1;
+    int nV      = V_pre.rows();
+    int nVjoint = nV + 1;   // slot nV = vi's post-collapse 3D position
 
+    // --- Build Vjoint: rows 0..nV-1 from V_pre, row nV from V_post.row(vi) ---
     MatrixXd Vjoint(nVjoint, 3);
-    VectorXi I = VectorXi::LinSpaced(nV, 0, nV - 1);
-    igl::slice_into(V_pre, I, 1, Vjoint);
+    for (int i = 0; i < nV; i++) Vjoint.row(i) = V_pre.row(i);
     Vjoint.row(nV) = V_post.row(vi);
 
-    MatrixXd Vjoint_pre = Vjoint;
-    MatrixXd Vjoint_post = Vjoint;
-
-    // Remap vi → nV in post face connectivity.
+    // --- Remap vi → nV in post face connectivity ---
     MatrixXi Fjoint_pre  = FUV_pre;
     MatrixXi Fjoint_post = FUV_post;
     for (int r = 0; r < Fjoint_post.rows(); r++)
         for (int c = 0; c < 3; c++)
             if (Fjoint_post(r, c) == vi) Fjoint_post(r, c) = nV;
 
-    // Build double covers: [original faces; reversed faces].
-    MatrixXi Fjoint_dc_pre, Fjoint_dc_post;
-    build_double_cover_faces(Fjoint_pre,  Fjoint_dc_pre);
-    build_double_cover_faces(Fjoint_post, Fjoint_dc_post);
+    // =========================================================================
+    // DC construction: reflected-B double cover
+    //
+    // The one-ring boundary loop has two arcs:
+    //   boundary arc : vi → vj   (the collapsing edge, on the actual mesh boundary)
+    //   interior arc : vj → B1 → B2 → … → Bn → vi   (B = mesh-interior vertices)
+    //
+    // Glued (shared between DC top and bottom sheets): vi, vj, B_arc[0], B_arc.back()
+    //   → after gluing, vi and vj become TRUE interior vertices of the combined mesh.
+    //
+    // Duplicated with separate UV slots:  B_arc[1..end-1]  (the "middle" B vertices)
+    //   → B_top stays at original index; B_bot gets a new index nVjoint+k.
+    //   → Same 3D position for both — the reversed winding naturally pulls B_bot
+    //     to the opposite side of the diamond in UV space.
+    //
+    // Combined mesh boundary (the UV frame):
+    //   B_arc[0] — B1_top — … — B_arc.back() — Bn_bot — … — B1_bot — B_arc[0]
+    //
+    // TODO (Part 4): The UV frame is now defined by the B vertices, not vi/vj.
+    //   check_valid_UV_lscm is frame-invariant so it still applies. Downstream
+    //   callers that interpret vi/vj absolute UV positions need updating.
+    // =========================================================================
 
-    // 2-point pinning: vi → (0,0), vj → (1,0) (same anchor as case 0).
+    // --- Step 1: Boundary loop and B-arc extraction ---
+    VectorXi bdLoop_eig;
+    igl::boundary_loop(Fjoint_pre, bdLoop_eig);
+    int n_loop = (int)bdLoop_eig.size();
+    vector<int> bdLoop(bdLoop_eig.data(), bdLoop_eig.data() + n_loop);
+
+    auto nan_skip = [&](const char* reason) {
+        fprintf(dc_log(), "[DC-SKIP] vi=%d vj=%d nV=%d: %s\n", vi, vj, nV, reason);
+        fflush(dc_log());
+        UV_pre  = MatrixXd::Constant(nV, 2, numeric_limits<double>::quiet_NaN());
+        UV_post = UV_pre;
+    };
+
+    int vi_pos = -1, vj_pos = -1;
+    for (int i = 0; i < n_loop; i++) {
+        if (bdLoop[i] == vi) vi_pos = i;
+        if (bdLoop[i] == vj) vj_pos = i;
+    }
+    if (vi_pos < 0 || vj_pos < 0) { nan_skip("vi or vj not in boundary loop"); return; }
+
+    // Walk the interior arc from vj+1 forward to vi (exclusive).
+    // If vi is immediately after vj, the arc goes the other way (vi+1 → vj).
+    vector<int> B_arc;
+    {
+        int start = (vj_pos + 1) % n_loop;
+        if (start == vi_pos) {
+            // vi immediately follows vj → B arc goes the other direction
+            int cur = (vi_pos + 1) % n_loop;
+            while (cur != vj_pos) { B_arc.push_back(bdLoop[cur]); cur = (cur+1)%n_loop; }
+            reverse(B_arc.begin(), B_arc.end());  // keep B_arc[0] = vj-adjacent
+        } else {
+            int cur = start;
+            while (cur != vi_pos) { B_arc.push_back(bdLoop[cur]); cur = (cur+1)%n_loop; }
+        }
+    }
+    // B_arc[0]    = B vertex adjacent to vj  (glued)
+    // B_arc.back()= B vertex adjacent to vi  (glued)
+    // B_arc[1..end-1] = middle B vertices    (duplicated)
+
+    if ((int)B_arc.size() < 3) {
+        nan_skip("interior B arc has fewer than 3 vertices (need ≥1 middle B to duplicate)");
+        return;
+    }
+
+    vector<int> B_glued    = { B_arc.front(), B_arc.back() };
+    vector<int> B_reflected(B_arc.begin() + 1, B_arc.end() - 1);
+    out_B_glued    = B_glued;
+    out_B_reflected = B_reflected;
+
+    if (isDebug) {
+        fprintf(dc_log(), "[DC] vi=%d vj=%d  B_arc(%d):", vi, vj, (int)B_arc.size());
+        for (int b : B_arc) fprintf(dc_log(), " %d", b);
+        fprintf(dc_log(), "\n[DC] B_glued: %d %d  |  B_reflected(%d):",
+                B_glued[0], B_glued[1], (int)B_reflected.size());
+        for (int b : B_reflected) fprintf(dc_log(), " %d", b);
+        fprintf(dc_log(), "\n");
+    }
+
+    // --- Step 2: UV variable layout ---
+    // slots 0..nVjoint-1        : original joint vertices (top sheet, shared glue)
+    // slots nVjoint..nVjoint_dc-1 : bottom-sheet copies of B_reflected[k]
+    int nVjoint_dc = nVjoint + (int)B_reflected.size();
+
+    // bot_remap: maps B_reflected[k] original index → new bottom-sheet UV slot nVjoint+k
+    unordered_map<int,int> bot_remap;
+    for (int k = 0; k < (int)B_reflected.size(); k++)
+        bot_remap[B_reflected[k]] = nVjoint + k;
+
+    if (isDebug) {
+        fprintf(dc_log(), "[DC] bot_remap (top_idx->bot_idx): ");
+        for (auto& kv : bot_remap) fprintf(dc_log(), "%d->%d  ", kv.first, kv.second);
+        fprintf(dc_log(), "\n[DC] nVjoint=%d  nVjoint_dc=%d\n", nVjoint, nVjoint_dc);
+    }
+
+    // --- Step 3: Build Vjoint_dc ---
+    // Bottom-sheet B_reflected copies keep the SAME 3D position as the originals.
+    // The reversed winding of the bottom faces pulls them to the opposite side of
+    // the diamond in UV space — no explicit 3D reflection needed.
+    MatrixXd Vjoint_dc(nVjoint_dc, 3);
+    Vjoint_dc.topRows(nVjoint) = Vjoint;
+    for (int k = 0; k < (int)B_reflected.size(); k++)
+        Vjoint_dc.row(nVjoint + k) = Vjoint.row(B_reflected[k]);
+
+    // --- Step 4: Build DC face matrices ---
+    // Top faces : original indices, original winding.
+    // Bottom faces: swap cols 1↔2 (reverse winding), remap B_reflected → bot indices.
+    auto make_bot_face = [&](int a, int b_v, int c) -> Vector3i {
+        auto remap = [&](int v) -> int {
+            auto it = bot_remap.find(v);
+            return (it != bot_remap.end()) ? it->second : v;
+        };
+        return Vector3i(remap(a), remap(c), remap(b_v));  // reversed winding
+    };
+
+    int nF_pre  = Fjoint_pre.rows();
+    int nF_post = Fjoint_post.rows();
+    MatrixXi Fdc_pre(2*nF_pre, 3), Fdc_post(2*nF_post, 3);
+
+    Fdc_pre.topRows(nF_pre)   = Fjoint_pre;
+    Fdc_post.topRows(nF_post) = Fjoint_post;
+    for (int r = 0; r < nF_pre; r++)
+        Fdc_pre.row(nF_pre   + r) = make_bot_face(Fjoint_pre(r,0),  Fjoint_pre(r,1),  Fjoint_pre(r,2));
+    for (int r = 0; r < nF_post; r++)
+        Fdc_post.row(nF_post + r) = make_bot_face(Fjoint_post(r,0), Fjoint_post(r,1), Fjoint_post(r,2));
+
+    // --- Step 5: Pinning ---
+    // Pin B_reflected[0] top (original index) and its bottom copy (nVjoint+0).
+    // These are opposite poles of the diamond → well-separated pins for the LSCM frame.
+    // Indices in [U-block (0..nVjoint_dc-1); V-block (nVjoint_dc..2*nVjoint_dc-1)]:
+    int pin_top = B_reflected[0];          // original UV index (top sheet)
+    int pin_bot = nVjoint;                 // = nVjoint + 0 (bottom copy of B_reflected[0])
+
     VectorXi b_UV(4);
     VectorXd bc_UV(4);
-    b_UV  << vi, vj, vi + nVjoint, vj + nVjoint;
-    bc_UV << 0,  1,  0,            0;
+    b_UV  << pin_top,              nVjoint_dc + pin_top,
+             pin_bot,              nVjoint_dc + pin_bot;
+    bc_UV << 0.0,                  0.0,
+             1.0,                  0.0;
+    // → pin_top at UV(col1=0, col0=0) = UV(0,0) ; pin_bot at UV(col1=1, col0=0) = UV(0,1)
 
+    if (isDebug) {
+        fprintf(dc_log(), "[DC] pinning: B_ref[0]_top(idx=%d)->UV(0,0)  "
+                        "B_ref[0]_bot(idx=%d)->UV(0,1)\n", pin_top, pin_bot);
+    }
+
+    // --- Step 6: Solve ---
     VectorXd UVjoint_flat;
-    flatten(Vjoint_pre, Fjoint_dc_pre, Vjoint_post, Fjoint_dc_post,
-            b_UV, bc_UV, nVjoint, isDebug, UVjoint_flat);
+    flatten(Vjoint_dc, Fdc_pre, Vjoint_dc, Fdc_post,
+            b_UV, bc_UV, nVjoint_dc, isDebug, UVjoint_flat);
 
-    // Reshape flat → nVjoint × 2.
-    MatrixXd UVjoint(nVjoint, 2);
-    for (unsigned col = 0; col < (unsigned)UVjoint.cols(); col++)
-        UVjoint.col(UVjoint.cols() - col - 1) =
-            UVjoint_flat.block(UVjoint.rows() * col, 0, UVjoint.rows(), 1);
+    // Reshape flat [U-block; V-block] → nVjoint_dc×2 matrix.
+    // flatten stores [first-coord; second-coord]; col(1) = first, col(0) = second.
+    MatrixXd UVjoint(nVjoint_dc, 2);
+    for (int col = 0; col < 2; col++)
+        UVjoint.col(1 - col) = UVjoint_flat.segment(nVjoint_dc * col, nVjoint_dc);
 
-    // UV_pre: rows 0..nV-1.
-    VectorXi Iall = VectorXi::LinSpaced(nV, 0, nV - 1);
-    igl::slice(UVjoint, Iall, 1, UV_pre);
-
-    // UV_post: same as UV_pre, vi row replaced by the collapsed position UV.
+    // --- Step 7: Extract UV_pre and UV_post ---
+    UV_pre = UVjoint.topRows(nV);           // top-sheet rows 0..nV-1
     UV_post = UV_pre;
-    UV_post.row(vi) = UVjoint.row(nV);
+    UV_post.row(vi) = UVjoint.row(nV);      // vi's post-collapse UV from slot nV
 
-    // Double cover faces for visualization (using original FUV indices, not Fjoint).
-    build_double_cover_faces(FUV_pre,  FUV_dc_pre);
-    build_double_cover_faces(FUV_post, FUV_dc_post);
+    // --- Step 8: DC visualization (full double cover, both sheets) ---
+    // Use the actual DC face matrices so the visualizer can see the bottom-sheet
+    // B_reflected vertices (indices nVjoint..nVjoint_dc-1) in UV space.
+    // UVjoint has nVjoint_dc rows — one UV per top-sheet slot AND per bottom-sheet copy.
+    FUV_dc_pre  = Fdc_pre;
+    FUV_dc_post = Fdc_post;
+    UV_dc_pre   = UVjoint;   // full nVjoint_dc×2 (includes bottom-sheet B UV positions)
+    UV_dc_post  = UVjoint;
 
-    // UV for viz: same nV rows (FUV_dc uses original 0..nV-1 indices including vi).
-    UV_dc_pre  = UV_pre;
-    UV_dc_post = UV_post;
+    if (isDebug) {
+        auto pUV = [&](const char* lbl, int idx) {
+            if (idx < (int)UVjoint.rows())
+                fprintf(dc_log(), "  %-22s idx=%-4d UV=(%.4f, %.4f)\n",
+                        lbl, idx, UVjoint(idx,0), UVjoint(idx,1));
+        };
+        fprintf(dc_log(), "[DC] UV results:\n");
+        pUV("vi",             vi);
+        pUV("vj",             vj);
+        pUV("nV(vi_post)",    nV);
+        pUV("B_glued[0]",     B_glued[0]);
+        pUV("B_glued[1]",     B_glued[1]);
+        for (int k = 0; k < (int)B_reflected.size(); k++) {
+            char lbl[64];
+            snprintf(lbl, sizeof(lbl), "B_ref[%d]_top", k);
+            pUV(lbl, B_reflected[k]);
+            snprintf(lbl, sizeof(lbl), "B_ref[%d]_bot", k);
+            pUV(lbl, nVjoint + k);
+        }
+        fflush(dc_log());
+    }
 }
 
 bool joint_lscm(
@@ -333,10 +496,14 @@ bool joint_lscm(
 			Eigen::MatrixXi dc_F_pre, dc_F_post;
 			Eigen::MatrixXd dc_UV_pre, dc_UV_post;
 			Eigen::MatrixXd UV_pre_dc, UV_post_dc;
+			std::vector<int> dc_B_glued, dc_B_reflected;
+			// TODO: pass full global mesh boundary set so B-arc filtering is accurate.
+			std::set<int> mesh_bd_verts_dc = {vi, vj};
 			joint_lscm_double_cover(V_pre, FUV_pre, V_post, FUV_post,
-			                        vi, vj, isDebug,
+			                        vi, vj, mesh_bd_verts_dc, isDebug,
 			                        UV_pre_dc, UV_post_dc,
-			                        dc_F_pre, dc_F_post, dc_UV_pre, dc_UV_post);
+			                        dc_F_pre, dc_F_post, dc_UV_pre, dc_UV_post,
+			                        dc_B_glued, dc_B_reflected);
 
 			bool dc_ok = check_valid_UV_lscm(V_pre, UV_pre_dc, FUV_pre,
 			                                  V_post, UV_post_dc, FUV_post,
@@ -364,17 +531,19 @@ bool joint_lscm(
 						double sa = signed_area_2d(UV_post_dc, FUV_post, fi);
 						if (sa < 1e-10 || std::isnan(sa)) post_flip = true;
 					}
-					fprintf(stderr,
+					fprintf(dc_log(),
 					  "[DC-FAIL #%d] case=%d seam=%d vi=%d vj=%d nFpre=%d nFpost=%d nV=%d"
 					  "  nan=%d pre_flip=%d post_flip=%d\n",
 					  dc_log_count, whichCase, (int)is_seam_inj, vi, vj,
 					  (int)FUV_pre.rows(), (int)FUV_post.rows(), (int)V_pre.rows(),
 					  (int)has_nan, (int)pre_flip, (int)post_flip);
+					fflush(dc_log());
 				} else {
-					fprintf(stderr,
+					fprintf(dc_log(),
 					  "[DC-PASS #%d] case=%d seam=%d vi=%d vj=%d nFpre=%d nFpost=%d nV=%d\n",
 					  dc_log_count, whichCase, (int)is_seam_inj, vi, vj,
 					  (int)FUV_pre.rows(), (int)FUV_post.rows(), (int)V_pre.rows());
+					fflush(dc_log());
 				}
 			}
 
@@ -387,6 +556,8 @@ bool joint_lscm(
 					dc_viz->FUV_dc_post = dc_F_post;
 					dc_viz->UV_dc_pre   = dc_UV_pre;
 					dc_viz->UV_dc_post  = dc_UV_post;
+					dc_viz->B_glued     = dc_B_glued;
+					dc_viz->B_reflected = dc_B_reflected;
 				}
 			} else {
 				// DC failed — fall back to original handler.

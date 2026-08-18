@@ -30,14 +30,22 @@
 #include <stdlib.h>
 #include <limits>
 #include <cmath>
+#include <set>
+#include <unordered_map>
 
 // Double cover visualization data — populated for boundary LSCM cases (lscm_case >= 1).
 // FUV_dc_* has 2*nF rows (top sheet original + bottom sheet reversed winding).
-// UV_dc_* has nV rows (same vertex set as UV_pre/UV_post).
+// UV_dc_* has nVjoint_dc rows (top-sheet slots + bottom-sheet B_reflected copies).
 struct DCVizData {
     bool has_data = false;
     Eigen::MatrixXi FUV_dc_pre, FUV_dc_post;
     Eigen::MatrixXd UV_dc_pre, UV_dc_post;
+    // B vertex classification (local one-ring indices, same space as FUV_pre/UV_pre).
+    // B_glued: arc endpoints shared between both DC sheets.
+    // B_reflected: middle arc vertices — top-sheet copies keep original index;
+    //   bottom-sheet copies are at UV_dc rows nVjoint+k = (V_pre.rows()+1)+k.
+    std::vector<int> B_glued;
+    std::vector<int> B_reflected;
 };
 
 // Build double cover: F_dc = [F; F_reversed] where F_reversed swaps columns 1 and 2.
@@ -47,8 +55,22 @@ void build_double_cover_faces(
     Eigen::MatrixXi & F_dc);
 
 // Joint LSCM using double cover for boundary cases (replaces cases 1 & 2).
-// Builds double covers of pre and post one-rings, then solves with 2-point pinning:
-//   vi pinned to UV (0,0), vj pinned to UV (1,0).
+//
+// Strategy (B-vertex seam):
+//   mesh_bd_verts  — actual mesh boundary vertices in the one-ring (local indices).
+//                    Caller passes at least {vi, vj}; ideally the full global boundary
+//                    set (TODO: wire up global boundary data from the caller).
+//   B vertices     — all one-ring vertices NOT in mesh_bd_verts.
+//                    They form the seam: shared between DC top and bottom sheets AND
+//                    shared between pre/post joint meshes (the joint-LSCM coupling).
+//   vi / vj / nV   — get separate UV slots on the bottom DC sheet (free variables).
+//   Pinning        — all B vertices are pinned to a unit semicircle arc in UV space
+//                    (evenly distributed between (0,0) and (1,0) via the arc top).
+//                    vi/vj are free → LSCM finds their conformal positions.
+//
+// If fewer than 2 B vertices exist the function sets UV_pre/UV_post to NaN and
+// emits a [DC-SKIP] log so the caller's fallback runs.
+//
 // UV_pre, UV_post: UV coords for original (top-sheet) faces only.
 // FUV_dc_pre/post, UV_dc_pre/post: full double cover for visualization.
 void joint_lscm_double_cover(
@@ -58,13 +80,16 @@ void joint_lscm_double_cover(
     const Eigen::MatrixXi & FUV_post,
     const int & vi,
     const int & vj,
+    const std::set<int> & mesh_bd_verts,
     const bool isDebug,
     Eigen::MatrixXd & UV_pre,
     Eigen::MatrixXd & UV_post,
     Eigen::MatrixXi & FUV_dc_pre,
     Eigen::MatrixXi & FUV_dc_post,
     Eigen::MatrixXd & UV_dc_pre,
-    Eigen::MatrixXd & UV_dc_post);
+    Eigen::MatrixXd & UV_dc_post,
+    std::vector<int> & out_B_glued,
+    std::vector<int> & out_B_reflected);
 
 // Compute a joinit Least-squares conformal map parametrization for the edge onering mesh before an edge collapse (V_pre, FUV_pre)and the vertex onering mesh after the collapse (V_post, FUV_post). We constrain both meshes to have the same boundary curve for bijectivity
 //
