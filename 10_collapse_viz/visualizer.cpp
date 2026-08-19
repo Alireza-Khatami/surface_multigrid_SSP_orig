@@ -472,6 +472,50 @@ static void register_ring_geometry(const DisplayGeometry & g)
             ->setRadius(edge_radius)->setColor({1.0f, 0.05f, 0.05f})
             ->setEnabled(gShowCollapsedEdge);
     }
+
+    // DC vertex group point clouds on UV-pre and ring-pre coordinate spaces.
+    // Only registered in the regular (non-canonical) view; canonical view handles
+    // these separately in dc_uv_pre_3d space.
+    if (!gCanonicalView && gSnap.has_dc && !gSnap.dc_B_glued.empty()) {
+        const float dc_r = 0.016f;
+        const auto & Bg  = gSnap.dc_B_glued;
+        const auto & Brt = gSnap.dc_B_reflected;
+        int nBref = (int)Brt.size();
+        int lvi = gSnap.b(0), lvj = gSnap.b(1);
+
+        // vi / vj — red
+        MatrixXd vivj_uv(2, 3), vivj_ring(2, 3);
+        vivj_uv.row(0) = g.uv_pre_3d.row(lvi);   vivj_uv.row(1) = g.uv_pre_3d.row(lvj);
+        vivj_ring.row(0) = g.V_ring.row(lvi);     vivj_ring.row(1) = g.V_ring.row(lvj);
+        polyscope::registerPointCloud("dc_vi_vj_uv",   vivj_uv)
+            ->setPointColor({1.0f, 0.3f, 0.3f})->setPointRadius(dc_r, true)->setEnabled(gShowDCVertVi);
+        polyscope::registerPointCloud("dc_vi_vj_ring", vivj_ring)
+            ->setPointColor({1.0f, 0.3f, 0.3f})->setPointRadius(dc_r, true)->setEnabled(gShowDCVertVi);
+
+        // B_glued — green
+        MatrixXd bg_uv((int)Bg.size(), 3), bg_ring((int)Bg.size(), 3);
+        for (int k = 0; k < (int)Bg.size(); k++) {
+            bg_uv.row(k)   = g.uv_pre_3d.row(Bg[k]);
+            bg_ring.row(k) = g.V_ring.row(Bg[k]);
+        }
+        polyscope::registerPointCloud("dc_B_glued_uv",   bg_uv)
+            ->setPointColor({0.2f, 1.0f, 0.3f})->setPointRadius(dc_r, true)->setEnabled(gShowDCVertBglued);
+        polyscope::registerPointCloud("dc_B_glued_ring", bg_ring)
+            ->setPointColor({0.2f, 1.0f, 0.3f})->setPointRadius(dc_r, true)->setEnabled(gShowDCVertBglued);
+
+        if (nBref > 0) {
+            // B_reflected top sheet — blue (same 3D position as bot in ring view)
+            MatrixXd brt_uv(nBref, 3), brt_ring(nBref, 3);
+            for (int k = 0; k < nBref; k++) {
+                brt_uv.row(k)   = g.uv_pre_3d.row(Brt[k]);
+                brt_ring.row(k) = g.V_ring.row(Brt[k]);
+            }
+            polyscope::registerPointCloud("dc_B_ref_top_uv",   brt_uv)
+                ->setPointColor({0.3f, 0.5f, 1.0f})->setPointRadius(dc_r, true)->setEnabled(gShowDCBrefTop);
+            polyscope::registerPointCloud("dc_B_ref_top_ring", brt_ring)
+                ->setPointColor({0.3f, 0.5f, 1.0f})->setPointRadius(dc_r, true)->setEnabled(gShowDCBrefTop);
+        }
+    }
 }
 
 // ---- canonical view ----
@@ -746,7 +790,7 @@ static void show_canonical_view()
             vivj_pts.row(1) = gc.dc_uv_pre_3d.row(local_vj);
             polyscope::registerPointCloud("dc_vi_vj", vivj_pts)
                 ->setPointColor({1.0f, 0.3f, 0.3f})
-                ->setPointRadius(pts_radius * 2.0, true)
+                ->setPointRadius(0.016f, true)
                 ->setEnabled(gShowDCVertVi);
 
             // B_glued: arc endpoints shared between sheets (green)
@@ -755,7 +799,7 @@ static void show_canonical_view()
                 bg_pts.row(k) = gc.dc_uv_pre_3d.row(Bg[k]);
             polyscope::registerPointCloud("dc_B_glued", bg_pts)
                 ->setPointColor({0.2f, 1.0f, 0.3f})
-                ->setPointRadius(pts_radius * 2.0, true)
+                ->setPointRadius(0.016f, true)
                 ->setEnabled(gShowDCVertBglued);
 
             if (nBref > 0) {
@@ -765,7 +809,7 @@ static void show_canonical_view()
                     brt_pts.row(k) = gc.dc_uv_pre_3d.row(Brt[k]);
                 polyscope::registerPointCloud("dc_B_ref_top", brt_pts)
                     ->setPointColor({0.3f, 0.5f, 1.0f})
-                    ->setPointRadius(pts_radius * 2.0, true)
+                    ->setPointRadius(0.016f, true)
                     ->setEnabled(gShowDCBrefTop);
 
                 // B_reflected bottom sheet: UV rows nVjoint..nVjoint+nBref-1 (gold)
@@ -779,7 +823,7 @@ static void show_canonical_view()
                 }
                 polyscope::registerPointCloud("dc_B_ref_bot", brb_pts)
                     ->setPointColor({1.0f, 0.8f, 0.1f})
-                    ->setPointRadius(pts_radius * 2.0, true)
+                    ->setPointRadius(0.016f, true)
                     ->setEnabled(gShowDCBrefBot);
             }
         }
@@ -1109,6 +1153,16 @@ void ui_callback()
         if (gHasPreMesh)
             vis |= ImGui::Checkbox("Mesh before collapse", &gShowMeshPre);
         vis |= ImGui::Checkbox("Fine mesh orient (red=CW, green=CCW)", &gShowOrigOrient);
+        if (gSnap.has_dc) {
+            ImGui::Separator();
+            ImGui::Text("DC vertex groups (UV pre + ring pre):");
+            vis |= ImGui::Checkbox("vi / vj##reg", &gShowDCVertVi);
+            ImGui::SameLine(); ImGui::TextColored({1.0f, 0.3f, 0.3f, 1.0f}, "[red]");
+            vis |= ImGui::Checkbox("B0 / Bn  (arc endpoints)##reg", &gShowDCVertBglued);
+            ImGui::SameLine(); ImGui::TextColored({0.2f, 1.0f, 0.3f, 1.0f}, "[green]");
+            vis |= ImGui::Checkbox("B_mid  (top sheet)##reg", &gShowDCBrefTop);
+            ImGui::SameLine(); ImGui::TextColored({0.3f, 0.5f, 1.0f, 1.0f}, "[blue]");
+        }
     }
     if (vis && gSnap.valid) update_display();
 
