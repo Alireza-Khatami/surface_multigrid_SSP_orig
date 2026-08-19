@@ -69,6 +69,7 @@ VectorXi gFaceSheetID;
 int gNumSheets    = 1;
 std::vector<std::vector<int>> gVF;
 std::vector<std::set<int>> gVertexStructIDs;  // per-vertex struct ID sets from .ma_struct file
+FILE* gStructGateLog = nullptr;               // dedicated log file for struct-ID gate decisions
 std::vector<std::pair<int,int>> gSeamEdgeList;  // vertex pairs of seam (non-manifold) edges
 std::vector<double> gInitCosts;               // initial cost per edge (index = gE row)
 int gTargetFaces  = 100;
@@ -368,6 +369,22 @@ bool do_next_step()
             // gV.row(s) is already at the new placement position at this point
             int s = std::min(gE(e,0), gE(e,1));
             int d = std::max(gE(e,0), gE(e,1));
+            if (gStructGateLog) {
+                const int nS = (int)gVertexStructIDs.size();
+                auto sids = [&](int v) -> std::string {
+                    if (v >= nS) return "INF";
+                    std::string r = "{";
+                    for (int x : gVertexStructIDs[v]) { r += std::to_string(x); r += ','; }
+                    if (r.size() > 1) r.back() = '}'; else r += '}';
+                    return r;
+                };
+                bool match = (s < nS && d < nS && gVertexStructIDs[s] == gVertexStructIDs[d]);
+                fprintf(gStructGateLog,
+                    "[STRUCT-COLLAPSE #%d] e=%d  s=%d ids=%s  d=%d ids=%s  match=%d  seam=%d\n",
+                    gCollapseCount, e, s, sids(s).c_str(), d, sids(d).c_str(),
+                    match ? 1 : 0, gLastCollapseWasSeam ? 1 : 0);
+                fflush(gStructGateLog);
+            }
             vertex_watch_check_collapse(s, d);
             sample_tracker_update();
             face_flip_tracker_post_update();
@@ -449,6 +466,11 @@ int main(int argc, char * argv[])
         }
     }
 
+    if (matStructCheck && matstructPath.empty()) {
+        std::cerr << "[ERROR] --mat_struct_check requires --matstruct_path <path/to/file.ma_struct>\n";
+        return 1;
+    }
+
     SSP_validity_checks_enable(validityChecks);
     std::cout << "Validity checks: " << (validityChecks ? "ENABLED" : "DISABLED") << "\n";
 
@@ -495,22 +517,54 @@ int main(int argc, char * argv[])
     // Load per-vertex struct IDs from .ma_struct file (optional).
     if (!matstructPath.empty()) {
         if (load_matstruct(matstructPath, gVertexStructIDs)) {
-            std::cout << "Struct IDs loaded from " << matstructPath << "\n";
+            std::cout << "Struct IDs loaded from " << matstructPath
+                      << "  (" << gVertexStructIDs.size() << " vertices)\n";
             if (matStructCheck)
                 std::cout << "  --mat_struct_check ON: collapses blocked when struct ID sets differ\n";
             else
                 std::cout << "  --mat_struct_check OFF: struct ID gate inactive\n";
         } else {
-            std::cerr << "[WARN] load_matstruct failed — struct ID gating disabled\n";
+            std::cerr << "[ERROR] load_matstruct failed for: " << matstructPath << "\n";
+            if (matStructCheck) {
+                std::cerr << "  --mat_struct_check is ON but struct IDs could not be loaded — aborting.\n";
+                return 1;
+            }
         }
     }
+
+    // Helper: format a std::set<int> as "{1,2,3}" for logging.
+    auto struct_ids_str = [](const std::set<int>& s) -> std::string {
+        std::string r = "{";
+        for (int x : s) { r += std::to_string(x); r += ','; }
+        if (r.size() > 1) r.back() = '}'; else r += '}';
+        return r;
+    };
 
     // Struct ID gate: block collapse (v0, v1) when their struct ID sets differ.
     // Only active when both --matstruct_path and --mat_struct_check are provided.
     // Skips the infinity cap vertex (index >= gVertexStructIDs.size()).
     if (!gVertexStructIDs.empty() && matStructCheck) {
+        // Try out_dir first; fall back to cwd so the file always lands somewhere writable.
+        std::string gate_log_path = out_dir + "struct_gate_log.txt";
+        gStructGateLog = fopen(gate_log_path.c_str(), "w");
+        if (!gStructGateLog) {
+            gate_log_path = "struct_gate_log.txt";
+            gStructGateLog = fopen(gate_log_path.c_str(), "w");
+        }
+        if (gStructGateLog) {
+            fprintf(gStructGateLog,
+                "# struct-ID gate log\n"
+                "# format: [GATE] collapse=#  e=<edge>  u=<vtx> ids=<set>  v=<vtx> ids=<set>  PASS|BLOCK\n"
+                "# [STRUCT-COLLAPSE] lines log every successful collapse's struct IDs\n\n");
+            fflush(gStructGateLog);
+            std::cout << "  struct_gate_log -> " << gate_log_path << "\n";
+        } else {
+            std::cerr << "[ERROR] could not open struct_gate_log at " << gate_log_path
+                      << " — gate will run but decisions won't be logged\n";
+        }
+
         auto orig_pre = gPreFn;
-        gPreFn = [orig_pre](
+        gPreFn = [orig_pre, struct_ids_str](
             const MatrixXd & V, const MatrixXi & F, const MatrixXi & E,
             const VectorXi & EMAP, const MatrixXi & EF, const MatrixXi & EI,
             const igl::min_heap<std::tuple<double,int,int>> & Q,
@@ -520,7 +574,18 @@ int main(int argc, char * argv[])
             const int u = E(e,0), v = E(e,1);
             const int nStruct = (int)gVertexStructIDs.size();
             if (u >= nStruct || v >= nStruct) return true;  // infinity cap vertex — always allow
-            return gVertexStructIDs[u] == gVertexStructIDs[v];
+            bool ok = (gVertexStructIDs[u] == gVertexStructIDs[v]);
+            if (gStructGateLog) {
+                fprintf(gStructGateLog,
+                    "[GATE] collapse=#%d  e=%d  u=%d ids=%s  v=%d ids=%s  %s\n",
+                    gCollapseCount + 1, e, u,
+                    struct_ids_str(gVertexStructIDs[u]).c_str(),
+                    v,
+                    struct_ids_str(gVertexStructIDs[v]).c_str(),
+                    ok ? "PASS" : "BLOCK");
+                fflush(gStructGateLog);
+            }
+            return ok;
         };
     }
 
@@ -593,7 +658,7 @@ int main(int argc, char * argv[])
         }
         auto* pc = polyscope::registerPointCloud("mat_struct_ids", gVO);
         pc->setPointRadius(0.004, true);
-        pc->addScalarQuantity("struct_hash", structScalar)->setEnabled(true);
+        pc->addScalarQuantity("struct_hash", structScalar)->setEnabled(false);
     }
 
     polyscope::state::userCallback = ui_callback;

@@ -580,7 +580,8 @@ bool SSP_collapse_edge(
         b_si(0), b_si(1), Nsv_local, Ndv_local,
         UV_pre_si, UV_post_si,
         any_sheet_ok ? nullptr : &data.lscm_case,
-        &dc_viz_si);
+        &dc_viz_si,
+        (int)decInfo.size());
     if (!isValid) {
       if (is_seam_collapse)
         SEAM_LOG("[SEAM-FAIL-LSCM]  sid=%d  e=(%d,%d) vi=%d vj=%d\n",

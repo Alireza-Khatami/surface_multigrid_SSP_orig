@@ -185,11 +185,13 @@ void joint_lscm_double_cover(
         Fdc_post.row(nF_post + r) = make_bot_face(Fjoint_post(r,0), Fjoint_post(r,1), Fjoint_post(r,2));
 
     // --- Step 5: Pinning ---
-    // Pin B_reflected[0] top (original index) and its bottom copy (nVjoint+0).
-    // These are opposite poles of the diamond → well-separated pins for the LSCM frame.
-    // Indices in [U-block (0..nVjoint_dc-1); V-block (nVjoint_dc..2*nVjoint_dc-1)]:
-    int pin_top = B_reflected[0];          // original UV index (top sheet)
-    int pin_bot = nVjoint;                 // = nVjoint + 0 (bottom copy of B_reflected[0])
+    // Pin the MIDDLE B_reflected vertex (top and bottom copies) as the two LSCM frame points.
+    // Middle = true pole of the diamond: equidistant from both arc endpoints, so the two
+    // halves of the DC diamond are symmetric. Using B_reflected[0] (arc-adjacent) placed
+    // the pin off-center, causing a lopsided UV fold.
+    int mid     = (int)B_reflected.size() / 2;
+    int pin_top = B_reflected[mid];        // original UV index (top sheet, middle of arc)
+    int pin_bot = nVjoint + mid;           // bottom copy of the same middle vertex
 
     VectorXi b_UV(4);
     VectorXd bc_UV(4);
@@ -200,8 +202,8 @@ void joint_lscm_double_cover(
     // → pin_top at UV(col1=0, col0=0) = UV(0,0) ; pin_bot at UV(col1=1, col0=0) = UV(0,1)
 
     if (isDebug) {
-        fprintf(dc_log(), "[DC] pinning: B_ref[0]_top(idx=%d)->UV(0,0)  "
-                        "B_ref[0]_bot(idx=%d)->UV(0,1)\n", pin_top, pin_bot);
+        fprintf(dc_log(), "[DC] pinning: B_ref[mid=%d]_top(idx=%d)->UV(0,0)  "
+                        "B_ref[mid=%d]_bot(idx=%d)->UV(0,1)\n", mid, pin_top, mid, pin_bot);
     }
 
     // --- Step 6: Solve ---
@@ -264,7 +266,8 @@ bool joint_lscm(
   Eigen::MatrixXd & UV_pre,
   Eigen::MatrixXd & UV_post,
   std::optional<int> * out_case,
-  DCVizData * dc_viz)
+  DCVizData * dc_viz,
+  int collapse_idx)
 {
   using namespace Eigen;
 	using namespace std;
@@ -551,14 +554,62 @@ bool joint_lscm(
 				bool high_dist  = (max_pre > 3.0 || max_post > 3.0);
 
 				fprintf(dc_log(),
-				  "[DC-%s #%d] case=%d seam=%d vi=%d vj=%d nFpre=%d nFpost=%d nV=%d"
+				  "[DC-%s #%d] collapse=%d case=%d seam=%d vi=%d vj=%d nFpre=%d nFpost=%d nV=%d"
 				  "  B_glued=%d B_ref=%d"
 				  "  QCE_pre(max=%.3f mean=%.3f) QCE_post(max=%.3f mean=%.3f)\n",
 				  high_dist ? "HIGH-DISTORTION" : "PASS",
-				  dc_log_count, whichCase, (int)is_seam_inj, vi, vj,
+				  dc_log_count, collapse_idx, whichCase, (int)is_seam_inj, vi, vj,
 				  (int)FUV_pre.rows(), (int)FUV_post.rows(), (int)V_pre.rows(),
 				  (int)dc_B_glued.size(), (int)dc_B_reflected.size(),
 				  max_pre, mean_pre, max_post, mean_post);
+
+				// --- B_arc geometry + pinning audit ---
+				// DC pins ONLY B_reflected[0] top->(0,0) and B_reflected[0] bot->(1,0).
+				// No semicircle / equal-spacing of the arc. Log 3D edge lengths and
+				// resulting UV positions to diagnose distortion source.
+				{
+					// Full B_arc order: [B_glued[0], B_ref[0..n-1], B_glued[1]]
+					std::vector<int> b_arc_full;
+					b_arc_full.push_back(dc_B_glued[0]);
+					for (int k : dc_B_reflected) b_arc_full.push_back(k);
+					b_arc_full.push_back(dc_B_glued[1]);
+
+					// 3D edge lengths along the interior arc
+					double total_len = 0.0;
+					fprintf(dc_log(), "[DC-ARC #%d] B_arc(%d) 3D edge lengths: ",
+					        dc_log_count, (int)b_arc_full.size());
+					for (int k = 0; k + 1 < (int)b_arc_full.size(); k++) {
+						double len = (V_pre.row(b_arc_full[k]) - V_pre.row(b_arc_full[k+1])).norm();
+						total_len += len;
+						fprintf(dc_log(), "%.4f ", len);
+					}
+					fprintf(dc_log(), " total=%.4f\n", total_len);
+
+					// Boundary arc legs (vi→B_glued[0], vj→B_glued[1])
+					double len_vi_bg0 = (V_pre.row(vi) - V_pre.row(dc_B_glued[0])).norm();
+					double len_vj_bg1 = (V_pre.row(vj) - V_pre.row(dc_B_glued[1])).norm();
+					fprintf(dc_log(), "[DC-ARC #%d] vi(%d)->B_glued[0](%d)=%.4f  vj(%d)->B_glued[1](%d)=%.4f\n",
+					        dc_log_count, vi, dc_B_glued[0], len_vi_bg0,
+					        vj, dc_B_glued[1], len_vj_bg1);
+
+					// Pin assignment (only 2 vertices pinned, rest are free LSCM)
+					if (!dc_B_reflected.empty()) {
+						int log_mid = (int)dc_B_reflected.size() / 2;
+						fprintf(dc_log(), "[DC-ARC #%d] pinned: B_ref[mid=%d]_top(idx=%d)->(0,0)  B_ref[mid=%d]_bot->(1,0)  [all other arc verts FREE]\n",
+						        dc_log_count, log_mid, dc_B_reflected[log_mid], log_mid);
+					}
+
+					// UV positions of B_arc vertices after solve
+					fprintf(dc_log(), "[DC-ARC #%d] B_arc UV: ", dc_log_count);
+					for (int b : b_arc_full) {
+						if (b < (int)UV_pre_dc.rows())
+							fprintf(dc_log(), "%d=(%.3f,%.3f) ", b, UV_pre_dc(b,0), UV_pre_dc(b,1));
+					}
+					fprintf(dc_log(), "\n");
+					fprintf(dc_log(), "[DC-ARC #%d] vi(%d) UV=(%.3f,%.3f)  vj(%d) UV=(%.3f,%.3f)\n",
+					        dc_log_count, vi, UV_pre_dc(vi,0), UV_pre_dc(vi,1),
+					        vj, UV_pre_dc(vj,0), UV_pre_dc(vj,1));
+				}
 				fflush(dc_log());
 			}
 

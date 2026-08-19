@@ -475,10 +475,10 @@ void sample_tracker_show_vertices()
     auto* pc_fine = polyscope::registerPointCloud("vtx_fine_pts", finePts);
     pc_fine->setPointColor({0.2f, 0.7f, 1.0f})->setPointRadius(0.0008, true)->setEnabled(true);
     pc_fine->addVectorQuantity("to_coarse", arrows, polyscope::VectorType::AMBIENT)
-           ->setVectorColor({1.0f, 0.8f, 0.1f})->setEnabled(true);
+           ->setVectorColor({1.0f, 0.8f, 0.1f})->setEnabled(false);
 
     polyscope::registerPointCloud("vtx_coarse_pts", coarsePts)
-        ->setPointColor({1.0f, 0.35f, 0.1f})->setPointRadius(0.0008, true)->setEnabled(true);
+        ->setPointColor({1.0f, 0.35f, 0.1f})->setPointRadius(0.0008, true)->setEnabled(false);
 #endif
 }
 
@@ -719,10 +719,10 @@ void sample_tracker_show_canonical(const Eigen::MatrixXd& uv_pre_3d,
     pc_pre->setPointColor({0.3f, 0.9f, 0.4f})->setPointRadius(0.003, true)->setEnabled(true);
     pc_pre->addVectorQuantity("to_uv_post", arrows, polyscope::VectorType::AMBIENT)
          ->setVectorColor({1.0f, 0.95f, 0.1f})
-         ->setEnabled(true);
+         ->setEnabled(false);
 
     // Post samples sit on the UV_post surface (orange).
     polyscope::registerPointCloud("ring_sample_post", postPts)
-        ->setPointColor({0.9f, 0.4f, 0.2f})->setPointRadius(0.003, true)->setEnabled(true);
+        ->setPointColor({0.9f, 0.4f, 0.2f})->setPointRadius(0.003, true)->setEnabled(false);
 #endif
 }

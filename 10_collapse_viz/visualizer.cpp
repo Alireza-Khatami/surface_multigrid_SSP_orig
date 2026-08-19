@@ -725,11 +725,11 @@ static void show_canonical_view()
     if (gc.has_dc) {
         polyscope::registerSurfaceMesh("dc_uv_pre", gc.dc_uv_pre_3d, gSnap.FUV_dc_pre)
             ->setSurfaceColor({0.2f, 0.85f, 0.85f})   // teal — top+bottom sheet pre
-            ->setEdgeWidth(1.0)->setSmoothShade(false)->setTransparency(0.45f)
+            ->setEdgeWidth(1.0)->setSmoothShade(false)->setTransparency(1.0f)
             ->setEnabled(gShowCanonUV);
         polyscope::registerSurfaceMesh("dc_uv_post", gc.dc_uv_post_3d, gSnap.FUV_dc_post)
             ->setSurfaceColor({0.85f, 0.65f, 0.2f})   // amber — top+bottom sheet post
-            ->setEdgeWidth(1.0)->setSmoothShade(false)->setTransparency(0.45f)
+            ->setEdgeWidth(1.0)->setSmoothShade(false)->setTransparency(1.0f)
             ->setEnabled(gShowCanonUV);
 
         // DC vertex group point clouds — two sets:
@@ -895,7 +895,7 @@ void update_display()
             }
             auto* pc = polyscope::registerPointCloud("mat_struct_ids", Vc);
             pc->setPointRadius(0.004, true);
-            pc->addScalarQuantity("struct_hash", structScalar)->setEnabled(true);
+            pc->addScalarQuantity("struct_hash", structScalar)->setEnabled(false);
         }
 
         auto * m = polyscope::registerSurfaceMesh("mesh", Vc, Fc);

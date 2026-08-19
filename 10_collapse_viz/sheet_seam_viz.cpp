@@ -181,6 +181,7 @@ void update_sheet_display()
         auto * sm = polyscope::registerSurfaceMesh("sheet_view", Vc, Fc);
         sm->setEdgeWidth(0.5)->setSmoothShade(false);
         sm->addFaceColorQuantity("sheet", faceColors)->setEnabled(true);
+        sm->setEnabled(false);
     }
 
     // Seam edges: yellow curve network; clicking an edge triggers the one-ring view.
@@ -200,7 +201,7 @@ void update_sheet_display()
         }
         polyscope::registerCurveNetwork("seam_edges", nodes, edges)
             ->setRadius(0.00024f)   // 4× the default edge_radius used elsewhere
-            ->setColor({1.0f, 0.85f, 0.05f});
+            ->setColor({1.0f, 0.85f, 0.05f})->setEnabled(false);
     }
 }
 

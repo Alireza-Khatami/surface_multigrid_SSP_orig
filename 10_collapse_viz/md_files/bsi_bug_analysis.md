@@ -144,3 +144,6 @@ root fix could prevent it).
 | Stale (non-null, wrong-vertex) VF entries | **Not a cause** | After every collapse, Pass 2 updates F(f,c)=sv for all remapped faces; non-null VF entries always contain the vertex they're filed under |
 | `partition_onering_by_sheet` routing error | **Not a cause** | Uses faceSheetID(f) which is correct for all face indices in gF |
 | `get_collapse_onering_faces` bug | **Not a cause** | Correctly filters infinity and null faces; this function is downstream of the missing filter |
+
+
+

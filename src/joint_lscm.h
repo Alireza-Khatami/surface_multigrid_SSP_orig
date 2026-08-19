@@ -119,7 +119,8 @@ bool joint_lscm(
   Eigen::MatrixXd & UV_pre,
   Eigen::MatrixXd & UV_post,
   std::optional<int> * out_case = nullptr,
-  DCVizData * dc_viz = nullptr);
+  DCVizData * dc_viz = nullptr,
+  int collapse_idx = -1);
 
 bool check_valid_UV_lscm(
   const Eigen::MatrixXd & V_pre,
