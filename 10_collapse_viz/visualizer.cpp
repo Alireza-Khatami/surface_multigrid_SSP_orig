@@ -732,56 +732,76 @@ static void show_canonical_view()
             ->setEdgeWidth(1.0)->setSmoothShade(false)->setTransparency(0.45f)
             ->setEnabled(gShowCanonUV);
 
-        // DC vertex group point clouds — use pre-computed B classification from LSCM.
-        if (gc.dc_uv_pre_3d.rows() > 0 &&
-            !gSnap.dc_B_glued.empty()) {
-            int nVjoint = (int)gSnap.V_pre.rows() + 1;  // UV index space: 0..nV-1 + post-vi at nV
+        // DC vertex group point clouds — two sets:
+        //   *_uv  : positioned in canonical UV space (dc_uv_pre_3d), enabled with gShowCanonUV
+        //   *_ring: positioned in canonical 3D ring space (gc.V_ring),  enabled with gShowCanonRing
+        if (gc.dc_uv_pre_3d.rows() > 0 && !gSnap.dc_B_glued.empty()) {
+            int nVjoint = (int)gSnap.V_pre.rows() + 1;
             const auto & Bg  = gSnap.dc_B_glued;
             const auto & Brt = gSnap.dc_B_reflected;
             int nBref = (int)Brt.size();
-
-            // vi / vj (red) — use local one-ring indices (gSnap.b), not global gSnap.vi/vj
             int local_vi = gSnap.b(0), local_vj = gSnap.b(1);
-            MatrixXd vivj_pts(2, 3);
-            vivj_pts.row(0) = gc.dc_uv_pre_3d.row(local_vi);
-            vivj_pts.row(1) = gc.dc_uv_pre_3d.row(local_vj);
-            polyscope::registerPointCloud("dc_vi_vj", vivj_pts)
-                ->setPointColor({1.0f, 0.3f, 0.3f})
-                ->setPointRadius(0.016f, true)
-                ->setEnabled(gShowDCVertVi);
 
-            // B_glued: arc endpoints shared between sheets (green)
-            MatrixXd bg_pts((int)Bg.size(), 3);
-            for (int k = 0; k < (int)Bg.size(); k++)
-                bg_pts.row(k) = gc.dc_uv_pre_3d.row(Bg[k]);
-            polyscope::registerPointCloud("dc_B_glued", bg_pts)
-                ->setPointColor({0.2f, 1.0f, 0.3f})
-                ->setPointRadius(0.016f, true)
-                ->setEnabled(gShowDCVertBglued);
+            // vi / vj — red
+            {
+                MatrixXd uv_pts(2, 3), ring_pts(2, 3);
+                uv_pts.row(0)   = gc.dc_uv_pre_3d.row(local_vi);
+                uv_pts.row(1)   = gc.dc_uv_pre_3d.row(local_vj);
+                ring_pts.row(0) = gc.V_ring.row(local_vi);
+                ring_pts.row(1) = gc.V_ring.row(local_vj);
+                polyscope::registerPointCloud("dc_vi_vj_uv", uv_pts)
+                    ->setPointColor({1.0f, 0.3f, 0.3f})->setPointRadius(0.016f, true)
+                    ->setEnabled(gShowDCVertVi && gShowCanonUV);
+                polyscope::registerPointCloud("dc_vi_vj_ring", ring_pts)
+                    ->setPointColor({1.0f, 0.3f, 0.3f})->setPointRadius(0.016f, true)
+                    ->setEnabled(gShowDCVertVi && gShowCanonRing);
+            }
+
+            // B_glued — green
+            {
+                MatrixXd uv_pts((int)Bg.size(), 3), ring_pts((int)Bg.size(), 3);
+                for (int k = 0; k < (int)Bg.size(); k++) {
+                    uv_pts.row(k)   = gc.dc_uv_pre_3d.row(Bg[k]);
+                    ring_pts.row(k) = gc.V_ring.row(Bg[k]);
+                }
+                polyscope::registerPointCloud("dc_B_glued_uv", uv_pts)
+                    ->setPointColor({0.2f, 1.0f, 0.3f})->setPointRadius(0.016f, true)
+                    ->setEnabled(gShowDCVertBglued && gShowCanonUV);
+                polyscope::registerPointCloud("dc_B_glued_ring", ring_pts)
+                    ->setPointColor({0.2f, 1.0f, 0.3f})->setPointRadius(0.016f, true)
+                    ->setEnabled(gShowDCVertBglued && gShowCanonRing);
+            }
 
             if (nBref > 0) {
-                // B_reflected top sheet (blue)
-                MatrixXd brt_pts(nBref, 3);
-                for (int k = 0; k < nBref; k++)
-                    brt_pts.row(k) = gc.dc_uv_pre_3d.row(Brt[k]);
-                polyscope::registerPointCloud("dc_B_ref_top", brt_pts)
-                    ->setPointColor({0.3f, 0.5f, 1.0f})
-                    ->setPointRadius(0.016f, true)
-                    ->setEnabled(gShowDCBrefTop);
-
-                // B_reflected bottom sheet: UV rows nVjoint..nVjoint+nBref-1 (gold)
-                MatrixXd brb_pts(nBref, 3);
-                for (int k = 0; k < nBref; k++) {
-                    int bot_idx = nVjoint + k;
-                    if (bot_idx < (int)gc.dc_uv_pre_3d.rows())
-                        brb_pts.row(k) = gc.dc_uv_pre_3d.row(bot_idx);
-                    else
-                        brb_pts.row(k).setZero();
+                // B_reflected top sheet — blue
+                {
+                    MatrixXd uv_pts(nBref, 3), ring_pts(nBref, 3);
+                    for (int k = 0; k < nBref; k++) {
+                        uv_pts.row(k)   = gc.dc_uv_pre_3d.row(Brt[k]);
+                        ring_pts.row(k) = gc.V_ring.row(Brt[k]);
+                    }
+                    polyscope::registerPointCloud("dc_B_ref_top_uv", uv_pts)
+                        ->setPointColor({0.3f, 0.5f, 1.0f})->setPointRadius(0.016f, true)
+                        ->setEnabled(gShowDCBrefTop && gShowCanonUV);
+                    polyscope::registerPointCloud("dc_B_ref_top_ring", ring_pts)
+                        ->setPointColor({0.3f, 0.5f, 1.0f})->setPointRadius(0.016f, true)
+                        ->setEnabled(gShowDCBrefTop && gShowCanonRing);
                 }
-                polyscope::registerPointCloud("dc_B_ref_bot", brb_pts)
-                    ->setPointColor({1.0f, 0.8f, 0.1f})
-                    ->setPointRadius(0.016f, true)
-                    ->setEnabled(gShowDCBrefBot);
+
+                // B_reflected bottom sheet — gold (UV only; ring shares same 3D pos as top)
+                {
+                    MatrixXd brb_pts(nBref, 3);
+                    for (int k = 0; k < nBref; k++) {
+                        int bot_idx = nVjoint + k;
+                        if (bot_idx < (int)gc.dc_uv_pre_3d.rows())
+                            brb_pts.row(k) = gc.dc_uv_pre_3d.row(bot_idx);
+                        else
+                            brb_pts.row(k).setZero();
+                    }
+                    polyscope::registerPointCloud("dc_B_ref_bot_uv", brb_pts)
+                        ->setPointColor({1.0f, 0.8f, 0.1f})->setPointRadius(0.016f, true)
+                        ->setEnabled(gShowDCBrefBot && gShowCanonUV);
+                }
             }
         }
     }
