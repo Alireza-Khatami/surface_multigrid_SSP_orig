@@ -540,19 +540,11 @@ bool joint_lscm(
 			} else {
 				// Passed flip check — measure quasi-conformal distortion on the
 				// top-sheet UV to catch collapses that pass but are poorly conditioned.
-				// UV_pre_dc/UV_post_dc both have nVjoint = nV+1 rows (top-sheet only).
-				// FUV_pre uses indices 0..nV-1; FUV_post may reference index nV (vi post).
-				int nV_loc      = (int)V_pre.rows();
-				int nVjoint_loc = nV_loc + 1;
-				Eigen::MatrixXd Vpad(nVjoint_loc, 3);
-				Vpad.topRows(nV_loc) = V_pre;
-				Vpad.row(nV_loc)     = V_post.row(vi);
-
+				// UV_pre_dc/UV_post_dc both have nV rows (vi's post-UV is at row vi,
+				// not at a separate nV+1 slot). FUV_pre/FUV_post use indices 0..nV-1.
 				Eigen::VectorXd qce_pre, qce_post;
-				quasi_conformal_error(V_pre, FUV_pre,
-				                      UV_pre_dc.topRows(nV_loc),        qce_pre);
-				quasi_conformal_error(Vpad,  FUV_post,
-				                      UV_post_dc.topRows(nVjoint_loc),  qce_post);
+				quasi_conformal_error(V_pre, FUV_pre,  UV_pre_dc,  qce_pre);
+				quasi_conformal_error(V_pre, FUV_post, UV_post_dc, qce_post);
 
 				double max_pre  = qce_pre.maxCoeff(),  mean_pre  = qce_pre.mean();
 				double max_post = qce_post.maxCoeff(), mean_post = qce_post.mean();
