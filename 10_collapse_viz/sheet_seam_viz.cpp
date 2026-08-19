@@ -123,16 +123,27 @@ void update_seam_onering_display()
 
     if (ringFaces.empty()) return;
 
-    // Build local edge → incident ring-face adjacency from current gF.
-    // This mirrors partition_into_sheets: BFS across manifold edges (exactly 2 faces),
-    // treating boundary (1 face) and non-manifold (3+ faces) edges as sheet boundaries.
-    const int nRing = (int)ringFaces.size();
-    // Map face global index → local index
-    std::map<int,int> faceLocalIdx;
-    for (int i = 0; i < nRing; i++) faceLocalIdx[ringFaces[i]] = i;
+    // Global edge → live real face count across the ENTIRE current mesh.
+    // BFS may only cross an edge if this count == 2 (globally manifold).
+    // Using local ring counts instead would miss non-ring faces sharing the same
+    // edge, making a globally non-manifold edge look crossable — wrong merges.
+    std::map<std::pair<int,int>, int> globalEdgeCount;
+    for (int f = 0; f < gF.rows(); f++) {
+        if (is_face_dead(gF, f)) continue;
+        if (std::isinf(gV(gF(f,0),0)) || std::isinf(gV(gF(f,1),0)) ||
+            std::isinf(gV(gF(f,2),0))) continue;
+        for (int c = 0; c < 3; c++) {
+            int a = gF(f,c), b = gF(f,(c+1)%3);
+            if (a > b) std::swap(a,b);
+            globalEdgeCount[{a,b}]++;
+        }
+    }
 
-    // Directed edge (u,v) sorted → undirected, restricted to ring faces
-    std::map<std::pair<int,int>, std::vector<int>> edgeToLocal; // → local face indices
+    const int nRing = (int)ringFaces.size();
+
+    // Ring-local edge → local face indices (used to find neighbors during BFS).
+    // The CROSSING decision still uses globalEdgeCount, not this map's size.
+    std::map<std::pair<int,int>, std::vector<int>> edgeToLocal;
     for (int li = 0; li < nRing; li++) {
         int f = ringFaces[li];
         for (int c = 0; c < 3; c++) {
@@ -142,7 +153,11 @@ void update_seam_onering_display()
         }
     }
 
-    // BFS partition into local sheets
+    // BFS partition into local sheets.
+    // Cross an edge only when it is globally manifold (exactly 2 live real faces
+    // in the full mesh). This correctly handles tail faces that are the same sheet
+    // as an adjacent seam face (fig 2) while not crossing edges that are themselves
+    // seams in the full mesh even if they appear to have only 2 ring faces.
     std::vector<int> localSheetID(nRing, -1);
     int numLocalSheets = 0;
     for (int seed = 0; seed < nRing; seed++) {
@@ -156,9 +171,9 @@ void update_seam_onering_display()
             for (int c = 0; c < 3; c++) {
                 int a = gF(f,c), b = gF(f,(c+1)%3);
                 if (a > b) std::swap(a,b);
-                const auto & nbrs = edgeToLocal[{a,b}];
-                if ((int)nbrs.size() != 2) continue;  // boundary or non-manifold
-                for (int nli : nbrs) {
+                auto git = globalEdgeCount.find({a,b});
+                if (git == globalEdgeCount.end() || git->second != 2) continue;
+                for (int nli : edgeToLocal[{a,b}]) {
                     if (localSheetID[nli] == -1) {
                         localSheetID[nli] = numLocalSheets;
                         q.push(nli);
@@ -334,6 +349,18 @@ void sheet_seam_imgui_section()
         rfaces.erase(std::unique(rfaces.begin(), rfaces.end()), rfaces.end());
         int numLocalSheets_ui = 0;
         if (!rfaces.empty()) {
+            // Reuse the same global edge count logic as update_seam_onering_display.
+            std::map<std::pair<int,int>, int> gec;
+            for (int f = 0; f < gF.rows(); f++) {
+                if (is_face_dead(gF, f)) continue;
+                if (std::isinf(gV(gF(f,0),0)) || std::isinf(gV(gF(f,1),0)) ||
+                    std::isinf(gV(gF(f,2),0))) continue;
+                for (int c = 0; c < 3; c++) {
+                    int a = gF(f,c), b = gF(f,(c+1)%3);
+                    if (a > b) std::swap(a,b);
+                    gec[{a,b}]++;
+                }
+            }
             std::map<std::pair<int,int>, std::vector<int>> edgeToLoc;
             for (int li = 0; li < (int)rfaces.size(); li++) {
                 int f = rfaces[li];
@@ -353,9 +380,10 @@ void sheet_seam_imgui_section()
                     for (int c = 0; c < 3; c++) {
                         int a = gF(f,c), b = gF(f,(c+1)%3);
                         if (a > b) std::swap(a,b);
-                        const auto & nb = edgeToLoc[{a,b}];
-                        if ((int)nb.size() != 2) continue;
-                        for (int nli : nb) { if (lid[nli]==-1) { lid[nli]=numLocalSheets_ui; q.push(nli); } }
+                        auto git = gec.find({a,b});
+                        if (git == gec.end() || git->second != 2) continue;
+                        for (int nli : edgeToLoc[{a,b}])
+                            if (lid[nli]==-1) { lid[nli]=numLocalSheets_ui; q.push(nli); }
                     }
                 }
                 numLocalSheets_ui++;
