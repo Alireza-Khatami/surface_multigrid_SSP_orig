@@ -636,7 +636,7 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
     std::ofstream out(bundlePath, std::ios::binary);
     if (!out) { std::cerr << "[bundle] Cannot write " << bundlePath << "\n"; return; }
 
-    const uint32_t magic = 0xC2F50005;  // v5: adds V_pre/V_post (3D ring geometry) per sheet
+    const uint32_t magic = 0xC2F50006;  // v6: adds DC UV data (UV_dc_pre/post, FUV_dc_pre/post) per sheet
     out.write((const char*)&magic, 4);
     out.write((const char*)&NC, 4);
     out.write((const char*)&FC, 4);
@@ -785,6 +785,36 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
                 for (uint32_t r = 0; r < uvRows; r++) {
                     double xyz[3] = { sd.V_post(r,0), sd.V_post(r,1), sd.V_post(r,2) };
                     out.write((const char*)xyz, 24);
+                }
+            }
+
+            // v6: DC UV data — raw LSCM result for the double cover (boundary cases)
+            {
+                uint32_t has_dc = sd.has_double_cover ? 1u : 0u;
+                out.write((const char*)&has_dc, 4);
+                if (sd.has_double_cover) {
+                    uint32_t dc_uvRows = (uint32_t)sd.UV_dc_pre.rows();
+                    out.write((const char*)&dc_uvRows, 4);
+                    for (uint32_t r = 0; r < dc_uvRows; r++) {
+                        double u = sd.UV_dc_pre(r,0), v = sd.UV_dc_pre(r,1);
+                        out.write((const char*)&u, 8); out.write((const char*)&v, 8);
+                    }
+                    for (uint32_t r = 0; r < dc_uvRows; r++) {
+                        double u = sd.UV_dc_post(r,0), v = sd.UV_dc_post(r,1);
+                        out.write((const char*)&u, 8); out.write((const char*)&v, 8);
+                    }
+                    uint32_t dc_fPre = (uint32_t)sd.FUV_dc_pre.rows();
+                    out.write((const char*)&dc_fPre, 4);
+                    for (uint32_t r = 0; r < dc_fPre; r++) {
+                        int32_t a = sd.FUV_dc_pre(r,0), b = sd.FUV_dc_pre(r,1), c2 = sd.FUV_dc_pre(r,2);
+                        out.write((const char*)&a, 4); out.write((const char*)&b, 4); out.write((const char*)&c2, 4);
+                    }
+                    uint32_t dc_fPost = (uint32_t)sd.FUV_dc_post.rows();
+                    out.write((const char*)&dc_fPost, 4);
+                    for (uint32_t r = 0; r < dc_fPost; r++) {
+                        int32_t a = sd.FUV_dc_post(r,0), b = sd.FUV_dc_post(r,1), c2 = sd.FUV_dc_post(r,2);
+                        out.write((const char*)&a, 4); out.write((const char*)&b, 4); out.write((const char*)&c2, 4);
+                    }
                 }
             }
         }

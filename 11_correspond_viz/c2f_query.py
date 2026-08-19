@@ -37,6 +37,12 @@ class SheetData:
     V_pre:  np.ndarray = field(default_factory=lambda: np.empty((0, 3), dtype=np.float64))
     V_post: np.ndarray = field(default_factory=lambda: np.empty((0, 3), dtype=np.float64))
     # V_pre/V_post: 3D ring geometry in local index space (v5+ only; empty otherwise)
+    has_dc: bool = False
+    UV_dc_pre:   np.ndarray = field(default_factory=lambda: np.empty((0, 2), dtype=np.float64))
+    UV_dc_post:  np.ndarray = field(default_factory=lambda: np.empty((0, 2), dtype=np.float64))
+    FUV_dc_pre:  np.ndarray = field(default_factory=lambda: np.empty((0, 3), dtype=np.int32))
+    FUV_dc_post: np.ndarray = field(default_factory=lambda: np.empty((0, 3), dtype=np.int32))
+    # DC data: full double-cover UV (nVjoint_dc rows) + 2×nF face connectivity (v6+ only)
 
 
 @dataclass
@@ -129,12 +135,13 @@ def load_bundle(path: str) -> Bundle:
     r = _Reader(data)
 
     magic = r.u32()
-    if magic not in (0xC2F50001, 0xC2F50002, 0xC2F50003, 0xC2F50004, 0xC2F50005):
+    if magic not in (0xC2F50001, 0xC2F50002, 0xC2F50003, 0xC2F50004, 0xC2F50005, 0xC2F50006):
         raise ValueError(f'Bad magic: 0x{magic:08X}')
     v2 = (magic == 0xC2F50002)
     v3 = (magic == 0xC2F50003)
     v4 = (magic == 0xC2F50004)
     v5 = (magic == 0xC2F50005)
+    v6 = (magic == 0xC2F50006)
 
     NC = r.u32()
     FC = r.u32()
@@ -165,7 +172,7 @@ def load_bundle(path: str) -> Bundle:
                fineV=fineV, fineF=fineF,
                corrVec=corrVec, corrBC=corrBC, corrFV=corrFV)
 
-    if not v2 and not v3 and not v4 and not v5:
+    if not v2 and not v3 and not v4 and not v5 and not v6:
         print(f'[bundle] Loaded v1  NC={NC} FC={FC} NF={NF} FF={FF}')
         return b
 
@@ -206,7 +213,7 @@ def load_bundle(path: str) -> Bundle:
             FUV_pre  = r.i32_array(fuvRows * 3).reshape(fuvRows, 3)
             FIdx_pre = r.i32_array(fuvRows)
 
-            if v3 or v4 or v5:
+            if v3 or v4 or v5 or v6:
                 fuvPostRows = r.u32()
                 FUV_post  = r.i32_array(fuvPostRows * 3).reshape(fuvPostRows, 3)
                 FIdx_post = r.i32_array(fuvPostRows)
@@ -214,17 +221,39 @@ def load_bundle(path: str) -> Bundle:
                 FUV_post  = np.empty((0, 3), dtype=np.int32)
                 FIdx_post = np.empty((0,),   dtype=np.int32)
 
-            if v4 or v5:
+            if v4 or v5 or v6:
                 b_arr = r.i32_array(2)  # [survivor_local, absorbed_local]
             else:
                 b_arr = np.empty((0,), dtype=np.int32)
 
-            if v5:
+            if v5 or v6:
                 V_pre  = r.f64_array(uvRows * 3).reshape(uvRows, 3)
                 V_post = r.f64_array(uvRows * 3).reshape(uvRows, 3)
             else:
                 V_pre  = np.empty((0, 3), dtype=np.float64)
                 V_post = np.empty((0, 3), dtype=np.float64)
+
+            if v6:
+                has_dc = bool(r.u32())
+                if has_dc:
+                    dc_uvRows    = r.u32()
+                    UV_dc_pre    = r.f64_array(dc_uvRows * 2).reshape(dc_uvRows, 2)
+                    UV_dc_post   = r.f64_array(dc_uvRows * 2).reshape(dc_uvRows, 2)
+                    dc_fPre      = r.u32()
+                    FUV_dc_pre   = r.i32_array(dc_fPre * 3).reshape(dc_fPre, 3)
+                    dc_fPost     = r.u32()
+                    FUV_dc_post  = r.i32_array(dc_fPost * 3).reshape(dc_fPost, 3)
+                else:
+                    UV_dc_pre  = np.empty((0, 2), dtype=np.float64)
+                    UV_dc_post = np.empty((0, 2), dtype=np.float64)
+                    FUV_dc_pre = np.empty((0, 3), dtype=np.int32)
+                    FUV_dc_post = np.empty((0, 3), dtype=np.int32)
+            else:
+                has_dc = False
+                UV_dc_pre  = np.empty((0, 2), dtype=np.float64)
+                UV_dc_post = np.empty((0, 2), dtype=np.float64)
+                FUV_dc_pre = np.empty((0, 3), dtype=np.int32)
+                FUV_dc_post = np.empty((0, 3), dtype=np.int32)
 
             cd.sheets.append(SheetData(
                 global_sheet_id=sid,
@@ -238,11 +267,16 @@ def load_bundle(path: str) -> Bundle:
                 b=b_arr,
                 V_pre=V_pre,
                 V_post=V_post,
+                has_dc=has_dc,
+                UV_dc_pre=UV_dc_pre,
+                UV_dc_post=UV_dc_post,
+                FUV_dc_pre=FUV_dc_pre,
+                FUV_dc_post=FUV_dc_post,
             ))
         b.decInfo.append(cd)
 
     b.has_ssp_data = True
-    ver = 5 if v5 else (4 if v4 else (3 if v3 else 2))
+    ver = 6 if v6 else (5 if v5 else (4 if v4 else (3 if v3 else 2)))
     print(f'[bundle] Loaded v{ver}  NC={NC} FC={FC} NF={NF} FF={FF}'
           f'  nDec={nDec}  nFO={nFO}')
 

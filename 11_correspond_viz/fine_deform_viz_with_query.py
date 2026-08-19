@@ -57,7 +57,10 @@ CV_UV_POST     = "cv_uv_post"        # canonical: UV_post panel (orange)
 CV_TRACKED     = "cv_tracked_vtx"    # canonical: tracked vertex dot + arrow
 CV_TRACKED_POST = "cv_tracked_post"  # canonical: tracked vertex dot at UV_post
 CV_EDGE_PRE    = "cv_edge_pre"       # canonical: collapsed edge in UV_pre (yellow)
-_CV_NAMES      = [CV_RING_MESH, CV_UV_PRE, CV_UV_POST, CV_TRACKED, CV_TRACKED_POST, CV_EDGE_PRE]
+CV_DC_PRE      = "cv_dc_pre"         # canonical: double-cover UV_dc_pre (teal)
+CV_DC_POST     = "cv_dc_post"        # canonical: double-cover UV_dc_post (amber)
+_CV_NAMES      = [CV_RING_MESH, CV_UV_PRE, CV_UV_POST, CV_TRACKED, CV_TRACKED_POST,
+                  CV_EDGE_PRE, CV_DC_PRE, CV_DC_POST]
 
 # ---- mutable state ----
 _bundle        = None
@@ -870,6 +873,38 @@ def _compute_canonical(sheet, local_v: int, **kwargs) -> dict:
             edge_3d_pre = to3d(edge_uv_pre, centroid)
             edge_pts_pre = rot_norm(edge_3d_pre)     # (2, 3) in canonical space
 
+    # ---- DC panels (boundary/seam collapses with double cover) ----
+    dc_panels = None
+    if getattr(sheet, 'has_dc', False) and len(sheet.UV_dc_pre) > 0:
+        uv_dc_pre  = sheet.UV_dc_pre    # (nVjoint_dc, 2) — top sheet + bottom-sheet B_reflected
+        uv_dc_post = sheet.UV_dc_post   # same shape
+        dc_F_pre   = sheet.FUV_dc_pre   # (2*nF_pre,  3) — top + bottom faces
+        dc_F_post  = sheet.FUV_dc_post  # (2*nF_post, 3)
+
+        # Center and scale from the full DC UV extent
+        dc_uc  = (uv_dc_pre[:, 0].max() + uv_dc_pre[:, 0].min()) * 0.5
+        dc_vc  = (uv_dc_pre[:, 1].max() + uv_dc_pre[:, 1].min()) * 0.5
+        dc_ext = max(uv_dc_pre[:, 0].max() - uv_dc_pre[:, 0].min(),
+                     uv_dc_pre[:, 1].max() - uv_dc_pre[:, 1].min())
+        dc_scale = (1.0 / dc_ext) if dc_ext > 1e-10 else 1.0
+
+        # Place DC panels to the right of the regular UV panels (+3 normalised units)
+        dc_shift = t1 * 3.0 * span
+
+        def to3d_dc(UV, panel_origin):
+            dU = (UV[:, 0:1] - dc_uc) * dc_scale * span
+            dV = (UV[:, 1:2] - dc_vc) * dc_scale * span
+            return panel_origin + dU * t1 + dV * t2
+
+        dc_pre_3d  = rot_norm(to3d_dc(uv_dc_pre,  centroid + dc_shift))
+        dc_post_3d = rot_norm(to3d_dc(uv_dc_post, centroid + dc_shift + nrm * _uv_post_offset * span))
+        dc_panels = {
+            'uv_dc_pre':  dc_pre_3d,
+            'uv_dc_post': dc_post_3d,
+            'F_dc_pre':   dc_F_pre,
+            'F_dc_post':  dc_F_post,
+        }
+
     return {
         'V_ring':        vr,
         'uv_pre':        upr,
@@ -881,6 +916,7 @@ def _compute_canonical(sheet, local_v: int, **kwargs) -> dict:
         'tracked_post':  tracked_post_pt,
         'span':          span,
         'edge_pts_pre':  edge_pts_pre,
+        'dc_panels':     dc_panels,   # None when no DC data; dict otherwise
     }
 
 
@@ -1091,6 +1127,21 @@ def _rebuild_canonical_view():
             ep.set_radius(0.018, relative=True)
             ep.add_scalar_quantity("role", np.array([0.0, 1.0]),
                                    enabled=True, cmap="blues")
+
+        # Double-cover panels (teal = pre, amber = post) — shown when collapse used DC LSCM
+        dc = geo.get('dc_panels')
+        if dc is not None:
+            dm = ps.register_surface_mesh(CV_DC_PRE, dc['uv_dc_pre'], dc['F_dc_pre'])
+            dm.set_color((0.15, 0.80, 0.75))   # teal
+            dm.set_edge_width(1.2)
+            dm.set_smooth_shade(False)
+            dm.set_transparency(0.55)
+
+            dm2 = ps.register_surface_mesh(CV_DC_POST, dc['uv_dc_post'], dc['F_dc_post'])
+            dm2.set_color((0.90, 0.55, 0.05))  # amber
+            dm2.set_edge_width(1.2)
+            dm2.set_smooth_shade(False)
+            dm2.set_transparency(0.55)
 
 
 def _find_vtx_collapse_steps(v: int):
@@ -1759,7 +1810,7 @@ def _log_decim_stats():
 def main():
     global _bundle, _bundle_dir, _z_offset, _mesh_span, _simplified_ps_name
 # 
-    c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\01_00040057_f8f78dbd17414efda75bc437_trimesh_000_200\\correspondence_01_00040057_f8f78dbd17414efda75bc437_trimesh_000_mat_initial.c2f"
+    c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\01_00040057_f8f78dbd17414efda75bc437_trimesh_000\\correspondence_01_00040057_f8f78dbd17414efda75bc437_trimesh_000_mat_initial.c2f"
     # c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\0002000_partstudio_14_model_ste_00_1024\\correspondence_0002000_partstudio_14_model_ste_00_1024.c2f"
     # c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\hand\\correspondence_hand.c2f"
     # c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\subDiv_cube\\correspondence_subDiv_cube.c2f"
