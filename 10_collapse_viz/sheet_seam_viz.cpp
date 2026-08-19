@@ -12,7 +12,9 @@
 #include <single_collapse_data.h>
 
 #include <Eigen/Dense>
+#include <algorithm>
 #include <map>
+#include <queue>
 #include <set>
 #include <string>
 #include <utility>
@@ -101,20 +103,76 @@ void update_seam_onering_display()
 
     const int vi = gSeamEdgeList[gPickedSeamEdgeIdx].first;
     const int vj = gSeamEdgeList[gPickedSeamEdgeIdx].second;
-    const int nFSheet = (int)gFaceSheetID.size();
 
-    // Collect one-ring faces of vi ∪ vj, real faces only, grouped by sheet ID
-    std::map<int, std::set<int>> sheetFaces;
+    // Collect one-ring faces of vi ∪ vj from the CURRENT live topology.
+    // Do NOT use gFaceSheetID (built at init) — it reflects the original mesh,
+    // not the topology after N collapses. We partition on the fly instead.
+    std::vector<int> ringFaces;
     for (int v : {vi, vj}) {
         if (v >= (int)gVF.size()) continue;
         for (int f : gVF[v]) {
             if (is_face_dead(gF, f)) continue;
             if (std::isinf(gV(gF(f,0),0)) || std::isinf(gV(gF(f,1),0)) ||
                 std::isinf(gV(gF(f,2),0))) continue;
-            if (f >= nFSheet) continue;
-            sheetFaces[gFaceSheetID(f)].insert(f);
+            ringFaces.push_back(f);
         }
     }
+    // Deduplicate (vi and vj may share faces)
+    std::sort(ringFaces.begin(), ringFaces.end());
+    ringFaces.erase(std::unique(ringFaces.begin(), ringFaces.end()), ringFaces.end());
+
+    if (ringFaces.empty()) return;
+
+    // Build local edge → incident ring-face adjacency from current gF.
+    // This mirrors partition_into_sheets: BFS across manifold edges (exactly 2 faces),
+    // treating boundary (1 face) and non-manifold (3+ faces) edges as sheet boundaries.
+    const int nRing = (int)ringFaces.size();
+    // Map face global index → local index
+    std::map<int,int> faceLocalIdx;
+    for (int i = 0; i < nRing; i++) faceLocalIdx[ringFaces[i]] = i;
+
+    // Directed edge (u,v) sorted → undirected, restricted to ring faces
+    std::map<std::pair<int,int>, std::vector<int>> edgeToLocal; // → local face indices
+    for (int li = 0; li < nRing; li++) {
+        int f = ringFaces[li];
+        for (int c = 0; c < 3; c++) {
+            int a = gF(f,c), b = gF(f,(c+1)%3);
+            if (a > b) std::swap(a,b);
+            edgeToLocal[{a,b}].push_back(li);
+        }
+    }
+
+    // BFS partition into local sheets
+    std::vector<int> localSheetID(nRing, -1);
+    int numLocalSheets = 0;
+    for (int seed = 0; seed < nRing; seed++) {
+        if (localSheetID[seed] != -1) continue;
+        std::queue<int> q;
+        q.push(seed);
+        localSheetID[seed] = numLocalSheets;
+        while (!q.empty()) {
+            int li = q.front(); q.pop();
+            int f  = ringFaces[li];
+            for (int c = 0; c < 3; c++) {
+                int a = gF(f,c), b = gF(f,(c+1)%3);
+                if (a > b) std::swap(a,b);
+                const auto & nbrs = edgeToLocal[{a,b}];
+                if ((int)nbrs.size() != 2) continue;  // boundary or non-manifold
+                for (int nli : nbrs) {
+                    if (localSheetID[nli] == -1) {
+                        localSheetID[nli] = numLocalSheets;
+                        q.push(nli);
+                    }
+                }
+            }
+        }
+        numLocalSheets++;
+    }
+
+    // Group local face indices by local sheet ID
+    std::map<int, std::set<int>> sheetFaces;  // local sheet ID → set of global face indices
+    for (int li = 0; li < nRing; li++)
+        sheetFaces[localSheetID[li]].insert(ringFaces[li]);
 
     MatrixXd Vd = safe_V_ss();
     int paletteIdx = 0;
@@ -260,28 +318,60 @@ void sheet_seam_imgui_section()
         const int vj = gSeamEdgeList[gPickedSeamEdgeIdx].second;
         ImGui::TextColored({1.0f, 0.85f, 0.05f, 1.0f}, "Picked seam: v%d — v%d", vi, vj);
 
-        // Count distinct sheets in the one-ring
-        const int nFSheet = (int)gFaceSheetID.size();
-        std::set<int> sheets;
+        // Count distinct LOCAL sheets in the one-ring from current topology.
+        // Mirrors update_seam_onering_display: BFS across manifold edges only.
+        std::vector<int> rfaces;
         for (int v : {vi, vj}) {
             if (v >= (int)gVF.size()) continue;
             for (int f : gVF[v]) {
                 if (is_face_dead(gF, f)) continue;
-                if (std::isinf(gV(gF(f,0),0))) continue;
-                if (f < nFSheet) sheets.insert(gFaceSheetID(f));
+                if (std::isinf(gV(gF(f,0),0)) || std::isinf(gV(gF(f,1),0)) ||
+                    std::isinf(gV(gF(f,2),0))) continue;
+                rfaces.push_back(f);
             }
         }
-        ImGui::Text("Sheets in one-ring: %d", (int)sheets.size());
+        std::sort(rfaces.begin(), rfaces.end());
+        rfaces.erase(std::unique(rfaces.begin(), rfaces.end()), rfaces.end());
+        int numLocalSheets_ui = 0;
+        if (!rfaces.empty()) {
+            std::map<std::pair<int,int>, std::vector<int>> edgeToLoc;
+            for (int li = 0; li < (int)rfaces.size(); li++) {
+                int f = rfaces[li];
+                for (int c = 0; c < 3; c++) {
+                    int a = gF(f,c), b = gF(f,(c+1)%3);
+                    if (a > b) std::swap(a,b);
+                    edgeToLoc[{a,b}].push_back(li);
+                }
+            }
+            std::vector<int> lid((int)rfaces.size(), -1);
+            for (int seed = 0; seed < (int)rfaces.size(); seed++) {
+                if (lid[seed] != -1) continue;
+                std::queue<int> q; q.push(seed); lid[seed] = numLocalSheets_ui;
+                while (!q.empty()) {
+                    int li = q.front(); q.pop();
+                    int f  = rfaces[li];
+                    for (int c = 0; c < 3; c++) {
+                        int a = gF(f,c), b = gF(f,(c+1)%3);
+                        if (a > b) std::swap(a,b);
+                        const auto & nb = edgeToLoc[{a,b}];
+                        if ((int)nb.size() != 2) continue;
+                        for (int nli : nb) { if (lid[nli]==-1) { lid[nli]=numLocalSheets_ui; q.push(nli); } }
+                    }
+                }
+                numLocalSheets_ui++;
+            }
+        }
+        ImGui::Text("Sheets in one-ring: %d (current topology)", numLocalSheets_ui);
 
-        // Color swatch + label for each sheet
-        for (int sid : sheets) {
+        // Color swatch + label for each local sheet (matches onering mesh colors)
+        for (int sid = 0; sid < numLocalSheets_ui; sid++) {
             int cidx = sid % (int)kSheetPalette.size();
             auto & c = kSheetPalette[cidx];
             ImGui::ColorButton(("##sid" + std::to_string(sid)).c_str(),
                                {c[0], c[1], c[2], 1.0f},
                                ImGuiColorEditFlags_NoTooltip, {12, 12});
             ImGui::SameLine();
-            ImGui::Text("sheet %d", sid);
+            ImGui::Text("local sheet %d", sid);
         }
 
         if (ImGui::Button("Clear pick")) {
