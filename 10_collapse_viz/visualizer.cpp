@@ -19,6 +19,7 @@
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
 #include <vector>
+#include <set>
 #include <limits>
 #include <cmath>
 #include <thread>
@@ -37,6 +38,7 @@ extern int      gCollapseCount;
 extern bool     gFinished;
 extern int      gDecType;   // 0=midpoint, 1=qslim, 2=meshlab
 extern std::vector<single_collapse_data> gDecInfo;
+extern std::vector<std::set<int>> gVertexStructIDs;
 
 bool do_next_step();  // defined in main.cpp
 
@@ -65,8 +67,8 @@ static bool  gShowDCBrefTop     = true;   // B_reflected top-sheet copies
 static bool  gShowDCBrefBot     = true;   // B_reflected bottom-sheet copies
 static bool  gShowArrowPre      = false;
 static bool  gShowArrowPost     = false;
-static bool  gShowCorrArrows    = true;
-static bool  gShowCorrPts      = true;
+static bool  gShowCorrArrows    = false; // pre → post correspondence arrows (query_coarse_to_fine)
+static bool  gShowCorrPts      = false;
 static float gPostHeight        = 1.0f;   // elevation of ring_post above ring_pre (× ring_span, along avg_normal)
 static bool  gShowCollapsedEdge = true;
 static bool  gShowMeshPre       = false;
@@ -473,6 +475,90 @@ static void register_ring_geometry(const DisplayGeometry & g)
 }
 
 // ---- canonical view ----
+// Print a full diagnostic dump of the current snap's DC/joint-LSCM data to stdout.
+static void print_dc_snap()
+{
+    const auto& s = gSnap;
+    if (!s.valid) { printf("[PRINT-DC] no valid snap\n"); return; }
+
+    printf("\n========== DC / Joint-LSCM Diagnostic Dump ==========\n");
+    printf("  vi=%d  vj=%d  local_vi=%d  local_vj=%d\n",
+           s.vi, s.vj, s.b.size() > 0 ? s.b(0) : -1, s.b.size() > 1 ? s.b(1) : -1);
+    printf("  has_dc=%d\n", (int)s.has_dc);
+    printf("  V_pre: %dx3   V_post: %dx3\n",
+           (int)s.V_pre.rows(), (int)s.V_post.rows());
+
+    // FUV_pre
+    printf("\n--- FUV_pre (%dx3) ---\n", (int)s.FUV_pre.rows());
+    for (int f = 0; f < s.FUV_pre.rows(); f++)
+        printf("  f%d: [%d %d %d]\n", f, s.FUV_pre(f,0), s.FUV_pre(f,1), s.FUV_pre(f,2));
+
+    // FUV_post
+    printf("\n--- FUV_post (%dx3) ---\n", (int)s.FUV_post.rows());
+    for (int f = 0; f < s.FUV_post.rows(); f++)
+        printf("  f%d: [%d %d %d]\n", f, s.FUV_post(f,0), s.FUV_post(f,1), s.FUV_post(f,2));
+
+    // UV_pre
+    printf("\n--- UV_pre (%dx2) ---\n", (int)s.UV_pre.rows());
+    for (int v = 0; v < s.UV_pre.rows(); v++)
+        printf("  v%d: (%.6f, %.6f)\n", v, s.UV_pre(v,0), s.UV_pre(v,1));
+
+    // UV_post
+    printf("\n--- UV_post (%dx2) ---\n", (int)s.UV_post.rows());
+    for (int v = 0; v < s.UV_post.rows(); v++)
+        printf("  v%d: (%.6f, %.6f)\n", v, s.UV_post(v,0), s.UV_post(v,1));
+
+    if (s.has_dc) {
+        printf("\n--- DC B classification ---\n");
+        printf("  B_glued (%d):", (int)s.dc_B_glued.size());
+        for (int b : s.dc_B_glued)   printf(" %d", b);
+        printf("\n  B_reflected (%d):", (int)s.dc_B_reflected.size());
+        for (int b : s.dc_B_reflected) printf(" %d", b);
+        printf("\n");
+
+        printf("\n--- FUV_dc_pre (%dx3) ---\n", (int)s.FUV_dc_pre.rows());
+        for (int f = 0; f < s.FUV_dc_pre.rows(); f++)
+            printf("  f%d: [%d %d %d]%s\n", f,
+                   s.FUV_dc_pre(f,0), s.FUV_dc_pre(f,1), s.FUV_dc_pre(f,2),
+                   f == s.FUV_pre.rows() - 1 ? "  <- top/bot split" : "");
+
+        printf("\n--- FUV_dc_post (%dx3) ---\n", (int)s.FUV_dc_post.rows());
+        for (int f = 0; f < s.FUV_dc_post.rows(); f++)
+            printf("  f%d: [%d %d %d]%s\n", f,
+                   s.FUV_dc_post(f,0), s.FUV_dc_post(f,1), s.FUV_dc_post(f,2),
+                   f == s.FUV_post.rows() - 1 ? "  <- top/bot split" : "");
+
+        printf("\n--- UV_dc_pre (%dx2) ---\n", (int)s.UV_dc_pre.rows());
+        int nVjoint = (int)s.V_pre.rows() + 1;
+        for (int v = 0; v < s.UV_dc_pre.rows(); v++) {
+            const char* tag = "";
+            if (v == s.b(0))    tag = "  <- local_vi (top)";
+            else if (v == s.b(1)) tag = "  <- local_vj (top)";
+            else if (v == (int)s.V_pre.rows()) tag = "  <- vi post-collapse slot";
+            else {
+                for (int k = 0; k < (int)s.dc_B_reflected.size(); k++)
+                    if (v == nVjoint + k) { tag = "  <- B_ref_bot"; break; }
+            }
+            printf("  v%d: (%.6f, %.6f)%s\n", v, s.UV_dc_pre(v,0), s.UV_dc_pre(v,1), tag);
+        }
+
+        printf("\n--- UV_dc_post (%dx2) ---\n", (int)s.UV_dc_post.rows());
+        for (int v = 0; v < s.UV_dc_post.rows(); v++) {
+            const char* tag = "";
+            if (v == s.b(0))    tag = "  <- local_vi (top)";
+            else if (v == s.b(1)) tag = "  <- local_vj (top)";
+            else if (v == (int)s.V_pre.rows()) tag = "  <- vi post-collapse slot";
+            else {
+                for (int k = 0; k < (int)s.dc_B_reflected.size(); k++)
+                    if (v == nVjoint + k) { tag = "  <- B_ref_bot"; break; }
+            }
+            printf("  v%d: (%.6f, %.6f)%s\n", v, s.UV_dc_post(v,0), s.UV_dc_post(v,1), tag);
+        }
+    }
+    printf("======================================================\n\n");
+    fflush(stdout);
+}
+
 // Clears all structures and re-registers the one-ring/UV geometry rotated so that
 // avg_normal aligns with world Y-up: one-ring lies flat on the XZ floor, UV panels
 // float directly above. The main decimated mesh is hidden in this mode.
@@ -769,6 +855,28 @@ void update_display()
         MatrixXd Vd, Vc; MatrixXi Fc; VectorXi I1, I2;
         Vd = safe_V();
         igl::remove_unreferenced(Vd, Flive, Vc, Fc, I1, I2);
+
+        // Update mat_struct_ids point cloud to reflect current live vertices.
+        if (!gVertexStructIDs.empty()) {
+            const int nS = (int)gVertexStructIDs.size();
+            const int nLive = (int)Vc.rows();
+            Eigen::VectorXd structScalar(nLive);
+            for (int i = 0; i < nLive; ++i) {
+                int orig = I2(i);
+                uint32_t h = 2166136261u;
+                if (orig < nS) {
+                    for (int id : gVertexStructIDs[orig]) {
+                        h ^= (uint32_t)id;
+                        h *= 16777619u;
+                    }
+                }
+                structScalar(i) = (double)h;
+            }
+            auto* pc = polyscope::registerPointCloud("mat_struct_ids", Vc);
+            pc->setPointRadius(0.004, true);
+            pc->addScalarQuantity("struct_hash", structScalar)->setEnabled(true);
+        }
+
         auto * m = polyscope::registerSurfaceMesh("mesh", Vc, Fc);
         m->setSurfaceColor({0.75f, 0.75f, 0.75f});
         m->setEdgeWidth(0.5);
@@ -986,6 +1094,8 @@ void ui_callback()
             vis |= ImGui::Checkbox("B_mid  bottom sheet", &gShowDCBrefBot);
             ImGui::SameLine(); ImGui::TextColored({1.0f, 0.8f, 0.1f, 1.0f}, "[gold]");
         }
+        ImGui::Separator();
+        if (ImGui::Button("Print DC / LSCM info")) print_dc_snap();
     } else {
         vis |= ImGui::Checkbox("Ring pre",        &gShowRingPre);   ImGui::SameLine();
         vis |= ImGui::Checkbox("Ring post",       &gShowRingPost);
