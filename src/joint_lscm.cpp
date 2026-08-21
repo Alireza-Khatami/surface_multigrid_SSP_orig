@@ -6,6 +6,16 @@ static FILE* dc_log() {
     return f ? f : stderr;
 }
 
+void dc_log_sheet_header(int collapse_idx, int sid,
+                         int vi_global, int vj_global,
+                         int nFpre, int nV, bool is_seam)
+{
+    fprintf(dc_log(),
+        "[SHEET #%d] sid=%d vi=%d vj=%d nFpre=%d nV=%d seam=%d\n",
+        collapse_idx, sid, vi_global, vj_global, nFpre, nV, (int)is_seam);
+    fflush(dc_log());
+}
+
 void build_double_cover_faces(
     const Eigen::MatrixXi & F,
     Eigen::MatrixXi & F_dc)
@@ -185,25 +195,32 @@ void joint_lscm_double_cover(
         Fdc_post.row(nF_post + r) = make_bot_face(Fjoint_post(r,0), Fjoint_post(r,1), Fjoint_post(r,2));
 
     // --- Step 5: Pinning ---
-    // Pin the MIDDLE B_reflected vertex (top and bottom copies) as the two LSCM frame points.
-    // Middle = true pole of the diamond: equidistant from both arc endpoints, so the two
-    // halves of the DC diamond are symmetric. Using B_reflected[0] (arc-adjacent) placed
-    // the pin off-center, causing a lopsided UV fold.
-    int mid     = (int)B_reflected.size() / 2;
-    int pin_top = B_reflected[mid];        // original UV index (top sheet, middle of arc)
-    int pin_bot = nVjoint + mid;           // bottom copy of the same middle vertex
+    // Pin the B_glued endpoints at (-1, 0) and (1, 0).
+    //
+    // B_glued[0] is adjacent to vj and B_glued[1] is adjacent to vi in the one-ring.
+    // Pinning them on the seam line (y=0) spread in x forces the correct seam ordering:
+    //   B_glued[0](-1) < vj < vi < B_glued[1](+1)  at y≈0
+    //
+    // The B_reflected vertices then bow in the y-direction (up for top sheet, down for
+    // bottom sheet), producing a valid horizontal-diamond UV with no self-intersection.
+    //
+    // Previous approach (pin middle B_reflected top=(0,0) and bot=(0,1)) left x entirely
+    // unconstrained for vi, vj, and B_glued. The LSCM placed all four at y=0.5 with
+    // x-ordering vi < vj < B_glued[0] < B_glued[1], causing the boundary edge
+    // {vi, B_glued[1]} to pass through B_glued[0] and vj — a UV self-intersection.
+    int pin_left  = B_glued[0];   // seam endpoint adjacent to vj
+    int pin_right = B_glued[1];   // seam endpoint adjacent to vi
 
     VectorXi b_UV(4);
     VectorXd bc_UV(4);
-    b_UV  << pin_top,              nVjoint_dc + pin_top,
-             pin_bot,              nVjoint_dc + pin_bot;
-    bc_UV << 0.0,                  0.0,
-             1.0,                  0.0;
-    // → pin_top at UV(col1=0, col0=0) = UV(0,0) ; pin_bot at UV(col1=1, col0=0) = UV(0,1)
+    b_UV  << pin_left,             nVjoint_dc + pin_left,
+             pin_right,            nVjoint_dc + pin_right;
+    bc_UV << 0.0,                 -1.0,    // pin_left  : y=0, x=-1
+             0.0,                  1.0;    // pin_right : y=0, x=+1
 
     if (isDebug) {
-        fprintf(dc_log(), "[DC] pinning: B_ref[mid=%d]_top(idx=%d)->UV(0,0)  "
-                        "B_ref[mid=%d]_bot(idx=%d)->UV(0,1)\n", mid, pin_top, mid, pin_bot);
+        fprintf(dc_log(), "[DC] pinning: B_glued[0](idx=%d)->UV(-1,0)  "
+                        "B_glued[1](idx=%d)->UV(+1,0)\n", pin_left, pin_right);
     }
 
     // --- Step 6: Solve ---
@@ -483,16 +500,53 @@ bool joint_lscm(
 
 	if (out_case) *out_case = whichCase;
 
+	// UV-boundary mismatch check: detect seam vertices that the 3D fan walk missed.
+	// A vertex is "UV-boundary" if it has at least one incident edge that appears in
+	// only one face in FUV_pre (i.e., a boundary edge of the local UV domain).
+	{
+		std::map<std::pair<int,int>, int> edge_cnt;
+		for (int f = 0; f < FUV_pre.rows(); f++)
+			for (int c = 0; c < 3; c++) {
+				int a = FUV_pre(f, c), b = FUV_pre(f, (c+1)%3);
+				if (a > b) std::swap(a, b);
+				edge_cnt[{a, b}]++;
+			}
+		auto uv_on_bd = [&](int v) {
+			for (auto& kv : edge_cnt)
+				if ((kv.first.first == v || kv.first.second == v) && kv.second == 1)
+					return true;
+			return false;
+		};
+		bool vi_uv_bd = uv_on_bd(vi);
+		bool vj_uv_bd = uv_on_bd(vj);
+		int uv_bd_sum = (int)vi_uv_bd + (int)vj_uv_bd;
+		if (uv_bd_sum != onBd.sum()) {
+			fprintf(dc_log(),
+				"[UV-BD-MISMATCH] vi=%d vj=%d"
+				"  3D-onBd=[vi=%d,vj=%d](sum=%d)"
+				"  UV-onBd=[vi=%d,vj=%d](sum=%d)"
+				"  whichCase=%d  nFpre=%d\n",
+				vi, vj, onBd(0), onBd(1), onBd.sum(),
+				(int)vi_uv_bd, (int)vj_uv_bd, uv_bd_sum,
+				whichCase, (int)FUV_pre.rows());
+			fflush(dc_log());
+		}
+	}
+
 	switch (whichCase){
 		case 0:
 			joint_lscm_case0(V_pre,FUV_pre,V_post,FUV_post,vi,vj,bdLoop,verbose,isDebug,onBd,UV_pre,UV_post);
 			break;
 		case 1:
+			// One endpoint on seam boundary, one interior — no double cover needed.
+			// The interior vertex naturally moves to the seam boundary via the joint solve.
+			joint_lscm_case1(V_pre,FUV_pre,V_post,FUV_post,vi,vj,bdLoop,verbose,isDebug,onBd,UV_pre,UV_post);
+			break;
 		case 2:
 		{
-			// All boundary cases use double cover + 2-point pinning.
-			// Falls back to original handler if DC UV fails validation.
-			static int dc_log_count = 0;
+			// Both endpoints on seam boundary — double cover + 2-point pinning.
+			// Falls back to case2 handler if DC UV fails validation.
+			const int dc_log_count = collapse_idx;
 			bool is_seam_inj = (!Nsv.empty() && Nsv[0] == -1) ||
 			                   (!Ndv.empty() && Ndv[0] == -1);
 
@@ -512,7 +566,6 @@ bool joint_lscm(
 			                                  V_post, UV_post_dc, FUV_post,
 			                                  vi, vj, Nsv, Ndv);
 
-			dc_log_count++;
 			if (!dc_ok) {
 				// diagnose the exact failure reason
 				bool has_nan = UV_pre_dc.array().isNaN().any() ||
@@ -554,11 +607,11 @@ bool joint_lscm(
 				bool high_dist  = (max_pre > 3.0 || max_post > 3.0);
 
 				fprintf(dc_log(),
-				  "[DC-%s #%d] collapse=%d case=%d seam=%d vi=%d vj=%d nFpre=%d nFpost=%d nV=%d"
+				  "[DC-%s #%d] case=%d seam=%d vi=%d vj=%d nFpre=%d nFpost=%d nV=%d"
 				  "  B_glued=%d B_ref=%d"
 				  "  QCE_pre(max=%.3f mean=%.3f) QCE_post(max=%.3f mean=%.3f)\n",
 				  high_dist ? "HIGH-DISTORTION" : "PASS",
-				  dc_log_count, collapse_idx, whichCase, (int)is_seam_inj, vi, vj,
+				  dc_log_count, whichCase, (int)is_seam_inj, vi, vj,
 				  (int)FUV_pre.rows(), (int)FUV_post.rows(), (int)V_pre.rows(),
 				  (int)dc_B_glued.size(), (int)dc_B_reflected.size(),
 				  max_pre, mean_pre, max_post, mean_post);
@@ -592,12 +645,9 @@ bool joint_lscm(
 					        dc_log_count, vi, dc_B_glued[0], len_vi_bg0,
 					        vj, dc_B_glued[1], len_vj_bg1);
 
-					// Pin assignment (only 2 vertices pinned, rest are free LSCM)
-					if (!dc_B_reflected.empty()) {
-						int log_mid = (int)dc_B_reflected.size() / 2;
-						fprintf(dc_log(), "[DC-ARC #%d] pinned: B_ref[mid=%d]_top(idx=%d)->(0,0)  B_ref[mid=%d]_bot->(1,0)  [all other arc verts FREE]\n",
-						        dc_log_count, log_mid, dc_B_reflected[log_mid], log_mid);
-					}
+					// Pin assignment: B_glued endpoints pinned, all B_reflected FREE
+					fprintf(dc_log(), "[DC-ARC #%d] pinned: B_glued[0](idx=%d)->(-1,0)  B_glued[1](idx=%d)->(+1,0)  [B_reflected FREE]\n",
+					        dc_log_count, dc_B_glued[0], dc_B_glued[1]);
 
 					// UV positions of B_arc vertices after solve
 					fprintf(dc_log(), "[DC-ARC #%d] B_arc UV: ", dc_log_count);
@@ -626,11 +676,136 @@ bool joint_lscm(
 					dc_viz->B_reflected = dc_B_reflected;
 				}
 			} else {
-				// DC failed — fall back to original handler.
-				if (whichCase == 1)
-					joint_lscm_case1(V_pre,FUV_pre,V_post,FUV_post,vi,vj,bdLoop,verbose,isDebug,onBd,UV_pre,UV_post);
-				else
-					joint_lscm_case2(V_pre,FUV_pre,V_post,FUV_post,vi,vj,bdLoop,verbose,isDebug,onBd,UV_pre,UV_post);
+				// DC must always succeed for Case 2 — no fallback allowed.
+				// [DC-FAIL] above already logged nan/flip flags; add full UV dump here.
+				// UV_pre / FUV_pre are still the original inputs here (DC failed before assignment).
+				fprintf(dc_log(),
+				  "[DC-FATAL #%d] Case 2 DC failed — vi=%d vj=%d nFpre=%d nFpost=%d\n",
+				  dc_log_count, vi, vj, (int)FUV_pre.rows(), (int)FUV_post.rows());
+
+				// Classification check: what onBd (3D fan walk) said vs. what UV edges say
+				{
+					// UV-boundary check: vertex is on UV seam if any incident edge appears only once in FUV_pre
+					std::map<std::pair<int,int>, int> edge_cnt;
+					for (int f = 0; f < FUV_pre.rows(); f++)
+						for (int c = 0; c < 3; c++) {
+							int a = FUV_pre(f, c), b = FUV_pre(f, (c+1)%3);
+							if (a > b) std::swap(a, b);
+							edge_cnt[{a,b}]++;
+						}
+					auto uv_on_bd = [&](int v) {
+						for (auto& kv : edge_cnt)
+							if ((kv.first.first == v || kv.first.second == v) && kv.second == 1)
+								return true;
+						return false;
+					};
+					bool vi_uv = uv_on_bd(vi), vj_uv = uv_on_bd(vj);
+					fprintf(dc_log(),
+					  "[DC-FATAL #%d] classification:"
+					  "  whichCase=%d"
+					  "  onBd_3D=[vi=%d,vj=%d](sum=%d)"
+					  "  onBd_UV=[vi=%d,vj=%d](sum=%d)"
+					  "  MISMATCH=%d\n",
+					  dc_log_count, whichCase,
+					  onBd(0), onBd(1), onBd.sum(),
+					  (int)vi_uv, (int)vj_uv, (int)vi_uv+(int)vj_uv,
+					  (int)(onBd.sum() != (int)vi_uv+(int)vj_uv));
+					fflush(dc_log());
+				}
+
+				// Original FUV_pre face list (input topology, before DC construction)
+				fprintf(dc_log(), "[DC-FATAL #%d] FUV_pre faces:", dc_log_count);
+				for (int fi = 0; fi < FUV_pre.rows(); fi++)
+					fprintf(dc_log(), " f%d[%d,%d,%d]", fi, FUV_pre(fi,0), FUV_pre(fi,1), FUV_pre(fi,2));
+				fprintf(dc_log(), "\n");
+
+				// Original UV_pre — input UV coordinates for every vertex (before DC solve)
+				fprintf(dc_log(), "[DC-FATAL #%d] UV_pre (input):", dc_log_count);
+				for (int k = 0; k < UV_pre.rows(); k++)
+					fprintf(dc_log(), " v%d=(%.4f,%.4f)", k, UV_pre(k,0), UV_pre(k,1));
+				fprintf(dc_log(), "\n");
+
+				// 3D positions and UV results — guard against dc_B_glued being empty
+				// (dc_failed_early means joint_lscm_double_cover returned before arc extraction)
+				if (dc_B_glued.size() >= 2) {
+					fprintf(dc_log(),
+					  "[DC-FATAL #%d] 3D positions:"
+					  "  vi(%d)=(%.4f,%.4f,%.4f)  vj(%d)=(%.4f,%.4f,%.4f)"
+					  "  B_glued[0](%d)=(%.4f,%.4f,%.4f)  B_glued[1](%d)=(%.4f,%.4f,%.4f)\n",
+					  dc_log_count,
+					  vi,  V_pre(vi,0),  V_pre(vi,1),  V_pre(vi,2),
+					  vj,  V_pre(vj,0),  V_pre(vj,1),  V_pre(vj,2),
+					  dc_B_glued[0], V_pre(dc_B_glued[0],0), V_pre(dc_B_glued[0],1), V_pre(dc_B_glued[0],2),
+					  dc_B_glued[1], V_pre(dc_B_glued[1],0), V_pre(dc_B_glued[1],1), V_pre(dc_B_glued[1],2));
+
+					if (UV_pre_dc.rows() > 0) {
+						fprintf(dc_log(),
+						  "[DC-FATAL #%d] UV solve results:"
+						  "  vi(%d)=(%.4f,%.4f)  vj(%d)=(%.4f,%.4f)"
+						  "  B_glued[0](%d)=(%.4f,%.4f)  B_glued[1](%d)=(%.4f,%.4f)\n",
+						  dc_log_count,
+						  vi,  UV_pre_dc(vi,0),  UV_pre_dc(vi,1),
+						  vj,  UV_pre_dc(vj,0),  UV_pre_dc(vj,1),
+						  dc_B_glued[0], UV_pre_dc(dc_B_glued[0],0), UV_pre_dc(dc_B_glued[0],1),
+						  dc_B_glued[1], UV_pre_dc(dc_B_glued[1],0), UV_pre_dc(dc_B_glued[1],1));
+
+						// Full B_arc UV positions (seam ordering check)
+						std::vector<int> b_arc_full;
+						b_arc_full.push_back(dc_B_glued[0]);
+						for (int k : dc_B_reflected) b_arc_full.push_back(k);
+						b_arc_full.push_back(dc_B_glued[1]);
+						fprintf(dc_log(), "[DC-FATAL #%d] B_arc UV: ", dc_log_count);
+						for (int b : b_arc_full)
+							fprintf(dc_log(), "%d=(%.3f,%.3f) ", b, UV_pre_dc(b,0), UV_pre_dc(b,1));
+						fprintf(dc_log(), "\n");
+					} else {
+						fprintf(dc_log(), "[DC-FATAL #%d] UV solve results: EMPTY (NaN/early-exit)\n", dc_log_count);
+					}
+				} else {
+					fprintf(dc_log(),
+					  "[DC-FATAL #%d] 3D positions: vi(%d)=(%.4f,%.4f,%.4f)  vj(%d)=(%.4f,%.4f,%.4f)"
+					  "  B_glued=EMPTY(dc_failed_early)\n",
+					  dc_log_count,
+					  vi, V_pre(vi,0), V_pre(vi,1), V_pre(vi,2),
+					  vj, V_pre(vj,0), V_pre(vj,1), V_pre(vj,2));
+				}
+
+				// Per-face signed areas — only if UV_pre_dc was actually populated
+				if (UV_pre_dc.rows() > 0) {
+					fprintf(dc_log(), "[DC-FATAL #%d] FUV_pre signed areas:", dc_log_count);
+					for (int fi = 0; fi < FUV_pre.rows(); fi++) {
+						int a = FUV_pre(fi,0), b = FUV_pre(fi,1), c = FUV_pre(fi,2);
+						double sa = (UV_pre_dc(b,0)-UV_pre_dc(a,0))*(UV_pre_dc(c,1)-UV_pre_dc(a,1))
+						          - (UV_pre_dc(b,1)-UV_pre_dc(a,1))*(UV_pre_dc(c,0)-UV_pre_dc(a,0));
+						fprintf(dc_log(), " f%d[%d,%d,%d]=%.4f", fi, a, b, c, sa);
+					}
+					fprintf(dc_log(), "\n");
+				}
+				if (UV_post_dc.rows() > 0) {
+					fprintf(dc_log(), "[DC-FATAL #%d] FUV_post signed areas:", dc_log_count);
+					for (int fi = 0; fi < FUV_post.rows(); fi++) {
+						int a = FUV_post(fi,0), b = FUV_post(fi,1), c = FUV_post(fi,2);
+						double sa = (UV_post_dc(b,0)-UV_post_dc(a,0))*(UV_post_dc(c,1)-UV_post_dc(a,1))
+						          - (UV_post_dc(b,1)-UV_post_dc(a,1))*(UV_post_dc(c,0)-UV_post_dc(a,0));
+						fprintf(dc_log(), " f%d[%d,%d,%d]=%.4f", fi, a, b, c, sa);
+					}
+					fprintf(dc_log(), "\n");
+				}
+				fflush(dc_log());
+				
+				// assert(false && "joint_lscm Case 2: double cover UV failed — no fallback, fix the DC");
+				// TEMP: assign failed DC UV so visualizer shows F_pre/F_post for inspection.
+				UV_pre  = UV_pre_dc;
+				UV_post = UV_post_dc;
+				if (dc_viz) {
+					dc_viz->has_data    = true;
+					dc_viz->FUV_dc_pre  = dc_F_pre;
+					dc_viz->FUV_dc_post = dc_F_post;
+					dc_viz->UV_dc_pre   = dc_UV_pre;
+					dc_viz->UV_dc_post  = dc_UV_post;
+					dc_viz->B_glued     = dc_B_glued;
+					dc_viz->B_reflected = dc_B_reflected;
+				}
 			}
 			break;
 		}

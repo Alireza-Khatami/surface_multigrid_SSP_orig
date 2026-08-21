@@ -4,6 +4,7 @@
 #include <vector>
 #include <map>
 #include <set>
+#include <sstream>
 #include <cstdio>
 #include <cmath>
 
@@ -260,6 +261,78 @@ bool SSP_collapse_edge(
   if (is_seam_collapse)
     SEAM_LOG("[SEAM-TRY]  e=(%d,%d) vi=%d vj=%d  active_sheets=%zu\n",
       E(e,0), E(e,1), vi, vj, active_sheets.size());
+
+  // ---- Build one-ring seam diagnostic (stored on data for the canonical view button) ----
+  {
+    // All real one-ring faces: vi's faces (Nsf) + vj's faces (Ndf).
+    set<int> onering_set;
+    for (int f : Nsf) if (!null_face(f) && f < numOrigFaces) onering_set.insert(f);
+    for (int f : Ndf) if (!null_face(f) && f < numOrigFaces) onering_set.insert(f);
+
+    std::ostringstream ss;
+    ss << "=== One-Ring Seam Diagnostic ===\n";
+    ss << "e=(" << E(e,0) << "," << E(e,1) << ")  vi=" << vi << "  vj=" << vj << "\n";
+    ss << "active_sheets (" << active_sheets.size() << "): [";
+    for (int sid : active_sheets) ss << sid << " ";
+    ss << "]\n\n";
+
+    // Per-face: which side of the edge (vi/vj) + sheet ID.
+    ss << "Faces in one-ring (global_idx  sheet_id  side):\n";
+    for (int f : onering_set) {
+      bool in_nsf = std::find(Nsf.begin(), Nsf.end(), f) != Nsf.end();
+      bool in_ndf = std::find(Ndf.begin(), Ndf.end(), f) != Ndf.end();
+      const char * side = (in_nsf && in_ndf) ? "both" : (in_nsf ? "vi" : "vj");
+      int sid = faceSheetID(f);
+      bool is_active = active_sheets.count(sid) > 0;
+      ss << "  f=" << f << "  sid=" << sid
+         << (is_active ? "  [ACTIVE]" : "  [naf]  ")
+         << "  side=" << side << "\n";
+    }
+
+    // Seam edges: adjacent face pairs inside the one-ring with different sheet IDs.
+    // Build edge → incident one-ring faces map.
+    map<pair<int,int>, vector<int>> edge_faces;
+    for (int f : onering_set) {
+      for (int k = 0; k < 3; k++) {
+        int va = F(f,k), vb = F(f,(k+1)%3);
+        if (va > vb) swap(va, vb);
+        edge_faces[{va,vb}].push_back(f);
+      }
+    }
+    ss << "\nSeam edges within one-ring (adjacent faces with different sheet IDs):\n";
+    bool any = false;
+    for (auto & kv : edge_faces) {
+      if ((int)kv.second.size() < 2) continue;
+      // For non-manifold edges there can be >2 faces; check all pairs.
+      for (int i = 0; i < (int)kv.second.size(); i++) {
+        for (int j = i+1; j < (int)kv.second.size(); j++) {
+          int f0 = kv.second[i], f1 = kv.second[j];
+          int s0 = faceSheetID(f0), s1 = faceSheetID(f1);
+          if (s0 != s1) {
+            ss << "  edge=(" << kv.first.first << "," << kv.first.second
+               << ")  f=" << f0 << "(sid=" << s0 << ") / f=" << f1 << "(sid=" << s1 << ")\n";
+            any = true;
+          }
+        }
+      }
+    }
+    if (!any) ss << "  (none — all adjacent one-ring face pairs share the same sheet ID)\n";
+
+    // Sheet breakdown: which faces belong to each sheet.
+    ss << "\nSheet breakdown:\n";
+    map<int, vector<int>> by_sheet;
+    for (int f : onering_set) by_sheet[faceSheetID(f)].push_back(f);
+    for (auto & kv : by_sheet) {
+      bool is_active = active_sheets.count(kv.first) > 0;
+      ss << "  sid=" << kv.first << (is_active ? " [ACTIVE]" : " [naf]  ")
+         << "  nF=" << kv.second.size() << "  faces=[";
+      for (int f : kv.second) ss << f << " ";
+      ss << "]\n";
+    }
+
+    data.onering_seam_log = ss.str();
+  }
+  // ---- end seam diagnostic ----
 
   // Helper: is vtx referenced by any face in flist?
   auto vtx_in_flist = [&](const vector<int> & flist, int vtx) -> bool {
@@ -559,18 +632,49 @@ bool SSP_collapse_edge(
     }
     // ---- end pre-joint_lscm invariant check ----
 
-    // Seam edge: the collapsed edge borders multiple sheets.  The faces from other
-    // sheets are excluded from this sheet's local patch, so each endpoint's fan is
-    // naturally open at the seam.  Inject -1 (infVtx sentinel) at position 0 of
-    // each walk so joint_lscm treats both vi and vj as boundary vertices
-    // (onBd.sum()==2 → Case 2).  Injection is after the invariant check so INV-H
-    // (which rejects -1 at position 0 as an INF-AS-START bug) does not fire.
-    if (active_sheets.size() > 1) {
-      if (std::find(Nsv_local.begin(), Nsv_local.end(), -1) == Nsv_local.end())
-        Nsv_local.insert(Nsv_local.begin(), -1);
-      if (std::find(Ndv_local.begin(), Ndv_local.end(), -1) == Ndv_local.end())
-        Ndv_local.insert(Ndv_local.begin(), -1);
+    // Inject -1 (infVtx sentinel) into walks so joint_lscm treats endpoints as
+    // boundary vertices (Case 2 → DC) for two situations:
+    //
+    // (A) Seam collapse (active_sheets > 1): both endpoints are on the seam, so
+    //     inject -1 into both walks.
+    //
+    // (B) Mesh-boundary (active_sheets == 1): the global mesh is closed by infinity
+    //     faces for all open boundaries, so a boundary vertex has infinity faces in
+    //     its walk list.  The fan walk bypasses them (real faces come first and the
+    //     loop breaks on first match), so -1 never appears naturally.  Inject -1
+    //     SELECTIVELY: only into the walk whose face list actually contains an
+    //     infinity face, so only truly boundary endpoints raise onBd.
+    //
+    // Injection is after the invariant check so INV-H does not fire on the
+    // pre-injection walk.
+    {
+      auto has_inf_face = [&](const vector<int> & wf) -> bool {
+        for (int f : wf) if (!null_face(f) && f >= numOrigFaces) return true;
+        return false;
+      };
+      if (active_sheets.size() > 1) {
+        // Seam collapse: both endpoints are on the seam, inject into both.
+        if (std::find(Nsv_local.begin(), Nsv_local.end(), -1) == Nsv_local.end())
+          Nsv_local.insert(Nsv_local.begin(), -1);
+        if (std::find(Ndv_local.begin(), Ndv_local.end(), -1) == Ndv_local.end())
+          Ndv_local.insert(Ndv_local.begin(), -1);
+      } else {
+        // Mesh-boundary collapse: inject -1 only for endpoints that actually
+        // have an infinity face in their walk (i.e. sit on the open boundary).
+        if (has_inf_face(Nsf_walk) &&
+            std::find(Nsv_local.begin(), Nsv_local.end(), -1) == Nsv_local.end())
+          Nsv_local.insert(Nsv_local.begin(), -1);
+        if (has_inf_face(Ndf_walk) &&
+            std::find(Ndv_local.begin(), Ndv_local.end(), -1) == Ndv_local.end())
+          Ndv_local.insert(Ndv_local.begin(), -1);
+      }
     }
+
+    // Log per-sheet header to dc_log so sheet boundaries are visible in the log.
+    dc_log_sheet_header((int)decInfo.size(), sid,
+                        E(e,0), E(e,1),
+                        (int)FUV_pre_si.rows(), (int)V_pre_si.rows(),
+                        is_seam_collapse);
 
     // joint_lscm — boundary cases (1/2) use double cover + 2-point pinning.
     MatrixXd UV_pre_si, UV_post_si;

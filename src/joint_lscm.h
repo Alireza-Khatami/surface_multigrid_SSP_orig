@@ -122,6 +122,12 @@ bool joint_lscm(
   DCVizData * dc_viz = nullptr,
   int collapse_idx = -1);
 
+// Write a per-sheet header line to dc_log.txt so sheet boundaries are visible
+// in the log even when no DC is attempted (Case 0/1 collapses).
+void dc_log_sheet_header(int collapse_idx, int sid,
+                         int vi_global, int vj_global,
+                         int nFpre, int nV, bool is_seam);
+
 bool check_valid_UV_lscm(
   const Eigen::MatrixXd & V_pre,
   const Eigen::MatrixXd & UV_pre,

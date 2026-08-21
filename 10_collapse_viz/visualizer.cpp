@@ -100,6 +100,10 @@ struct DisplaySnap {
     std::vector<int> dc_B_reflected;  // middle B indices (top-sheet local indices)
 } gSnap;
 
+// Per-sheet browsing: all sheets from the most recent collapse, and which is active.
+static std::vector<SheetData> gAllSheets;
+static int gActiveSheetIdx = 0;
+
 // ---- helpers ----
 
 static MatrixXi live_faces()
@@ -154,30 +158,45 @@ static void snapshot_pre_mesh()
     export_current_mesh();   // always overwrite latest_snapshot.obj
 }
 
+static void apply_sheet_to_snap(const SheetData & sd)
+{
+    gSnap.valid    = true;
+    gSnap.b        = sd.b;
+    gSnap.vi       = sd.subsetVIdx(sd.b(0));
+    gSnap.vj       = sd.subsetVIdx(sd.b(1));
+    // Use this sheet's own 3D geometry — each sheet has its own local vertex set.
+    // Without this, V_pre and UV_pre row counts diverge → OOB crash.
+    gSnap.V_pre    = sd.V_pre;
+    gSnap.V_post   = sd.V_post;
+    gSnap.FUV_pre  = sd.FUV_pre;
+    gSnap.FUV_post = sd.FUV_post;
+    gSnap.UV_pre   = sd.UV_pre;
+    gSnap.UV_post  = sd.UV_post;
+    gSnap.has_dc          = sd.has_double_cover;
+    gSnap.FUV_dc_pre      = sd.FUV_dc_pre;
+    gSnap.FUV_dc_post     = sd.FUV_dc_post;
+    gSnap.UV_dc_pre       = sd.UV_dc_pre;
+    gSnap.UV_dc_post      = sd.UV_dc_post;
+    gSnap.dc_B_glued      = sd.dc_B_glued;
+    gSnap.dc_B_reflected  = sd.dc_B_reflected;
+}
+
 static void refresh_snap()
 {
     if (gDecInfo.empty()) return;
     const single_collapse_data & d = gDecInfo.back();
     gSnap.V_pre  = d.V_pre;
     gSnap.V_post = d.V_post;
-    if (!d.sheets.empty()) {
-        const SheetData & sd = d.sheets[0];
-        gSnap.valid    = true;
-        gSnap.b        = sd.b;
-        gSnap.vi       = sd.subsetVIdx(sd.b(0));
-        gSnap.vj       = sd.subsetVIdx(sd.b(1));
-        gSnap.FUV_pre  = sd.FUV_pre;
-        gSnap.FUV_post = sd.FUV_post;
-        gSnap.UV_pre   = sd.UV_pre;
-        gSnap.UV_post  = sd.UV_post;
-        gSnap.has_dc          = sd.has_double_cover;
-        gSnap.FUV_dc_pre      = sd.FUV_dc_pre;
-        gSnap.FUV_dc_post     = sd.FUV_dc_post;
-        gSnap.UV_dc_pre       = sd.UV_dc_pre;
-        gSnap.UV_dc_post      = sd.UV_dc_post;
-        gSnap.dc_B_glued      = sd.dc_B_glued;
-        gSnap.dc_B_reflected  = sd.dc_B_reflected;
-    }
+    // Only keep active-sheet entries.  Non-active-sheet face stubs are single
+    // triangles (FUV_pre.rows() == 1, b(0) == 3 → OOB into 3-row V_pre → crash).
+    // Active sheets always have ≥ 3 faces (the collapse loop rejects ≤ 2).
+    gAllSheets.clear();
+    for (const SheetData & sd : d.sheets)
+        if (sd.FUV_pre.rows() >= 3)
+            gAllSheets.push_back(sd);
+    gActiveSheetIdx = 0;
+    if (!gAllSheets.empty())
+        apply_sheet_to_snap(gAllSheets[0]);
 }
 
 // ---- shared geometry ----
@@ -659,36 +678,92 @@ static void show_canonical_view()
     polyscope::getPointCloud ("ring_post_pts")       ->setEnabled(gShowCanonUV);
     polyscope::getCurveNetwork("uv_collapsed_edge")  ->setEnabled(showRegularUV);
 
-    // Non-active sheet faces: faces incident to d that belong to sheets NOT
-    // processed by this collapse, PLUS all extra active sheets (sheets[1...]).
+    // Non-active sheet geometry: two kinds rendered separately.
     //
-    // Why include extra active sheets here: for a seam collapse every sheet that
-    // contains the seam edge has BOTH endpoints and becomes "active" (LSCM runs for
-    // each).  Their faces all go into FIdx_combined inside SSP_collapse_edge, so they
-    // are excluded from data.non_active_faces even though they are NOT the primary
-    // sheet shown in the one-ring/UV panels.  We fold them in explicitly so all
-    // non-primary-sheet faces appear together in this purple overlay.
+    // (a) NAF faces — faces of the absorbed vertex in sheets that don't contain the
+    //     collapsed edge at all.  Rendered as one neutral gray mesh.
+    //
+    // (b) Non-active gAllSheets entries — sheets that DO contain the edge (seam
+    //     collapses) but are not the currently selected active sheet.  Each gets its
+    //     own palette color so the user can visually separate them.
     if (!gDecInfo.empty()) {
         const auto & collapse = gDecInfo.back();
-        std::vector<std::array<double,3>> verts;
-        std::vector<std::array<int,3>>    faces;
 
-        // (a) d's faces in truly inactive sheets (classic non-active faces)
-        for (const auto & naf : collapse.non_active_faces) {
-            if (naf.is_infinity_face) continue;
-            if (!naf.p0.allFinite() || !naf.p1.allFinite() || !naf.p2.allFinite()) continue;
-            int base = (int)verts.size();
-            for (const Vector3d & pt : {naf.p0, naf.p1, naf.p2}) {
-                Vector3d rp = R * (pt - g.centroid);
-                verts.push_back({rp.x(), rp.y(), rp.z()});
+        // Shared HSV helper used by both (a) and (b).
+        auto hsv_to_rgb = [](float h, float s, float v) -> std::array<float,3> {
+            float c = v * s, x = c * (1.f - std::fabs(std::fmod(h * 6.f, 2.f) - 1.f));
+            float m = v - c;
+            float r,g,b;
+            int hi = (int)(h * 6.f);
+            switch (hi % 6) {
+                case 0: r=c; g=x; b=0; break;
+                case 1: r=x; g=c; b=0; break;
+                case 2: r=0; g=c; b=x; break;
+                case 3: r=0; g=x; b=c; break;
+                case 4: r=x; g=0; b=c; break;
+                default:r=c; g=0; b=x; break;
             }
-            faces.push_back({base, base+1, base+2});
+            return {r+m, g+m, b+m};
+        };
+
+        // (a) NAF faces — grouped by sheet_id, one mesh per sheet with its own hue.
+        {
+            // Group by sheet_id.
+            std::map<int, std::vector<const NonActiveSheetFace*>> by_sheet;
+            for (const auto & naf : collapse.non_active_faces) {
+                if (naf.is_infinity_face) continue;
+                if (!naf.p0.allFinite() || !naf.p1.allFinite() || !naf.p2.allFinite()) continue;
+                by_sheet[naf.sheet_id].push_back(&naf);
+            }
+            int nNafSheets = (int)by_sheet.size();
+            if (nNafSheets < 1) nNafSheets = 1;
+            int slot = 0;
+            for (auto & kv : by_sheet) {
+                std::vector<std::array<double,3>> verts;
+                std::vector<std::array<int,3>>    faces;
+                for (const auto * naf : kv.second) {
+                    int base = (int)verts.size();
+                    for (const Vector3d & pt : {naf->p0, naf->p1, naf->p2}) {
+                        Vector3d rp = R * (pt - g.centroid);
+                        verts.push_back({rp.x(), rp.y(), rp.z()});
+                    }
+                    faces.push_back({base, base+1, base+2});
+                }
+                MatrixXd nafV((int)verts.size(), 3);
+                MatrixXi nafF((int)faces.size(), 3);
+                for (int i = 0; i < (int)verts.size(); i++)
+                    nafV.row(i) << verts[i][0], verts[i][1], verts[i][2];
+                for (int i = 0; i < (int)faces.size(); i++)
+                    nafF.row(i) << faces[i][0], faces[i][1], faces[i][2];
+                float hue = (float)slot / (float)nNafSheets;
+                // Offset NAF hues by 0.5 so they don't collide with the (b) block hues.
+                hue = std::fmod(hue + 0.5f, 1.0f);
+                auto c = hsv_to_rgb(hue, 0.55f, 0.80f);  // desaturated vs active sheets
+                char name[64];
+                snprintf(name, sizeof(name), "naf_sheet_sid%d", kv.first);
+                polyscope::registerSurfaceMesh(name, nafV, nafF)
+                    ->setSurfaceColor({c[0], c[1], c[2]})
+                    ->setEdgeWidth(1.0)
+                    ->setSmoothShade(false)
+                    ->setTransparency(0.40f)
+                    ->setEnabled(gShowCanonRing);
+                slot++;
+            }
         }
 
-        // (b) extra active sheets (sheets[1...]) — seam collapses only.
-        // Their pre-collapse one-ring faces, transformed into the canonical frame.
-        for (int si = 1; si < (int)collapse.sheets.size(); si++) {
-            const SheetData & es = collapse.sheets[si];
+        // (b) Non-active gAllSheets entries — one mesh per sheet, hues evenly distributed
+        //     across the full color wheel so every sheet gets a unique color regardless
+        //     of how many sheets there are.
+
+        // Count non-active sheets first so we can space hues evenly.
+        int nNonActive = (int)gAllSheets.size() - 1;  // one is the active sheet
+        if (nNonActive < 1) nNonActive = 1;            // avoid div-by-zero
+        int colorSlot = 0;
+        for (int si = 0; si < (int)gAllSheets.size(); si++) {
+            if (si == gActiveSheetIdx) continue;
+            const SheetData & es = gAllSheets[si];
+            std::vector<std::array<double,3>> verts;
+            std::vector<std::array<int,3>>    faces;
             for (int fi = 0; fi < es.FUV_pre.rows(); fi++) {
                 int i0 = es.FUV_pre(fi,0), i1 = es.FUV_pre(fi,1), i2 = es.FUV_pre(fi,2);
                 if (i0 >= es.V_pre.rows() || i1 >= es.V_pre.rows() || i2 >= es.V_pre.rows()) continue;
@@ -703,21 +778,25 @@ static void show_canonical_view()
                 }
                 faces.push_back({base, base+1, base+2});
             }
-        }
-
-        if (!faces.empty()) {
-            MatrixXd nafV((int)verts.size(), 3);
-            MatrixXi nafF((int)faces.size(), 3);
-            for (int i = 0; i < (int)verts.size(); i++)
-                nafV.row(i) << verts[i][0], verts[i][1], verts[i][2];
-            for (int i = 0; i < (int)faces.size(); i++)
-                nafF.row(i) << faces[i][0], faces[i][1], faces[i][2];
-            polyscope::registerSurfaceMesh("non_active_sheet_faces", nafV, nafF)
-                ->setSurfaceColor({0.55f, 0.3f, 0.85f})
-                ->setEdgeWidth(1.5)
-                ->setSmoothShade(false)
-                ->setTransparency(0.45f)
-                ->setEnabled(gShowCanonRing);
+            if (!faces.empty()) {
+                char name[64];
+                snprintf(name, sizeof(name), "sheet_inactive_%d_sid%d", si, es.global_sheet_id);
+                MatrixXd shV((int)verts.size(), 3);
+                MatrixXi shF((int)faces.size(), 3);
+                for (int i = 0; i < (int)verts.size(); i++)
+                    shV.row(i) << verts[i][0], verts[i][1], verts[i][2];
+                for (int i = 0; i < (int)faces.size(); i++)
+                    shF.row(i) << faces[i][0], faces[i][1], faces[i][2];
+                float hue = (float)colorSlot / (float)nNonActive;
+                auto c = hsv_to_rgb(hue, 0.75f, 0.9f);
+                polyscope::registerSurfaceMesh(name, shV, shF)
+                    ->setSurfaceColor({c[0], c[1], c[2]})
+                    ->setEdgeWidth(1.5)
+                    ->setSmoothShade(false)
+                    ->setTransparency(0.45f)
+                    ->setEnabled(gShowCanonRing);
+            }
+            colorSlot++;
         }
     }
 
@@ -979,9 +1058,15 @@ void ui_callback()
             }
             // Stop at DC: fires only when the successful collapse actually used the
             // double cover solve (true geometric boundary, not seam-injected).
+            // show_canonical_view() must be called here because update_display() already
+            // ran above with gCanonicalView=false; setting the flag alone leaves the
+            // normal-view geometry on screen and won't re-render on the next frame
+            // (gRunning is false so the running block won't execute).
             if (gStopAtDC && gSnap.has_dc) {
                 gRunning       = false;
                 gCanonicalView = true;
+                show_canonical_view();
+                polyscope::view::resetCameraToHomeView();
             }
 
             if (gBreakAtCollapse > 0 && gCollapseCount >= gBreakAtCollapse) {
@@ -1097,6 +1182,36 @@ void ui_callback()
     ImGui::Text("Visibility:");
     bool vis = false;
     if (gCanonicalView) {
+        // Per-sheet selector — only shown when there are multiple sheets.
+        if ((int)gAllSheets.size() > 1) {
+            ImGui::Text("Sheet:");
+            for (int i = 0; i < (int)gAllSheets.size(); i++) {
+                bool active = (i == gActiveSheetIdx);
+                char label[32];
+                snprintf(label, sizeof(label), "Sheet %d (sid=%d)##sh%d",
+                         i, gAllSheets[i].global_sheet_id, i);
+                if (ImGui::Checkbox(label, &active) && active) {
+                    gActiveSheetIdx = i;
+                    apply_sheet_to_snap(gAllSheets[i]);
+                    vis = true;   // trigger redraw
+                }
+            }
+            ImGui::Separator();
+        }
+        // Seam diagnostic button — prints one-ring face/sheet/seam-edge info to stdout.
+        if (ImGui::Button("Log Seam Info")) {
+            if (!gDecInfo.empty() && !gDecInfo.back().onering_seam_log.empty()) {
+                printf("\n%s\n", gDecInfo.back().onering_seam_log.c_str());
+                fflush(stdout);
+            } else {
+                printf("[Log Seam Info] no data for current collapse\n");
+                fflush(stdout);
+            }
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(prints to stdout)");
+        ImGui::Separator();
+
         vis |= ImGui::Checkbox("UV", &gShowCanonUV);
         vis |= ImGui::Checkbox("One ring (+ non-active sheets)", &gShowCanonRing);
         if (gSnap.has_dc) {

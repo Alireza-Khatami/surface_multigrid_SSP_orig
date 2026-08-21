@@ -3,6 +3,7 @@
 
 #include <vector>
 #include <optional>
+#include <string>
 #include <Eigen/Core>
 
 // A face incident to the absorbed vertex d that belongs to a sheet NOT active
@@ -48,6 +49,10 @@ struct single_collapse_data
     int numFlapFaces = 0;           // faces killed in topology pass (2=manifold, >2=seam edge)
     std::optional<int> lscm_case;   // joint_lscm case: 0=both interior, 1=one on bd, 2=both on bd
     std::vector<NonActiveSheetFace> non_active_faces; // faces remapped but not in active sheet
+    // Pre-formatted diagnostic string for the canonical view "Log Seam Info" button.
+    // Shows per-face sheet IDs and seam edges (adjacent faces with different sheet IDs)
+    // for the full one-ring (Nsf ∪ Ndf) of this collapse.
+    std::string onering_seam_log;
 };
 
 #endif
