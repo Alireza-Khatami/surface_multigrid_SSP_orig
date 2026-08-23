@@ -203,6 +203,92 @@ def _compute_f2c_samples():
 
 
 # ---------------------------------------------------------------------------
+# Mode 2: tracker fine samples → F2C query
+# ---------------------------------------------------------------------------
+
+def _compute_tracker_fine_f2c() -> bool:
+    """
+    Read sample positions from samples_fine_*.txt (same as Mode 1) but
+    compute the coarse landing via the pre-built per-vertex F2C map (_f2c_v),
+    exactly like Mode 0 does for random samples.
+
+    This lets you compare the tracker's coarse output (Mode 1) against the
+    F2C query result (Mode 2) on the *identical* set of fine-mesh samples.
+    """
+    global _sample_face_ids, _sample_bcs
+    global _fine_sample_pts, _coarse_land_pts, _sample_tracked
+    global _tracker_sample_ids, _tracker_is_vertex, _tracker_fine_face_id, _tracker_fine_bc
+
+    b = _bundle
+    if b is None or _f2c_v is None:
+        print("[mode2] ERROR: bundle or f2c map not ready")
+        return False
+    if not _tracker_fine_path:
+        print("[mode2] ERROR: no tracker fine file path set")
+        return False
+    if not os.path.isfile(_tracker_fine_path):
+        print(f"[mode2] ERROR: fine file not found: {_tracker_fine_path}")
+        return False
+
+    def _read_txt(path):
+        with open(path, "r") as fh:
+            lines = fh.readlines()
+        data_lines = [l for l in lines if not l.strip().startswith("#")]
+        count = int(data_lines[0].strip())
+        return [l.split() for l in data_lines[1:count + 1]]
+
+    fine_rows = _read_txt(_tracker_fine_path)
+    N = len(fine_rows)
+    print(f"[mode2] {N} samples from {os.path.basename(_tracker_fine_path)} — mapping via F2C query")
+
+    sample_ids    = np.zeros(N, dtype=np.int32)
+    is_vertex     = np.zeros(N, dtype=bool)
+    fine_face_ids = np.zeros(N, dtype=np.int32)
+    fine_bc       = np.zeros((N, 3), dtype=np.float64)
+
+    for i, fr in enumerate(fine_rows):
+        sample_ids[i]    = int(fr[0])
+        is_vertex[i]     = bool(int(fr[1]))
+        fine_face_ids[i] = int(fr[2])
+        fine_bc[i]       = [float(fr[3]), float(fr[4]), float(fr[5])]
+
+    ff = fine_face_ids
+    fv = b.fineV
+    fi = b.fineF
+    fine_pts = (fine_bc[:, 0:1] * fv[fi[ff, 0]]
+              + fine_bc[:, 1:2] * fv[fi[ff, 1]]
+              + fine_bc[:, 2:3] * fv[fi[ff, 2]])
+
+    # Coarse positions via interpolated per-vertex F2C map (same as Mode 0)
+    c0 = _f2c_v[fi[ff, 0]]
+    c1 = _f2c_v[fi[ff, 1]]
+    c2 = _f2c_v[fi[ff, 2]]
+    coarse_pts = (fine_bc[:, 0:1] * c0
+                + fine_bc[:, 1:2] * c1
+                + fine_bc[:, 2:3] * c2)
+
+    t0 = _tracked_mask[fi[ff, 0]]
+    t1 = _tracked_mask[fi[ff, 1]]
+    t2 = _tracked_mask[fi[ff, 2]]
+    tracked = t0 & t1 & t2
+
+    _tracker_sample_ids   = sample_ids
+    _tracker_is_vertex    = is_vertex
+    _tracker_fine_face_id = fine_face_ids
+    _tracker_fine_bc      = fine_bc
+
+    _sample_face_ids  = fine_face_ids
+    _sample_bcs       = fine_bc
+    _fine_sample_pts  = fine_pts
+    _coarse_land_pts  = coarse_pts
+    _sample_tracked   = tracked
+
+    n_tr = int(tracked.sum())
+    print(f"[mode2] {n_tr}/{N} samples on fully-tracked faces  ({100*n_tr/N:.1f}%)")
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Load tracker files — Mode 1
 # ---------------------------------------------------------------------------
 
@@ -490,6 +576,15 @@ def ui_callback():
             _load_tracker_samples(_tracker_fine_path, _tracker_coarse_path)
             _rebuild_all()
 
+    clicked2 = psim.RadioButton("Mode 2: Tracker fine samples + F2C query", _viz_mode == 2)
+    if clicked2 and _viz_mode != 2:
+        _viz_mode = 2
+        _selected_face   = -1
+        _selected_sample = -1
+        if _tracker_fine_path and _f2c_v is not None:
+            _compute_tracker_fine_f2c()
+            _rebuild_all()
+
     psim.Separator()
 
     # ---- Z offset ----
@@ -565,8 +660,8 @@ def ui_callback():
         elif _pick_face_mode:
             psim.TextDisabled("  Click a fine mesh face to filter")
 
-    else:
-        # Mode 1 — Tracker files
+    elif _viz_mode == 1:
+        # Mode 1 — Tracker files (both fine + coarse from disk)
         psim.TextUnformatted("[ Mode 1: SSP Sample Tracker output files ]")
 
         psim.TextDisabled("Fine file:")
@@ -587,6 +682,29 @@ def ui_callback():
             N     = len(_fine_sample_pts)
             n_vtx = int(_tracker_is_vertex.sum()) if _tracker_is_vertex is not None else 0
             psim.TextUnformatted(f"{N} samples  |  {n_vtx} vertex  {N - n_vtx} interior")
+
+    else:
+        # Mode 2 — Tracker fine samples, coarse via F2C query
+        psim.TextUnformatted("[ Mode 2: Tracker fine samples -> F2C query ]")
+        psim.TextDisabled("Fine file (sample positions):")
+        psim.TextUnformatted(f"  {os.path.basename(_tracker_fine_path) if _tracker_fine_path else '(none)'}")
+        psim.TextDisabled("Coarse landing: computed via F2C query (not tracker)")
+
+        if psim.Button("Recompute (Mode 2)"):
+            if _tracker_fine_path and _f2c_v is not None:
+                ok = _compute_tracker_fine_f2c()
+                if ok:
+                    _selected_sample = -1
+                    _rebuild_all()
+            else:
+                print("[mode2] Need tracker fine file and F2C map")
+
+        if _fine_sample_pts is not None:
+            N    = len(_fine_sample_pts)
+            n_tr = int(_sample_tracked.sum()) if _sample_tracked is not None else 0
+            n_vtx = int(_tracker_is_vertex.sum()) if _tracker_is_vertex is not None else 0
+            psim.TextUnformatted(f"{N} samples  |  {n_vtx} vertex  {N - n_vtx} interior")
+            psim.TextUnformatted(f"  {n_tr} on fully-tracked faces")
 
     # ---- Display ----
     psim.Separator()
@@ -621,7 +739,7 @@ def ui_callback():
             trk = bool(_sample_tracked[si]) if _sample_tracked is not None else False
             psim.TextUnformatted(f"Sample {si}  {'[tracked]' if trk else '[untracked]'}")
             psim.TextUnformatted(f"  Fine face   : {fi}  BC=({bc[0]:.3f},{bc[1]:.3f},{bc[2]:.3f})")
-        else:
+        elif _viz_mode == 1:
             is_vtx = bool(_tracker_is_vertex[si]) if _tracker_is_vertex is not None else False
             sid    = int(_tracker_sample_ids[si]) if _tracker_sample_ids is not None else si
             cfi    = int(_tracker_coarse_face_id[si]) if _tracker_coarse_face_id is not None else -1
@@ -629,6 +747,14 @@ def ui_callback():
             psim.TextUnformatted(f"Sample {sid}  {'[vertex]' if is_vtx else '[interior]'}")
             psim.TextUnformatted(f"  Fine face   : {fi}  BC=({bc[0]:.3f},{bc[1]:.3f},{bc[2]:.3f})")
             psim.TextUnformatted(f"  Coarse face : {cfi}  verts=({bv[0]},{bv[1]},{bv[2]})")
+        else:  # Mode 2
+            is_vtx = bool(_tracker_is_vertex[si]) if _tracker_is_vertex is not None else False
+            sid    = int(_tracker_sample_ids[si]) if _tracker_sample_ids is not None else si
+            trk    = bool(_sample_tracked[si]) if _sample_tracked is not None else False
+            psim.TextUnformatted(f"Sample {sid}  {'[vertex]' if is_vtx else '[interior]'}  "
+                                 f"{'[tracked]' if trk else '[untracked]'}")
+            psim.TextUnformatted(f"  Fine face   : {fi}  BC=({bc[0]:.3f},{bc[1]:.3f},{bc[2]:.3f})")
+            psim.TextDisabled("  Coarse via F2C query (not tracker)")
 
         psim.TextUnformatted(f"  Fine pos    : ({fp[0]:.5f},{fp[1]:.5f},{fp[2]:.5f})")
         psim.TextUnformatted(f"  Coarse land : ({cp[0]:.5f},{cp[1]:.5f},{cp[2]:.5f})")
@@ -738,10 +864,19 @@ def main():
     n_tr = int(_tracked_mask.sum())
     print(f"[main] {n_tr}/{_bundle.fineV.shape[0]} fine vertices tracked by F2C")
 
-    # Start in Mode 0 (calculated)
-    ok = _compute_f2c_samples()
+    # Start in Mode 2 if tracker fine file is available, else Mode 0
+    global _viz_mode
+    if _tracker_fine_path and _f2c_v is not None:
+        _viz_mode = 2
+        ok = _compute_tracker_fine_f2c()
+        if not ok:
+            print("[main] Mode 2 failed — falling back to Mode 0")
+            _viz_mode = 0
+            ok = _compute_f2c_samples()
+    else:
+        ok = _compute_f2c_samples()
     if not ok:
-        print("ERROR: could not compute F2C samples — exiting.")
+        print("ERROR: could not compute samples — exiting.")
         sys.exit(1)
 
     ps.init()
