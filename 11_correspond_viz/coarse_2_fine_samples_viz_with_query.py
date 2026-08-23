@@ -65,6 +65,9 @@ _show_coarse_dots  = True
 _show_fine_dots    = True
 _selected_sample   = -1
 
+_pick_face_mode    = False   # when True: click on coarse mesh picks a face
+_selected_face     = -1      # compact coarse face index currently highlighted (-1 = all)
+
 
 # ---------------------------------------------------------------------------
 # Sampling helpers
@@ -161,12 +164,20 @@ def _rebuild_meshes():
     cm.set_transparency(0.55)
 
 
+def _active_mask():
+    """Return boolean index for the currently visible samples (all, or just selected face)."""
+    if _selected_face < 0 or _sample_face_ids is None:
+        return np.ones(len(_sample_face_ids), dtype=bool) if _sample_face_ids is not None else None
+    return _sample_face_ids == _selected_face
+
+
 def _rebuild_coarse_sample_pc():
     if ps.has_point_cloud(COARSE_SAMPLE_PC):
         ps.remove_point_cloud(COARSE_SAMPLE_PC)
     if not _show_coarse_dots or _coarse_sample_pts is None:
         return
-    pts = _coarse_sample_pts.copy()
+    mask = _active_mask()
+    pts = _coarse_sample_pts[mask].copy()
     pts[:, 2] += _z_offset
     pc = ps.register_point_cloud(COARSE_SAMPLE_PC, pts)
     pc.set_color((0.25, 0.55, 1.0))   # blue
@@ -178,7 +189,8 @@ def _rebuild_fine_landing_pc():
         ps.remove_point_cloud(FINE_LANDING_PC)
     if not _show_fine_dots or _fine_landing_pts is None:
         return
-    pc = ps.register_point_cloud(FINE_LANDING_PC, _fine_landing_pts)
+    mask = _active_mask()
+    pc = ps.register_point_cloud(FINE_LANDING_PC, _fine_landing_pts[mask])
     pc.set_color((0.95, 0.45, 0.10))  # orange
     pc.set_radius(0.005, relative=True)
 
@@ -188,9 +200,10 @@ def _rebuild_arrows():
         ps.remove_point_cloud(ARROWS_PC)
     if _coarse_sample_pts is None or _fine_landing_pts is None:
         return
-    src = _coarse_sample_pts.copy()
+    mask = _active_mask()
+    src = _coarse_sample_pts[mask].copy()
     src[:, 2] += _z_offset
-    vecs = _fine_landing_pts - src
+    vecs = _fine_landing_pts[mask] - src
     pc = ps.register_point_cloud(ARROWS_PC, src)
     pc.set_color((1.0, 0.85, 0.0))
     pc.set_radius(0.002, relative=True)
@@ -233,6 +246,7 @@ def _rebuild_all():
 def ui_callback():
     global _z_offset, _mesh_span, _n_samples, _seed
     global _show_arrows, _show_coarse_dots, _show_fine_dots, _selected_sample
+    global _pick_face_mode, _selected_face
 
     changed = False
 
@@ -272,6 +286,33 @@ def ui_callback():
         FC = _bundle.coarseF.shape[0]
         N  = len(_coarse_sample_pts)
         psim.TextUnformatted(f"{_n_samples}/face × {FC} faces = {N} total")
+
+    psim.Separator()
+    psim.TextUnformatted("Face Filter")
+
+    c, v = psim.Checkbox("Pick face mode (click coarse mesh)", _pick_face_mode)
+    if c:
+        _pick_face_mode = v
+        if not v:
+            _selected_face = -1
+            _selected_sample = -1
+            _rebuild_coarse_sample_pc()
+            _rebuild_fine_landing_pc()
+            _rebuild_arrows()
+            _rebuild_selection()
+
+    if _selected_face >= 0:
+        n_on_face = int((_sample_face_ids == _selected_face).sum()) if _sample_face_ids is not None else 0
+        psim.TextUnformatted(f"  Face {_selected_face}  ({n_on_face} samples shown)")
+        if psim.Button("Clear face filter"):
+            _selected_face   = -1
+            _selected_sample = -1
+            _rebuild_coarse_sample_pc()
+            _rebuild_fine_landing_pc()
+            _rebuild_arrows()
+            _rebuild_selection()
+    elif _pick_face_mode:
+        psim.TextDisabled("  Click a coarse mesh face to filter")
 
     psim.Separator()
     psim.TextUnformatted("Display")
@@ -324,22 +365,44 @@ def ui_callback():
         if pr is not None and getattr(pr, 'is_hit', False):
             sname = getattr(pr, 'structure_name', None)
             sdata = getattr(pr, 'structure_data', None) or {}
-            if sname == COARSE_SAMPLE_PC:
-                idx = int(sdata.get('index', -1))
-                if 0 <= idx < len(_coarse_sample_pts):
-                    _selected_sample = -1 if idx == _selected_sample else idx
+
+            if sname == COARSE_MESH_VIZ and _pick_face_mode:
+                etype = sdata.get('element_type', None)
+                fidx  = int(sdata.get('index', -1))
+                nF    = _bundle.coarseF.shape[0]
+                if etype == 'face' and 0 <= fidx < nF:
+                    _selected_face   = -1 if fidx == _selected_face else fidx
+                    _selected_sample = -1
+                    _rebuild_coarse_sample_pc()
+                    _rebuild_fine_landing_pc()
+                    _rebuild_arrows()
                     _rebuild_selection()
-                    if _selected_sample >= 0:
-                        fi = int(_sample_face_ids[_selected_sample])
-                        bc = _sample_bcs[_selected_sample]
-                        cp = _coarse_sample_pts[_selected_sample]
-                        fp = _fine_landing_pts[_selected_sample]
-                        bf = _fine_landing_bfs[_selected_sample]
-                        print(f"\n[sample {_selected_sample}]  coarse face={fi}  "
-                              f"BC=({bc[0]:.4f},{bc[1]:.4f},{bc[2]:.4f})")
-                        print(f"  coarse pos   : ({cp[0]:.6f},{cp[1]:.6f},{cp[2]:.6f})")
-                        print(f"  fine landing : ({fp[0]:.6f},{fp[1]:.6f},{fp[2]:.6f})")
-                        print(f"  landing tri  : gv={int(bf[0])},{int(bf[1])},{int(bf[2])}")
+                    if _selected_face >= 0:
+                        n_on = int((_sample_face_ids == _selected_face).sum())
+                        print(f"\n[face filter] coarse face {_selected_face}  ({n_on} samples)")
+
+            elif sname == COARSE_SAMPLE_PC:
+                idx = int(sdata.get('index', -1))
+                # idx is into the *filtered* point cloud, remap to global sample index
+                if _coarse_sample_pts is not None and idx >= 0:
+                    mask    = _active_mask()
+                    indices = np.where(mask)[0]
+                    global_idx = int(indices[idx]) if idx < len(indices) else -1
+                    if global_idx >= 0:
+                        _selected_sample = -1 if global_idx == _selected_sample else global_idx
+                        _rebuild_selection()
+                        if _selected_sample >= 0:
+                            si = _selected_sample
+                            fi = int(_sample_face_ids[si])
+                            bc = _sample_bcs[si]
+                            cp = _coarse_sample_pts[si]
+                            fp = _fine_landing_pts[si]
+                            bf = _fine_landing_bfs[si]
+                            print(f"\n[sample {si}]  coarse face={fi}  "
+                                  f"BC=({bc[0]:.4f},{bc[1]:.4f},{bc[2]:.4f})")
+                            print(f"  coarse pos   : ({cp[0]:.6f},{cp[1]:.6f},{cp[2]:.6f})")
+                            print(f"  fine landing : ({fp[0]:.6f},{fp[1]:.6f},{fp[2]:.6f})")
+                            print(f"  landing tri  : gv={int(bf[0])},{int(bf[1])},{int(bf[2])}")
 
 
 # ---------------------------------------------------------------------------
