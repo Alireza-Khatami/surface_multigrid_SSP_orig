@@ -161,6 +161,28 @@ def _compute_c2f_samples():
     print(f"[samples] {N} total samples, area-weighted across {FC} faces  "
           f"(area range [{areas.min():.4g}, {areas.max():.4g}], total={total_area:.4g})  seed={_seed}")
     return True
+
+
+# ---------------------------------------------------------------------------
+# Rebuild helpers
+# ---------------------------------------------------------------------------
+
+def _rebuild_meshes():
+    fm = ps.register_surface_mesh(FINE_MESH, _bundle.fineV, _bundle.fineF)
+    fm.set_color((0.55, 0.55, 0.55))
+    fm.set_edge_width(0.3)
+    fm.set_smooth_shade(False)
+    fm.set_transparency(0.4)
+
+    cv = _bundle.coarseV.copy()
+    cv[:, 2] += _z_offset
+    cm = ps.register_surface_mesh(COARSE_MESH_VIZ, cv, _bundle.coarseF)
+    cm.set_color((0.15, 0.75, 0.35))
+    cm.set_edge_width(1.0)
+    cm.set_smooth_shade(False)
+    cm.set_transparency(0.55)
+
+
 def _active_mask():
     """Return boolean index for the currently visible samples (all, or just selected face)."""
     if _selected_face < 0 or _sample_face_ids is None:
