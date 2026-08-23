@@ -44,7 +44,7 @@ import numpy as np
 import polyscope as ps
 import polyscope.imgui as psim
 
-from c2f_query import load_bundle, compute_f2c_correspondences
+from c2f_query import load_bundle, compute_f2c_correspondences, compute_barycentric_2d
 
 # ---------------------------------------------------------------------------
 # Structure names
@@ -146,6 +146,127 @@ def _area_weighted_face_ids(areas, N, rng):
     leftover  = N - int(counts.sum())
     counts[np.argsort(-remainder)[:leftover]] += 1
     return np.repeat(np.arange(len(areas), dtype=np.int32), counts)
+
+
+# ---------------------------------------------------------------------------
+# Per-sample forward UV-cast F2C walk  (used by Mode 3)
+# ---------------------------------------------------------------------------
+
+def _query_f2c_batch(bundle, face_ids: np.ndarray, bcs: np.ndarray):
+    """
+    Forward fine→coarse UV-cast for each sample independently.
+
+    Generalises query_vertex_f2c_intermediates to arbitrary BC (not just
+    one-hot vertex BCs): seed each sample at its fine face with its BC,
+    walk forward through every SSP collapse that touches the face, and
+    UV-cast through UV_pre → UV_post at each step.
+
+    Parameters
+    ----------
+    bundle   : Bundle (must have SSP data)
+    face_ids : (N,) int  — fine face index per sample
+    bcs      : (N, 3)    — barycentric coords on that face
+
+    Returns
+    -------
+    coarse_pts : (N, 3) float64
+    tracked    : (N,)   bool  — True if the sample moved through ≥1 collapse
+    """
+    if not bundle.has_ssp_data:
+        raise RuntimeError("[mode3] Bundle has no SSP data")
+
+    decInfo  = bundle.decInfo
+    decIM    = bundle.decIM
+    fineV    = bundle.fineV
+    fineF    = bundle.fineF
+    coarseV  = bundle.coarseV
+    vtxMap   = bundle.vtxMap
+
+    g2c = ({int(vtxMap[i]): i for i in range(len(vtxMap))}
+           if vtxMap is not None else {})
+
+    def _vpos(gid):
+        ci = g2c.get(int(gid))
+        return coarseV[ci] if ci is not None else fineV[int(gid)]
+
+    N = len(face_ids)
+    coarse_pts = np.empty((N, 3), dtype=np.float64)
+    tracked    = np.zeros(N, dtype=bool)
+
+    for q in range(N):
+        face = int(face_ids[q])
+        BC   = bcs[q].copy()
+        BF   = [int(fineF[face, 0]), int(fineF[face, 1]), int(fineF[face, 2])]
+        ci   = -1
+
+        while True:
+            # next collapse > ci that touched current face
+            ci_next = None
+            for d in decIM[face]:
+                if d > ci:
+                    ci_next = d
+                    break
+            if ci_next is None:
+                break
+
+            # find sheet containing this face in FIdx_pre
+            cd = decInfo[ci_next]
+            sd = None
+            pre_row = -1
+            for s in cd.sheets:
+                for r in range(len(s.FIdx_pre)):
+                    if int(s.FIdx_pre[r]) == face:
+                        sd = s
+                        pre_row = r
+                        break
+                if sd is not None:
+                    break
+
+            if sd is None:
+                ci = ci_next
+                continue
+
+            # UV cast: embed BC into UV_pre → find landing in UV_post
+            lv0, lv1, lv2 = sd.FUV_pre[pre_row]
+            uv_q = (BC[0] * sd.UV_pre[lv0]
+                  + BC[1] * sd.UV_pre[lv1]
+                  + BC[2] * sd.UV_pre[lv2])
+
+            if len(sd.FUV_post) > 0:
+                B    = compute_barycentric_2d(uv_q, sd.UV_post, sd.FUV_post)
+                best = int(np.argmax(B.min(axis=1)))
+                b_row = np.maximum(0.0, B[best])
+                s_b   = b_row.sum()
+                if s_b > 1e-12:
+                    b_row /= s_b
+                BC   = b_row
+                BF   = [int(sd.subsetVIdx[sd.FUV_post[best, i]]) for i in range(3)]
+                face = int(sd.FIdx_post[best])
+            else:
+                B    = compute_barycentric_2d(uv_q, sd.UV_post, sd.FUV_pre)
+                best = int(np.argmax(B.min(axis=1)))
+                b_row = np.maximum(0.0, B[best])
+                s_b   = b_row.sum()
+                if s_b > 1e-12:
+                    b_row /= s_b
+                BC   = b_row
+                BF   = [int(sd.subsetVIdx[sd.FUV_pre[best, i]]) for i in range(3)]
+                face = int(sd.FIdx_pre[best])
+
+            # absorbed→survivor vertex fixup (same as query_vertex_f2c_intermediates)
+            if len(sd.b) >= 2 and sd.b[0] >= 0 and sd.b[1] >= 0:
+                gd = int(sd.subsetVIdx[sd.b[1]])
+                gs = int(sd.subsetVIdx[sd.b[0]])
+                BF = [gs if BF[k] == gd else BF[k] for k in range(3)]
+
+            ci = ci_next
+            tracked[q] = True
+
+        coarse_pts[q] = (BC[0] * _vpos(BF[0])
+                       + BC[1] * _vpos(BF[1])
+                       + BC[2] * _vpos(BF[2]))
+
+    return coarse_pts, tracked
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +406,87 @@ def _compute_tracker_fine_f2c() -> bool:
 
     n_tr = int(tracked.sum())
     print(f"[mode2] {n_tr}/{N} samples on fully-tracked faces  ({100*n_tr/N:.1f}%)")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Mode 3: tracker fine samples → per-sample forward UV-cast F2C query
+# ---------------------------------------------------------------------------
+
+_MODE3_CAP = 50_000   # warn + cap if sample count exceeds this
+
+def _compute_tracker_fine_f2c_query() -> bool:
+    """
+    Read samples_fine_*.txt and run a per-sample forward UV-cast walk for
+    each one via _query_f2c_batch() — the most accurate F2C mapping.
+
+    Unlike Mode 2 (which blends 3 per-vertex F2C results), this walks each
+    sample's exact BC through the UV_pre→UV_post chain at every collapse,
+    staying topologically on a single coarse face throughout.
+
+    Capped at _MODE3_CAP samples to keep response time reasonable.
+    """
+    global _sample_face_ids, _sample_bcs
+    global _fine_sample_pts, _coarse_land_pts, _sample_tracked
+    global _tracker_sample_ids, _tracker_is_vertex, _tracker_fine_face_id, _tracker_fine_bc
+
+    b = _bundle
+    if b is None or not b.has_ssp_data:
+        print("[mode3] ERROR: bundle or SSP data not ready")
+        return False
+    if not _tracker_fine_path or not os.path.isfile(_tracker_fine_path):
+        print(f"[mode3] ERROR: fine file not found: {_tracker_fine_path}")
+        return False
+
+    def _read_txt(path):
+        with open(path, "r") as fh:
+            lines = fh.readlines()
+        data_lines = [l for l in lines if not l.strip().startswith("#")]
+        count = int(data_lines[0].strip())
+        return [l.split() for l in data_lines[1:count + 1]]
+
+    fine_rows = _read_txt(_tracker_fine_path)
+    N_full = len(fine_rows)
+
+    if N_full > _MODE3_CAP:
+        print(f"[mode3] {N_full} samples in file — capping at {_MODE3_CAP} for performance")
+        fine_rows = fine_rows[:_MODE3_CAP]
+    N = len(fine_rows)
+    print(f"[mode3] Running per-sample F2C walk for {N} samples …")
+
+    sample_ids    = np.zeros(N, dtype=np.int32)
+    is_vertex     = np.zeros(N, dtype=bool)
+    fine_face_ids = np.zeros(N, dtype=np.int32)
+    fine_bc       = np.zeros((N, 3), dtype=np.float64)
+
+    for i, fr in enumerate(fine_rows):
+        sample_ids[i]    = int(fr[0])
+        is_vertex[i]     = bool(int(fr[1]))
+        fine_face_ids[i] = int(fr[2])
+        fine_bc[i]       = [float(fr[3]), float(fr[4]), float(fr[5])]
+
+    fv = b.fineV
+    fi = b.fineF
+    ff = fine_face_ids
+    fine_pts = (fine_bc[:, 0:1] * fv[fi[ff, 0]]
+              + fine_bc[:, 1:2] * fv[fi[ff, 1]]
+              + fine_bc[:, 2:3] * fv[fi[ff, 2]])
+
+    coarse_pts, tracked = _query_f2c_batch(b, fine_face_ids, fine_bc)
+
+    _tracker_sample_ids   = sample_ids
+    _tracker_is_vertex    = is_vertex
+    _tracker_fine_face_id = fine_face_ids
+    _tracker_fine_bc      = fine_bc
+
+    _sample_face_ids  = fine_face_ids
+    _sample_bcs       = fine_bc
+    _fine_sample_pts  = fine_pts
+    _coarse_land_pts  = coarse_pts
+    _sample_tracked   = tracked
+
+    n_tr = int(tracked.sum())
+    print(f"[mode3] {n_tr}/{N} samples reached a coarse face  ({100*n_tr/N:.1f}%)")
     return True
 
 
@@ -585,6 +787,15 @@ def ui_callback():
             _compute_tracker_fine_f2c()
             _rebuild_all()
 
+    clicked3 = psim.RadioButton("Mode 3: Tracker fine samples + per-sample UV-cast", _viz_mode == 3)
+    if clicked3 and _viz_mode != 3:
+        _viz_mode = 3
+        _selected_face   = -1
+        _selected_sample = -1
+        if _tracker_fine_path and _bundle is not None and _bundle.has_ssp_data:
+            _compute_tracker_fine_f2c_query()
+            _rebuild_all()
+
     psim.Separator()
 
     # ---- Z offset ----
@@ -706,6 +917,29 @@ def ui_callback():
             psim.TextUnformatted(f"{N} samples  |  {n_vtx} vertex  {N - n_vtx} interior")
             psim.TextUnformatted(f"  {n_tr} on fully-tracked faces")
 
+    elif _viz_mode == 3:
+        # Mode 3 — per-sample forward UV-cast
+        psim.TextUnformatted("[ Mode 3: Tracker fine samples + per-sample UV-cast ]")
+        psim.TextDisabled("Fine file (sample positions):")
+        psim.TextUnformatted(f"  {os.path.basename(_tracker_fine_path) if _tracker_fine_path else '(none)'}")
+        psim.TextDisabled(f"Coarse landing: per-sample forward UV-cast  (cap {_MODE3_CAP:,})")
+
+        if psim.Button("Recompute (Mode 3)"):
+            if _tracker_fine_path and _bundle is not None and _bundle.has_ssp_data:
+                ok = _compute_tracker_fine_f2c_query()
+                if ok:
+                    _selected_sample = -1
+                    _rebuild_all()
+            else:
+                print("[mode3] Need tracker fine file and SSP bundle")
+
+        if _fine_sample_pts is not None:
+            N    = len(_fine_sample_pts)
+            n_tr = int(_sample_tracked.sum()) if _sample_tracked is not None else 0
+            n_vtx = int(_tracker_is_vertex.sum()) if _tracker_is_vertex is not None else 0
+            psim.TextUnformatted(f"{N} samples  |  {n_vtx} vertex  {N - n_vtx} interior")
+            psim.TextUnformatted(f"  {n_tr} reached a coarse face")
+
     # ---- Display ----
     psim.Separator()
     psim.TextUnformatted("Display")
@@ -747,14 +981,22 @@ def ui_callback():
             psim.TextUnformatted(f"Sample {sid}  {'[vertex]' if is_vtx else '[interior]'}")
             psim.TextUnformatted(f"  Fine face   : {fi}  BC=({bc[0]:.3f},{bc[1]:.3f},{bc[2]:.3f})")
             psim.TextUnformatted(f"  Coarse face : {cfi}  verts=({bv[0]},{bv[1]},{bv[2]})")
-        else:  # Mode 2
+        elif _viz_mode == 2:
             is_vtx = bool(_tracker_is_vertex[si]) if _tracker_is_vertex is not None else False
             sid    = int(_tracker_sample_ids[si]) if _tracker_sample_ids is not None else si
             trk    = bool(_sample_tracked[si]) if _sample_tracked is not None else False
             psim.TextUnformatted(f"Sample {sid}  {'[vertex]' if is_vtx else '[interior]'}  "
                                  f"{'[tracked]' if trk else '[untracked]'}")
             psim.TextUnformatted(f"  Fine face   : {fi}  BC=({bc[0]:.3f},{bc[1]:.3f},{bc[2]:.3f})")
-            psim.TextDisabled("  Coarse via F2C query (not tracker)")
+            psim.TextDisabled("  Coarse via per-vertex F2C blend")
+        else:  # Mode 3
+            is_vtx = bool(_tracker_is_vertex[si]) if _tracker_is_vertex is not None else False
+            sid    = int(_tracker_sample_ids[si]) if _tracker_sample_ids is not None else si
+            trk    = bool(_sample_tracked[si]) if _sample_tracked is not None else False
+            psim.TextUnformatted(f"Sample {sid}  {'[vertex]' if is_vtx else '[interior]'}  "
+                                 f"{'[reached coarse]' if trk else '[no collapse hit]'}")
+            psim.TextUnformatted(f"  Fine face   : {fi}  BC=({bc[0]:.3f},{bc[1]:.3f},{bc[2]:.3f})")
+            psim.TextDisabled("  Coarse via per-sample UV-cast walk")
 
         psim.TextUnformatted(f"  Fine pos    : ({fp[0]:.5f},{fp[1]:.5f},{fp[2]:.5f})")
         psim.TextUnformatted(f"  Coarse land : ({cp[0]:.5f},{cp[1]:.5f},{cp[2]:.5f})")
