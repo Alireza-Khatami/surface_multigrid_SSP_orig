@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 coarse_2_fine_samples_viz_with_query.py
-  — Sample N random interior points on coarse mesh faces and map each to the
-    fine mesh via the SSP C2F query.
+  — Sample N random interior points PER coarse face and map each to the
+    fine mesh via the SSP C2F query.  Total samples = N × num_coarse_faces.
 
 Visualization:
   fine_mesh          grey transparent at Z=0      (target / background)
@@ -87,8 +87,9 @@ def _uniform_random_bc(n: int, rng: np.random.Generator) -> np.ndarray:
 
 def _compute_c2f_samples():
     """
-    Sample _n_samples random points on coarse faces, run query_coarse_to_fine,
+    Sample _n_samples random points PER coarse face, run query_coarse_to_fine,
     store results in _coarse_sample_pts / _fine_landing_pts.
+    Total samples = _n_samples * FC.
     """
     global _sample_face_ids, _sample_bcs
     global _coarse_sample_pts, _fine_landing_pts, _fine_landing_bfs
@@ -99,11 +100,11 @@ def _compute_c2f_samples():
         return False
 
     FC  = b.coarseF.shape[0]
-    N   = _n_samples
+    N   = _n_samples * FC   # total samples
     rng = np.random.default_rng(_seed)
 
-    # Pick random coarse faces (with replacement so N is always exactly _n_samples)
-    face_ids = rng.integers(0, FC, size=N).astype(np.int32)
+    # Each coarse face gets exactly _n_samples samples
+    face_ids = np.repeat(np.arange(FC, dtype=np.int32), _n_samples)
     bc = _uniform_random_bc(N, rng)
 
     # Build BF (global SSP vertex indices) and FIdx (global SSP face indices)
@@ -136,7 +137,7 @@ def _compute_c2f_samples():
     _fine_landing_pts  = fine_pts
     _fine_landing_bfs  = BF.copy()
 
-    print(f"[samples] {N} coarse face samples → fine mesh landing positions computed  (seed={_seed})")
+    print(f"[samples] {_n_samples} samples/face × {FC} faces = {N} total  (seed={_seed})")
     return True
 
 
@@ -253,9 +254,9 @@ def ui_callback():
     psim.Separator()
     psim.TextUnformatted("Sampling")
 
-    c, v = psim.InputInt("Num samples", _n_samples)
+    c, v = psim.InputInt("Samples per face", _n_samples)
     if c:
-        _n_samples = max(1, min(v, 10000))
+        _n_samples = max(1, min(v, 1000))
 
     c, v = psim.InputInt("Seed", _seed)
     if c:
@@ -268,8 +269,9 @@ def ui_callback():
             _rebuild_all()
 
     if _coarse_sample_pts is not None:
-        N = len(_coarse_sample_pts)
-        psim.TextUnformatted(f"{N} samples computed")
+        FC = _bundle.coarseF.shape[0]
+        N  = len(_coarse_sample_pts)
+        psim.TextUnformatted(f"{_n_samples}/face × {FC} faces = {N} total")
 
     psim.Separator()
     psim.TextUnformatted("Display")
