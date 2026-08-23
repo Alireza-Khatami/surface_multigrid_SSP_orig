@@ -30,7 +30,8 @@ import polyscope.imgui as psim
 
 from c2f_query import (load_bundle, query_vertex_f2c_intermediates,
                        compute_f2c_correspondences,
-                       compute_f2c_correspondences_incident)
+                       compute_f2c_correspondences_incident,
+                       query_coarse_to_fine)
 
 # ---- structure names ----
 FINE_MESH     = "fine_mesh"
@@ -51,6 +52,9 @@ F2C_DEFORM_PC   = "f2c_deformed_fine_verts"  # F2C tracked vertex positions
 FLIPPED_F2C_PC  = "flipped_face_f2c_query"  # on-the-fly F2C final positions for clicked flipped face
 # Simplified (coarse) mesh — name is set at load time from the c2f path
 _simplified_ps_name = "simplified_mesh"      # overwritten in main()
+C2F_COARSE_PC  = "c2f_coarse_vtx"   # C2F mode: selected coarse vertex dot
+C2F_RESULT_PC  = "c2f_fine_result"  # C2F mode: landed fine-mesh position
+C2F_ARROW_PC   = "c2f_arrow"        # C2F mode: arrow coarse→fine
 CV_RING_MESH   = "cv_ring"           # canonical: 3D one-ring (blue)
 CV_UV_PRE      = "cv_uv_pre"         # canonical: UV_pre panel (blue)
 CV_UV_POST     = "cv_uv_post"        # canonical: UV_post panel (orange)
@@ -98,6 +102,14 @@ _use_f2c_deform         = True  # True = F2C mode, False = bundle mode
 _use_incident_steps     = True   # True = incident faces only; False = full one-ring
 _show_simplified        = False  # show coarse (simplified) mesh overlaid at deformed Z
 _vtx_input_id           = 0      # vertex ID text-input state
+
+# C2F mode state
+_c2f_mode               = False  # when True: click picks coarse vertex, runs C→F query
+_selected_coarse_vtx    = -1     # currently selected coarse vertex (compact index)
+_coarse_vtx_input_id    = 0      # text-input state for coarse vertex ID
+_c2f_result_pos         = None   # (3,) fine-mesh landing position from last C2F query
+_c2f_result_bf          = None   # [v0,v1,v2] global fine vertex indices of landing triangle
+_c2f_result_bc          = None   # (3,) barycentric weights at landing
 
 # collapse-trace state
 _selected_vtx         = -1
@@ -357,6 +369,97 @@ def _rebuild_simplified_mesh():
     sm.set_edge_width(1.5)
     sm.set_smooth_shade(False)
     sm.set_transparency(0.55)
+
+
+def _run_c2f_query(compact_vi: int):
+    """
+    Run a coarse→fine query for compact coarse vertex `compact_vi`.
+    Seeds one-hot BC at the vertex's corner on the first incident coarse face,
+    converts to global SSP indices, calls query_coarse_to_fine, and stores result.
+    """
+    global _c2f_result_pos, _c2f_result_bf, _c2f_result_bc
+
+    b = _bundle
+    if b is None or not b.has_ssp_data:
+        return
+
+    nC = b.coarseV.shape[0]
+    if not (0 <= compact_vi < nC):
+        return
+
+    # Find a coarse face incident to compact_vi and the column of this vertex
+    cf_idx = col = -1
+    for fi in range(b.coarseF.shape[0]):
+        row = b.coarseF[fi]
+        for c in range(3):
+            if int(row[c]) == compact_vi:
+                cf_idx, col = fi, c
+                break
+        if cf_idx >= 0:
+            break
+
+    if cf_idx < 0:
+        print(f"[c2f] compact vertex {compact_vi} not found in any coarse face")
+        return
+
+    ci0, ci1, ci2 = b.coarseF[cf_idx]
+    gvi0 = int(b.vtxMap[ci0])
+    gvi1 = int(b.vtxMap[ci1])
+    gvi2 = int(b.vtxMap[ci2])
+    gfi  = int(b.faceMap[cf_idx])
+
+    BC   = np.zeros((1, 3), dtype=np.float64)
+    BC[0, col] = 1.0
+    BF   = np.array([[gvi0, gvi1, gvi2]], dtype=np.int32)
+    FIdx = np.array([gfi], dtype=np.int32)
+
+    query_coarse_to_fine(b.decInfo, b.decIM, b.faceSheetID, BC, BF, FIdx)
+
+    v0, v1, v2 = int(BF[0, 0]), int(BF[0, 1]), int(BF[0, 2])
+    pos = BC[0, 0] * b.fineV[v0] + BC[0, 1] * b.fineV[v1] + BC[0, 2] * b.fineV[v2]
+
+    _c2f_result_pos = pos
+    _c2f_result_bf  = [v0, v1, v2]
+    _c2f_result_bc  = BC[0].copy()
+
+    coarse_pos = b.coarseV[compact_vi]
+    print(f"\n[C2F] coarse vtx {compact_vi}  →  fine pos ({pos[0]:.6f}, {pos[1]:.6f}, {pos[2]:.6f})")
+    print(f"      coarse pos ({coarse_pos[0]:.6f}, {coarse_pos[1]:.6f}, {coarse_pos[2]:.6f})")
+    print(f"      landing BF=({v0},{v1},{v2})  BC=({BC[0,0]:.4f},{BC[0,1]:.4f},{BC[0,2]:.4f})")
+
+
+def _rebuild_c2f_viz():
+    """Register/remove the C2F result structures (coarse dot, fine dot, arrow)."""
+    for name in (C2F_COARSE_PC, C2F_RESULT_PC, C2F_ARROW_PC):
+        if ps.has_point_cloud(name):
+            ps.remove_point_cloud(name)
+
+    if not _c2f_mode or _selected_coarse_vtx < 0 or _bundle is None:
+        return
+
+    coarse_pos = _bundle.coarseV[_selected_coarse_vtx].copy()
+    coarse_pos[2] += _z_offset   # coarse mesh is drawn at z_offset
+
+    pc_c = ps.register_point_cloud(C2F_COARSE_PC, coarse_pos[np.newaxis])
+    pc_c.set_color((0.15, 0.75, 0.35))   # green — matches simplified mesh
+    pc_c.set_radius(0.010, relative=True)
+
+    if _c2f_result_pos is None:
+        return
+
+    fine_pos = _c2f_result_pos.copy()  # fine mesh drawn at z=0
+
+    pc_f = ps.register_point_cloud(C2F_RESULT_PC, fine_pos[np.newaxis])
+    pc_f.set_color((1.0, 0.4, 0.0))    # orange — landing point on fine mesh
+    pc_f.set_radius(0.010, relative=True)
+
+    # Arrow from coarse position down to fine landing position
+    vec = fine_pos - coarse_pos
+    pc_a = ps.register_point_cloud(C2F_ARROW_PC, coarse_pos[np.newaxis])
+    pc_a.add_vector_quantity("to_fine", vec[np.newaxis],
+                             vectortype="ambient", enabled=True,
+                             color=(1.0, 0.85, 0.0))
+    pc_a.set_radius(0.001, relative=True)
 
 
 def _rebuild_deform_pc():
@@ -1355,6 +1458,7 @@ def _rebuild_all():
     _rebuild_deform_face_sel()
     _rebuild_vtx_trajectory()
     _rebuild_step_viz()
+    _rebuild_c2f_viz()
     # _rebuild_uv_sheet_viz()
 
 
@@ -1367,6 +1471,7 @@ def ui_callback():
     global _show_flipped_verts, _show_flipped_arrows, _selected_flipped_face, _flipped_vtx_colors, _flipped_vtx_arrows
     global _selected_vtx, _current_step_idx, _uv_scale, _uv_plane_z, _canonical_view, _uv_post_offset, _canonical_domain, _vtx_query_positions
     global _use_f2c_deform, _use_incident_steps, _show_simplified, _vtx_input_id
+    global _c2f_mode, _selected_coarse_vtx, _coarse_vtx_input_id, _c2f_result_pos, _c2f_result_bf, _c2f_result_bc
 
     changed = False
 
@@ -1480,6 +1585,45 @@ def ui_callback():
     if _show_simplified and _bundle is not None and _bundle.coarseV is not None:
         psim.SameLine()
         psim.TextDisabled(f"({_bundle.coarseV.shape[0]}v / {_bundle.coarseF.shape[0]}f)")
+
+    psim.Separator()
+    # ---- Coarse → Fine query ----
+    c, v = psim.Checkbox("C2F mode (coarse → fine)", _c2f_mode)
+    if c:
+        _c2f_mode = v
+        if not _c2f_mode:
+            # clear C2F viz when turning off
+            _selected_coarse_vtx = -1
+            _c2f_result_pos = None
+        _rebuild_c2f_viz()
+
+    if _c2f_mode and _bundle is not None and _bundle.has_ssp_data:
+        nC = _bundle.coarseV.shape[0]
+        c, v = psim.InputInt("Coarse vtx ID", _coarse_vtx_input_id)
+        if c:
+            _coarse_vtx_input_id = max(0, min(v, nC - 1))
+        psim.SameLine()
+        if psim.Button("Query") and 0 <= _coarse_vtx_input_id < nC:
+            _selected_coarse_vtx = _coarse_vtx_input_id
+            _run_c2f_query(_selected_coarse_vtx)
+            _rebuild_c2f_viz()
+        if _selected_coarse_vtx >= 0:
+            cp = _bundle.coarseV[_selected_coarse_vtx]
+            psim.TextUnformatted(f"Coarse vtx {_selected_coarse_vtx}  "
+                                 f"({cp[0]:.4f}, {cp[1]:.4f}, {cp[2]:.4f})")
+            if _c2f_result_pos is not None:
+                fp = _c2f_result_pos
+                psim.TextUnformatted(f"  → fine  ({fp[0]:.4f}, {fp[1]:.4f}, {fp[2]:.4f})")
+                psim.TextUnformatted(f"    BF=({_c2f_result_bf[0]},{_c2f_result_bf[1]},{_c2f_result_bf[2]})"
+                                     f"  BC=({_c2f_result_bc[0]:.3f},{_c2f_result_bc[1]:.3f},{_c2f_result_bc[2]:.3f})")
+            if psim.Button("Clear C2F"):
+                _selected_coarse_vtx = -1
+                _c2f_result_pos = None
+                _rebuild_c2f_viz()
+        else:
+            psim.TextDisabled("Type coarse vtx ID above or click simplified mesh")
+    elif _c2f_mode:
+        psim.TextDisabled("(no SSP data in bundle)")
 
     psim.Separator()
     psim.TextUnformatted("Collapse Trace")
@@ -1652,7 +1796,25 @@ def ui_callback():
             sname = getattr(pr, 'structure_name', None)
             sdata = getattr(pr, 'structure_data', None) or {}
 
-            if sname == FINE_VTX_PC:
+            if _c2f_mode and sname == _simplified_ps_name:
+                # C2F mode: clicking coarse mesh vertex picks a coarse vertex
+                etype = sdata.get('element_type', None)
+                if etype == 'vertex':
+                    cidx = int(sdata.get('index', -1))
+                elif etype == 'face':
+                    # face pick — use the first corner as a fallback
+                    fidx = int(sdata.get('index', -1))
+                    cidx = int(_bundle.coarseF[fidx, 0]) if fidx >= 0 else -1
+                else:
+                    cidx = -1
+                nC = _bundle.coarseV.shape[0]
+                if 0 <= cidx < nC:
+                    _selected_coarse_vtx    = cidx
+                    _coarse_vtx_input_id    = cidx
+                    _run_c2f_query(_selected_coarse_vtx)
+                    _rebuild_c2f_viz()
+
+            elif sname == FINE_VTX_PC:
                 vidx = int(sdata.get('index', -1))
                 nV   = _bundle.fineV.shape[0]
                 if 0 <= vidx < nV:
