@@ -894,7 +894,7 @@ def ui_callback():
             n_vtx = int(_tracker_is_vertex.sum()) if _tracker_is_vertex is not None else 0
             psim.TextUnformatted(f"{N} samples  |  {n_vtx} vertex  {N - n_vtx} interior")
 
-    else:
+    elif _viz_mode == 2:
         # Mode 2 — Tracker fine samples, coarse via F2C query
         psim.TextUnformatted("[ Mode 2: Tracker fine samples -> F2C query ]")
         psim.TextDisabled("Fine file (sample positions):")
