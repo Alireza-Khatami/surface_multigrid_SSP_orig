@@ -114,9 +114,19 @@ _show_fine_dots   = True
 _show_coarse_dots = True
 _selected_sample  = -1
 
-# face filter (Mode 0 only)
+# fine face filter (Mode 0 only)
 _pick_face_mode  = False
 _selected_face   = -1
+
+# coarse face filter (all modes — available when _coarse_face_ids is not None)
+_coarse_selected_face = -1   # compact coarse face index, -1 = no filter
+_coarse_face_ids      = None  # (N,) compact coarse face index per sample; None if not available
+
+# per-mode pre-computed state cache
+_mode_cache = {}  # mode_int -> dict of snapshot globals
+
+# global SSP face index → compact coarse face index
+_inv_faceMap = None  # built at startup from bundle.faceMap
 
 
 # ---------------------------------------------------------------------------
@@ -169,8 +179,9 @@ def _query_f2c_batch(bundle, face_ids: np.ndarray, bcs: np.ndarray):
 
     Returns
     -------
-    coarse_pts : (N, 3) float64
-    tracked    : (N,)   bool  — True if the sample moved through ≥1 collapse
+    coarse_pts     : (N, 3) float64
+    tracked        : (N,)   bool  — True if the sample moved through ≥1 collapse
+    final_face_ids : (N,)   int   — SSP face index where the sample landed
     """
     if not bundle.has_ssp_data:
         raise RuntimeError("[mode3] Bundle has no SSP data")
@@ -190,8 +201,9 @@ def _query_f2c_batch(bundle, face_ids: np.ndarray, bcs: np.ndarray):
         return coarseV[ci] if ci is not None else fineV[int(gid)]
 
     N = len(face_ids)
-    coarse_pts = np.empty((N, 3), dtype=np.float64)
-    tracked    = np.zeros(N, dtype=bool)
+    coarse_pts     = np.empty((N, 3), dtype=np.float64)
+    tracked        = np.zeros(N, dtype=bool)
+    final_face_ids = face_ids.copy().astype(np.int32)
 
     for q in range(N):
         face = int(face_ids[q])
@@ -261,12 +273,13 @@ def _query_f2c_batch(bundle, face_ids: np.ndarray, bcs: np.ndarray):
 
             ci = ci_next
             tracked[q] = True
+            final_face_ids[q] = face
 
         coarse_pts[q] = (BC[0] * _vpos(BF[0])
                        + BC[1] * _vpos(BF[1])
                        + BC[2] * _vpos(BF[2]))
 
-    return coarse_pts, tracked
+    return coarse_pts, tracked, final_face_ids
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +288,7 @@ def _query_f2c_batch(bundle, face_ids: np.ndarray, bcs: np.ndarray):
 
 def _compute_f2c_samples():
     global _sample_face_ids, _sample_bcs
-    global _fine_sample_pts, _coarse_land_pts, _sample_tracked
+    global _fine_sample_pts, _coarse_land_pts, _sample_tracked, _coarse_face_ids
 
     b = _bundle
     if b is None or _f2c_v is None:
@@ -316,6 +329,7 @@ def _compute_f2c_samples():
     _fine_sample_pts  = fine_pts
     _coarse_land_pts  = coarse_pts
     _sample_tracked   = tracked
+    _coarse_face_ids  = None  # no per-sample coarse face for Mode 0
 
     n_tracked = int(tracked.sum())
     print(f"[f2c_samples] {n_tracked}/{N} samples on fully-tracked faces  "
@@ -337,7 +351,7 @@ def _compute_tracker_fine_f2c() -> bool:
     F2C query result (Mode 2) on the *identical* set of fine-mesh samples.
     """
     global _sample_face_ids, _sample_bcs
-    global _fine_sample_pts, _coarse_land_pts, _sample_tracked
+    global _fine_sample_pts, _coarse_land_pts, _sample_tracked, _coarse_face_ids
     global _tracker_sample_ids, _tracker_is_vertex, _tracker_fine_face_id, _tracker_fine_bc
 
     b = _bundle
@@ -403,6 +417,7 @@ def _compute_tracker_fine_f2c() -> bool:
     _fine_sample_pts  = fine_pts
     _coarse_land_pts  = coarse_pts
     _sample_tracked   = tracked
+    _coarse_face_ids  = None  # no per-sample coarse face for Mode 2 (3D blend)
 
     n_tr = int(tracked.sum())
     print(f"[mode2] {n_tr}/{N} samples on fully-tracked faces  ({100*n_tr/N:.1f}%)")
@@ -427,7 +442,7 @@ def _compute_tracker_fine_f2c_query() -> bool:
     Capped at _MODE3_CAP samples to keep response time reasonable.
     """
     global _sample_face_ids, _sample_bcs
-    global _fine_sample_pts, _coarse_land_pts, _sample_tracked
+    global _fine_sample_pts, _coarse_land_pts, _sample_tracked, _coarse_face_ids
     global _tracker_sample_ids, _tracker_is_vertex, _tracker_fine_face_id, _tracker_fine_bc
 
     b = _bundle
@@ -472,7 +487,14 @@ def _compute_tracker_fine_f2c_query() -> bool:
               + fine_bc[:, 1:2] * fv[fi[ff, 1]]
               + fine_bc[:, 2:3] * fv[fi[ff, 2]])
 
-    coarse_pts, tracked = _query_f2c_batch(b, fine_face_ids, fine_bc)
+    coarse_pts, tracked, final_ssp_faces = _query_f2c_batch(b, fine_face_ids, fine_bc)
+
+    # Map SSP face indices → compact coarse face indices
+    if _inv_faceMap is not None:
+        compact_cf = np.array([_inv_faceMap.get(int(f), -1) for f in final_ssp_faces],
+                              dtype=np.int32)
+    else:
+        compact_cf = None
 
     _tracker_sample_ids   = sample_ids
     _tracker_is_vertex    = is_vertex
@@ -484,6 +506,7 @@ def _compute_tracker_fine_f2c_query() -> bool:
     _fine_sample_pts  = fine_pts
     _coarse_land_pts  = coarse_pts
     _sample_tracked   = tracked
+    _coarse_face_ids  = compact_cf
 
     n_tr = int(tracked.sum())
     print(f"[mode3] {n_tr}/{N} samples reached a coarse face  ({100*n_tr/N:.1f}%)")
@@ -505,7 +528,7 @@ def _load_tracker_samples(fine_path: str, coarse_path: str) -> bool:
     Coarse landing position = b0*coarseV[bv0] + b1*coarseV[bv1] + b2*coarseV[bv2]
     """
     global _sample_face_ids, _sample_bcs
-    global _fine_sample_pts, _coarse_land_pts, _sample_tracked
+    global _fine_sample_pts, _coarse_land_pts, _sample_tracked, _coarse_face_ids
     global _tracker_sample_ids, _tracker_is_vertex, _tracker_fine_face_id, _tracker_fine_bc
     global _tracker_coarse_face_id, _tracker_coarse_bc, _tracker_coarse_bv
 
@@ -616,11 +639,19 @@ def _load_tracker_samples(fine_path: str, coarse_path: str) -> bool:
     _tracker_coarse_bc     = coarse_bc
     _tracker_coarse_bv     = coarse_bv
 
+    # Map tracker coarse_face_ids (SSP global face) → compact coarse face indices
+    if _inv_faceMap is not None:
+        compact_cf = np.array([_inv_faceMap.get(int(f), -1) for f in coarse_face_ids],
+                              dtype=np.int32)
+    else:
+        compact_cf = None
+
     _sample_face_ids  = fine_face_ids
     _sample_bcs       = fine_bc
     _fine_sample_pts  = fine_pts
     _coarse_land_pts  = coarse_pts
     _sample_tracked   = is_vertex   # vertex samples are "tracked" in tracker terminology
+    _coarse_face_ids  = compact_cf
 
     n_verts = int(is_vertex.sum())
     print(f"[tracker] {N} samples  ({n_verts} vertex, {N - n_verts} interior)")
@@ -647,9 +678,68 @@ def _find_tracker_files(directory: str):
 def _active_mask():
     if _sample_face_ids is None:
         return None
-    if _viz_mode == 1 or _selected_face < 0:
-        return np.ones(len(_sample_face_ids), dtype=bool)
-    return _sample_face_ids == _selected_face
+    mask = np.ones(len(_sample_face_ids), dtype=bool)
+    # fine face filter (Mode 0 only)
+    if _viz_mode == 0 and _selected_face >= 0:
+        mask &= (_sample_face_ids == _selected_face)
+    # coarse face filter (all modes when _coarse_face_ids available)
+    if _coarse_selected_face >= 0 and _coarse_face_ids is not None:
+        mask &= (_coarse_face_ids == _coarse_selected_face)
+    return mask
+
+
+# ---------------------------------------------------------------------------
+# Mode cache helpers
+# ---------------------------------------------------------------------------
+
+def _snapshot_mode_state() -> dict:
+    """Capture all per-sample globals into a dict for caching."""
+    return dict(
+        sample_face_ids      = _sample_face_ids,
+        sample_bcs           = _sample_bcs,
+        fine_sample_pts      = _fine_sample_pts,
+        coarse_land_pts      = _coarse_land_pts,
+        sample_tracked       = _sample_tracked,
+        coarse_face_ids      = _coarse_face_ids,
+        tracker_sample_ids   = _tracker_sample_ids,
+        tracker_is_vertex    = _tracker_is_vertex,
+        tracker_fine_face_id = _tracker_fine_face_id,
+        tracker_fine_bc      = _tracker_fine_bc,
+        tracker_coarse_face_id = _tracker_coarse_face_id,
+        tracker_coarse_bc    = _tracker_coarse_bc,
+        tracker_coarse_bv    = _tracker_coarse_bv,
+    )
+
+
+def _apply_mode_cache(mode: int):
+    """Restore per-sample globals from cache for the given mode."""
+    global _sample_face_ids, _sample_bcs, _fine_sample_pts, _coarse_land_pts
+    global _sample_tracked, _coarse_face_ids
+    global _tracker_sample_ids, _tracker_is_vertex, _tracker_fine_face_id, _tracker_fine_bc
+    global _tracker_coarse_face_id, _tracker_coarse_bc, _tracker_coarse_bv
+    global _viz_mode, _selected_face, _selected_sample, _coarse_selected_face
+
+    s = _mode_cache.get(mode)
+    if s is None:
+        return False
+    _sample_face_ids       = s['sample_face_ids']
+    _sample_bcs            = s['sample_bcs']
+    _fine_sample_pts       = s['fine_sample_pts']
+    _coarse_land_pts       = s['coarse_land_pts']
+    _sample_tracked        = s['sample_tracked']
+    _coarse_face_ids       = s['coarse_face_ids']
+    _tracker_sample_ids    = s['tracker_sample_ids']
+    _tracker_is_vertex     = s['tracker_is_vertex']
+    _tracker_fine_face_id  = s['tracker_fine_face_id']
+    _tracker_fine_bc       = s['tracker_fine_bc']
+    _tracker_coarse_face_id = s['tracker_coarse_face_id']
+    _tracker_coarse_bc     = s['tracker_coarse_bc']
+    _tracker_coarse_bv     = s['tracker_coarse_bv']
+    _viz_mode              = mode
+    _selected_face         = -1
+    _selected_sample       = -1
+    _coarse_selected_face  = -1
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -746,7 +836,7 @@ def _rebuild_all():
 def ui_callback():
     global _z_offset, _mesh_span, _n_samples, _seed, _per_face_mode
     global _show_arrows, _show_fine_dots, _show_coarse_dots, _selected_sample
-    global _pick_face_mode, _selected_face
+    global _pick_face_mode, _selected_face, _coarse_selected_face
     global _viz_mode
     global _tracker_fine_path, _tracker_coarse_path
 
@@ -762,37 +852,41 @@ def ui_callback():
     psim.TextUnformatted("Correspondence Mode")
     clicked0 = psim.RadioButton("Mode 0: Calculated F2C (c2f_query)", _viz_mode == 0)
     if clicked0 and _viz_mode != 0:
-        _viz_mode = 0
-        _selected_face   = -1
-        _selected_sample = -1
-        if _bundle is not None and _f2c_v is not None:
+        if _apply_mode_cache(0):
+            _rebuild_all()
+        elif _bundle is not None and _f2c_v is not None:
+            _viz_mode = 0
+            _selected_face = _selected_sample = _coarse_selected_face = -1
             _compute_f2c_samples()
             _rebuild_all()
 
     clicked1 = psim.RadioButton("Mode 1: SSP Sample Tracker files", _viz_mode == 1)
     if clicked1 and _viz_mode != 1:
-        _viz_mode = 1
-        _selected_face   = -1
-        _selected_sample = -1
-        if _tracker_fine_path and _tracker_coarse_path:
+        if _apply_mode_cache(1):
+            _rebuild_all()
+        elif _tracker_fine_path and _tracker_coarse_path:
+            _viz_mode = 1
+            _selected_face = _selected_sample = _coarse_selected_face = -1
             _load_tracker_samples(_tracker_fine_path, _tracker_coarse_path)
             _rebuild_all()
 
     clicked2 = psim.RadioButton("Mode 2: Tracker fine samples + F2C query", _viz_mode == 2)
     if clicked2 and _viz_mode != 2:
-        _viz_mode = 2
-        _selected_face   = -1
-        _selected_sample = -1
-        if _tracker_fine_path and _f2c_v is not None:
+        if _apply_mode_cache(2):
+            _rebuild_all()
+        elif _tracker_fine_path and _f2c_v is not None:
+            _viz_mode = 2
+            _selected_face = _selected_sample = _coarse_selected_face = -1
             _compute_tracker_fine_f2c()
             _rebuild_all()
 
     clicked3 = psim.RadioButton("Mode 3: Tracker fine samples + per-sample UV-cast", _viz_mode == 3)
     if clicked3 and _viz_mode != 3:
-        _viz_mode = 3
-        _selected_face   = -1
-        _selected_sample = -1
-        if _tracker_fine_path and _bundle is not None and _bundle.has_ssp_data:
+        if _apply_mode_cache(3):
+            _rebuild_all()
+        elif _tracker_fine_path and _bundle is not None and _bundle.has_ssp_data:
+            _viz_mode = 3
+            _selected_face = _selected_sample = _coarse_selected_face = -1
             _compute_tracker_fine_f2c_query()
             _rebuild_all()
 
@@ -940,6 +1034,25 @@ def ui_callback():
             psim.TextUnformatted(f"{N} samples  |  {n_vtx} vertex  {N - n_vtx} interior")
             psim.TextUnformatted(f"  {n_tr} reached a coarse face")
 
+    # ---- Coarse face filter (available in Modes 1 and 3) ----
+    psim.Separator()
+    psim.TextUnformatted("Coarse Face Filter")
+    if _coarse_face_ids is not None:
+        if _coarse_selected_face >= 0:
+            n_on = int((_coarse_face_ids == _coarse_selected_face).sum())
+            psim.TextUnformatted(f"  Coarse face {_coarse_selected_face}  ({n_on} samples)")
+            if psim.Button("Clear coarse face filter"):
+                _coarse_selected_face = -1
+                _selected_sample      = -1
+                _rebuild_fine_sample_pc()
+                _rebuild_coarse_landing_pc()
+                _rebuild_arrows()
+                _rebuild_selection()
+        else:
+            psim.TextDisabled("  Click a coarse mesh face to filter")
+    else:
+        psim.TextDisabled("  (not available for this mode — use Mode 1 or 3)")
+
     # ---- Display ----
     psim.Separator()
     psim.TextUnformatted("Display")
@@ -1036,6 +1149,21 @@ def ui_callback():
                                if _sample_face_ids is not None else 0
                         print(f"\n[face filter] fine face {_selected_face}  ({n_on} samples)")
 
+            elif sname == COARSE_MESH_VIZ and _coarse_face_ids is not None:
+                etype = sdata.get('element_type', None)
+                fidx  = int(sdata.get('index', -1))
+                nCF   = _bundle.coarseF.shape[0]
+                if etype == 'face' and 0 <= fidx < nCF:
+                    _coarse_selected_face = -1 if fidx == _coarse_selected_face else fidx
+                    _selected_sample      = -1
+                    _rebuild_fine_sample_pc()
+                    _rebuild_coarse_landing_pc()
+                    _rebuild_arrows()
+                    _rebuild_selection()
+                    if _coarse_selected_face >= 0:
+                        n_on = int((_coarse_face_ids == _coarse_selected_face).sum())
+                        print(f"\n[coarse filter] coarse face {_coarse_selected_face}  ({n_on} samples)")
+
             elif sname == FINE_SAMPLE_PC:
                 idx = int(sdata.get('index', -1))
                 if _fine_sample_pts is not None and idx >= 0:
@@ -1070,7 +1198,7 @@ def ui_callback():
 
 def main():
     global _bundle, _bundle_dir, _z_offset, _mesh_span, _f2c_v, _tracked_mask
-    global _tracker_fine_path, _tracker_coarse_path
+    global _tracker_fine_path, _tracker_coarse_path, _inv_faceMap
 
     c2f_path = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\01_00040057_f8f78dbd17414efda75bc437_trimesh_000\\correspondence_01_00040057_f8f78dbd17414efda75bc437_trimesh_000_mat_initial.c2f"
     # c2f_path = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\0002000_partstudio_14_model_ste_00_1024\\correspondence_0002000_partstudio_14_model_ste_00_1024.c2f"
@@ -1101,25 +1229,49 @@ def main():
     else:
         print(f"[tracker] No tracker files found in: {_bundle_dir}")
 
+    # Build inverse faceMap: global SSP face index → compact coarse face index
+    if _bundle.faceMap is not None:
+        _inv_faceMap = {int(_bundle.faceMap[i]): i for i in range(len(_bundle.faceMap))}
+        print(f"[main] Built inverse faceMap: {len(_inv_faceMap)} coarse faces")
+    else:
+        _inv_faceMap = None
+        print("[main] WARNING: bundle has no faceMap — coarse face filter unavailable")
+
     print("\n[main] Computing per-vertex F2C map ...")
     _f2c_v, _tracked_mask = compute_f2c_correspondences(_bundle)
     n_tr = int(_tracked_mask.sum())
     print(f"[main] {n_tr}/{_bundle.fineV.shape[0]} fine vertices tracked by F2C")
 
-    # Start in Mode 2 if tracker fine file is available, else Mode 0
-    global _viz_mode
+    # Pre-compute all modes and cache them for instant switching
+    global _viz_mode, _mode_cache
+    print("\n[main] Pre-computing Mode 0 (Calculated F2C) ...")
+    if _compute_f2c_samples():
+        _mode_cache[0] = _snapshot_mode_state()
+
+    if _tracker_fine_path and _tracker_coarse_path:
+        print("[main] Pre-computing Mode 1 (SSP Tracker files) ...")
+        if _load_tracker_samples(_tracker_fine_path, _tracker_coarse_path):
+            _mode_cache[1] = _snapshot_mode_state()
+
     if _tracker_fine_path and _f2c_v is not None:
-        _viz_mode = 2
-        ok = _compute_tracker_fine_f2c()
-        if not ok:
-            print("[main] Mode 2 failed — falling back to Mode 0")
-            _viz_mode = 0
-            ok = _compute_f2c_samples()
-    else:
-        ok = _compute_f2c_samples()
-    if not ok:
-        print("ERROR: could not compute samples — exiting.")
+        print("[main] Pre-computing Mode 2 (Tracker fine + F2C query) ...")
+        if _compute_tracker_fine_f2c():
+            _mode_cache[2] = _snapshot_mode_state()
+
+    if _tracker_fine_path and _bundle.has_ssp_data:
+        print("[main] Pre-computing Mode 3 (Tracker fine + per-sample UV-cast) ...")
+        if _compute_tracker_fine_f2c_query():
+            _mode_cache[3] = _snapshot_mode_state()
+
+    # Activate the best available starting mode
+    start_mode = 2 if 2 in _mode_cache else (0 if 0 in _mode_cache else None)
+    if start_mode is None:
+        print("ERROR: could not compute any mode — exiting.")
         sys.exit(1)
+    if not _apply_mode_cache(start_mode):
+        print("ERROR: cache apply failed — exiting.")
+        sys.exit(1)
+    print(f"[main] Starting in Mode {start_mode}")
 
     ps.init()
     ps.set_program_name("Fine -> Coarse (Face Samples)")
