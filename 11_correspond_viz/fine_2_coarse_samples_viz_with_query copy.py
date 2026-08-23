@@ -281,17 +281,44 @@ def _load_tracker_samples(fine_path: str, coarse_path: str) -> bool:
               + fine_bc[:, 1:2] * fv[fi[ff, 1]]
               + fine_bc[:, 2:3] * fv[fi[ff, 2]])
 
-    # Coarse positions — BC with global coarse vertex indices
+    # Coarse positions — bv0/bv1/bv2 are *global SSP vertex indices* (into gV),
+    # NOT compact coarse indices. Convert via vtxMap inverse (global → compact).
+    # Fall back to fineV[global] for any global index not in the compact coarse mesh
+    # (should not happen for valid coarse landings, but guards edge cases).
     cv = b.coarseV
-    bv0, bv1, bv2 = coarse_bv[:, 0], coarse_bv[:, 1], coarse_bv[:, 2]
-    # clamp to valid range
-    nCV = cv.shape[0]
-    bv0 = np.clip(bv0, 0, nCV - 1)
-    bv1 = np.clip(bv1, 0, nCV - 1)
-    bv2 = np.clip(bv2, 0, nCV - 1)
-    coarse_pts = (coarse_bc[:, 0:1] * cv[bv0]
-                + coarse_bc[:, 1:2] * cv[bv1]
-                + coarse_bc[:, 2:3] * cv[bv2])
+    fv_fallback = b.fineV
+    if b.vtxMap is not None:
+        g2c = {int(b.vtxMap[i]): i for i in range(len(b.vtxMap))}
+    else:
+        g2c = {}
+
+    def _coarse_pos_from_global(global_ids):
+        """Resolve N global SSP vertex indices → (N, 3) coarse positions."""
+        pts = np.empty((len(global_ids), 3), dtype=np.float64)
+        for j, gid in enumerate(global_ids):
+            ci = g2c.get(int(gid))
+            if ci is not None:
+                pts[j] = cv[ci]
+            else:
+                # vertex was not a coarse survivor — use fine-mesh position
+                gi = int(gid)
+                pts[j] = fv_fallback[gi] if gi < len(fv_fallback) else cv[0]
+        return pts
+
+    bv0_g, bv1_g, bv2_g = coarse_bv[:, 0], coarse_bv[:, 1], coarse_bv[:, 2]
+    p0 = _coarse_pos_from_global(bv0_g)
+    p1 = _coarse_pos_from_global(bv1_g)
+    p2 = _coarse_pos_from_global(bv2_g)
+    coarse_pts = (coarse_bc[:, 0:1] * p0
+                + coarse_bc[:, 1:2] * p1
+                + coarse_bc[:, 2:3] * p2)
+
+    # Report how many bv values had no compact-coarse mapping
+    all_globals = np.concatenate([bv0_g, bv1_g, bv2_g])
+    n_missing = sum(1 for g in all_globals if int(g) not in g2c)
+    if n_missing:
+        print(f"[tracker] WARNING: {n_missing}/{len(all_globals)} bv indices not in vtxMap "
+              f"(fell back to fineV) — vtxMap present: {b.vtxMap is not None}")
 
     _tracker_sample_ids    = sample_ids
     _tracker_is_vertex     = is_vertex
