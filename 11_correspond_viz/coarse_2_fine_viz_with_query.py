@@ -1,0 +1,1814 @@
+#!/usr/bin/env python3
+"""
+fine_deform_viz.py  —  Show fine mesh vs deformed-fine mesh with correspondence arrows.
+
+The "deformed fine mesh" replaces each tracked fine vertex by its coarse
+correspondence position (loaded from samples_vertices_*.txt).  The deformed
+mesh is lifted by a Z offset so both meshes are visible simultaneously.
+Ambient arrows go from each tracked fine vertex up to its deformed position.
+
+Click a face on the deformed mesh to:
+  - Show only the 3 correspondence arrows for that face's corner vertices
+  - Highlight every face on the original fine mesh that shares one of those
+    3 original fine vertex indices (i.e. the "source" neighbourhood)
+
+Usage:
+    python fine_deform_viz.py  <bundle.c2f>
+
+Dependencies:
+    pip install polyscope numpy
+    (c2f_query.py must be in the same directory or on PYTHONPATH)
+"""
+
+import sys
+import os
+import glob
+import math
+import numpy as np
+import polyscope as ps
+import polyscope.imgui as psim
+
+from c2f_query import (load_bundle, query_vertex_f2c_intermediates,
+                       compute_f2c_correspondences,
+                       compute_f2c_correspondences_incident,
+                       query_coarse_to_fine)
+
+# ---- structure names ----
+FINE_MESH     = "fine_mesh"
+DEFORM_MESH   = "deformed_fine_mesh"
+DEFORM_PC     = "deformed_fine_verts"
+ARROWS_PC     = "fine_to_deformed"
+FLIPPED_PC    = "flipped_face_verts"
+FLIPPED_MESH  = "flipped_faces_mesh"
+TRACKED_VTX_PC = "tracked_vtx"
+TRAJ_CURVE     = "vtx_trajectory"
+UV_SHEET_MESH  = "uv_sheet"
+UV_TRACKED_PC  = "uv_tracked_vtx"
+FINE_VTX_PC    = "coarse_mesh_verts"  # selectable point cloud over coarse mesh (C2F source)
+COARSE_MESH_VIZ = "coarse_mesh_src"  # original coarse mesh shown at z_offset
+STEP_POS_PC    = "step_tracked_pos"  # main view: single dot at tracked vertex (current step)
+STEP_RING_PC   = "step_ring_pts"     # main view: one-ring vertices for current step
+F2C_DEFORM_MESH = "f2c_deformed_fine_mesh"   # F2C-query-based deformed mesh (green)
+F2C_DEFORM_PC   = "f2c_deformed_fine_verts"  # F2C tracked vertex positions
+FLIPPED_F2C_PC  = "flipped_face_f2c_query"  # on-the-fly F2C final positions for clicked flipped face
+# Simplified (coarse) mesh — name is set at load time from the c2f path
+_simplified_ps_name = "simplified_mesh"      # overwritten in main()
+C2F_COARSE_PC  = "c2f_coarse_vtx"   # C2F mode: selected coarse vertex dot
+C2F_RESULT_PC  = "c2f_fine_result"  # C2F mode: landed fine-mesh position
+C2F_ARROW_PC   = "c2f_arrow"        # C2F mode: arrow coarse→fine
+CV_RING_MESH   = "cv_ring"           # canonical: 3D one-ring (blue)
+CV_UV_PRE      = "cv_uv_pre"         # canonical: UV_pre panel (blue)
+CV_UV_POST     = "cv_uv_post"        # canonical: UV_post panel (orange)
+CV_TRACKED     = "cv_tracked_vtx"    # canonical: tracked vertex dot + arrow
+CV_TRACKED_POST = "cv_tracked_post"  # canonical: tracked vertex dot at UV_post
+CV_EDGE_PRE    = "cv_edge_pre"       # canonical: collapsed edge in UV_pre (yellow)
+CV_DC_PRE      = "cv_dc_pre"         # canonical: double-cover UV_dc_pre (teal)
+CV_DC_POST     = "cv_dc_post"        # canonical: double-cover UV_dc_post (amber)
+_CV_NAMES      = [CV_RING_MESH, CV_UV_PRE, CV_UV_POST, CV_TRACKED, CV_TRACKED_POST,
+                  CV_EDGE_PRE, CV_DC_PRE, CV_DC_POST]
+
+# ---- mutable state ----
+_bundle        = None
+_bundle_dir    = ""
+
+_fine_ids      = None   # (N,)   tracked fine vertex indices
+_fine_pts      = None   # (N,3)  original fine positions for tracked verts
+_deform_pts    = None   # (N,3)  coarse-correspondence positions (no Z offset)
+_deform_mesh_v = None   # (nFineV,3)  full deformed fine mesh vertices (no offset)
+
+# index into _fine_ids / _fine_pts for fast lookup by fine vertex id
+_fine_id_to_row = None  # dict: fine_vertex_id -> row index in _fine_ids
+
+_z_offset               = 1.0
+_mesh_span              = 1.0   # set at load time; used to scale UI sliders
+_sample_step            = 10
+_show_arrows            = False
+_show_deform_pc         = True
+_selected_deform_face   = -1
+_show_flipped             = True
+_show_flipped_verts       = True
+_show_flipped_arrows      = True
+_flipped_highlight_active = False
+_selected_flipped_face    = -1       # local index into FLIPPED_MESH / _flipped_faces_glob
+_flipped_faces_glob       = None     # (K,3) global fine vertex IDs per flipped face
+_flipped_vtx_colors       = None     # cached (NV,3) color array for the quantity
+_flipped_vtx_arrows       = None     # cached (NV,3) arrow vectors for the quantity
+
+# F2C batch deformed mesh — two precomputed versions, toggled by _use_incident_steps
+_f2c_deform_mesh_v      = None   # (NF, 3) active F2C result (points at one of the two below)
+_f2c_tracked_mask       = None   # (NF,) bool — active mask
+_f2c_onering_mesh_v     = None   # full one-ring batch (compute_f2c_correspondences)
+_f2c_incident_mesh_v    = None   # incident-faces batch (compute_f2c_correspondences_incident)
+_use_f2c_deform         = True  # True = F2C mode, False = bundle mode
+_use_incident_steps     = True   # True = incident faces only; False = full one-ring
+_show_simplified        = False  # show coarse (simplified) mesh overlaid at deformed Z
+_vtx_input_id           = 0      # vertex ID text-input state
+
+# C2F mode state
+_c2f_mode               = False  # when True: click picks coarse vertex, runs C→F query
+_selected_coarse_vtx    = -1     # currently selected coarse vertex (compact index)
+_coarse_vtx_input_id    = 0      # text-input state for coarse vertex ID
+_c2f_result_pos         = None   # (3,) fine-mesh landing position from last C2F query
+_c2f_result_bf          = None   # [v0,v1,v2] global fine vertex indices of landing triangle
+_c2f_result_bc          = None   # (3,) barycentric weights at landing
+
+# collapse-trace state
+_selected_vtx         = -1
+_vtx_collapse_steps   = []   # list of (collapse_idx, SheetData, local_vtx_idx)
+_vtx_query_positions  = []   # list of np.ndarray(3,) — actual C2F query intermediates
+_current_step_idx     = 0
+_uv_plane_z         = -1.5  # Z position of UV flat-mesh in 3D viewport
+_uv_scale           = 3.0   # scale applied to normalised UV coords
+_canonical_view     = False
+_uv_post_offset     = .4   # normalised separation: UV_post sits this far above UV_pre
+_canonical_domain   = 'uv'  # 'uv' = show UV_pre/post panels  |  'ring' = show 3D one-ring
+
+
+# ---------------------------------------------------------------------------
+
+def _compute_c2f_batch():
+    """
+    For each compact coarse vertex, run query_coarse_to_fine and store
+    the fine-mesh landing position. Reuses _fine_ids / _fine_pts / _deform_pts
+    variable names so downstream rebuild functions remain compatible.
+    """
+    global _fine_ids, _fine_pts, _deform_pts, _deform_mesh_v, _fine_id_to_row
+
+    b = _bundle
+    if b is None or not b.has_ssp_data:
+        print("[c2f_batch] Bundle has no SSP data — cannot compute C2F correspondences")
+        return False
+
+    NC = b.coarseV.shape[0]
+
+    # For each coarse vertex find an incident coarse face and column
+    vtx_face = {}  # compact_vi → (cf_idx, col)
+    for fi in range(b.coarseF.shape[0]):
+        for col in range(3):
+            vi = int(b.coarseF[fi, col])
+            if vi not in vtx_face:
+                vtx_face[vi] = (fi, col)
+
+    BC   = np.zeros((NC, 3), dtype=np.float64)
+    BF   = np.zeros((NC, 3), dtype=np.int32)
+    FIdx = np.zeros(NC, dtype=np.int32)
+
+    for i in range(NC):
+        if i in vtx_face:
+            cf_idx, col = vtx_face[i]
+            ci0 = int(b.coarseF[cf_idx, 0])
+            ci1 = int(b.coarseF[cf_idx, 1])
+            ci2 = int(b.coarseF[cf_idx, 2])
+            BC[i, col] = 1.0
+            BF[i] = [int(b.vtxMap[ci0]), int(b.vtxMap[ci1]), int(b.vtxMap[ci2])]
+            FIdx[i] = int(b.faceMap[cf_idx])
+        else:
+            BC[i, 0] = 1.0  # degenerate fallback
+
+    query_coarse_to_fine(b.decInfo, b.decIM, b.faceSheetID, BC, BF, FIdx)
+
+    c2f_v = (BC[:, 0:1] * b.fineV[BF[:, 0]] +
+             BC[:, 1:2] * b.fineV[BF[:, 1]] +
+             BC[:, 2:3] * b.fineV[BF[:, 2]])
+
+    _fine_ids       = np.arange(NC, dtype=np.int32)   # coarse vertex indices
+    _fine_pts       = b.coarseV.copy()                # original coarse positions
+    _deform_pts     = c2f_v                           # fine landing positions
+    _deform_mesh_v  = c2f_v                           # full-size array (same here)
+    _fine_id_to_row = {i: i for i in range(NC)}
+
+    print(f"[c2f_batch] {NC} coarse vertices → fine mesh landing positions computed")
+    return True
+
+
+def _compute_f2c_deformed_mesh():
+    """C2F file: batch already done in _compute_c2f_batch(); just sync the active pointers."""
+    global _f2c_onering_mesh_v, _f2c_incident_mesh_v
+    _f2c_onering_mesh_v  = _deform_mesh_v
+    _f2c_incident_mesh_v = _deform_mesh_v
+    _apply_f2c_active()
+
+
+def _apply_f2c_active():
+    """Set _f2c_deform_mesh_v to the precomputed result matching _use_incident_steps."""
+    global _f2c_deform_mesh_v, _f2c_tracked_mask
+    if _use_incident_steps:
+        _f2c_deform_mesh_v = _f2c_incident_mesh_v
+        label = "incident-faces"
+    else:
+        _f2c_deform_mesh_v = _f2c_onering_mesh_v
+        label = "full one-ring"
+    print(f"[f2c] active deformed mesh: {label}")
+
+
+# ---------------------------------------------------------------------------
+# Rebuild helpers
+# ---------------------------------------------------------------------------
+
+def _active_deform_mesh_v():
+    """Return the deformed vertex array for whichever mode is active."""
+    if _use_f2c_deform and _f2c_deform_mesh_v is not None:
+        return _f2c_deform_mesh_v
+    return _deform_mesh_v
+
+
+def _rebuild_meshes():
+    # Fine mesh at Z=0 — grey transparent background (the TARGET)
+    fm = ps.register_surface_mesh(FINE_MESH, _bundle.fineV, _bundle.fineF)
+    fm.set_color((0.55, 0.55, 0.55))
+    fm.set_edge_width(0.3)
+    fm.set_smooth_shade(False)
+    fm.set_transparency(0.4)
+
+    # Original coarse mesh at Z=z_offset — green source mesh
+    cv = _bundle.coarseV.copy()
+    cv[:, 2] += _z_offset
+    cm = ps.register_surface_mesh(COARSE_MESH_VIZ, cv, _bundle.coarseF)
+    cm.set_color((0.15, 0.75, 0.35))
+    cm.set_edge_width(1.0)
+    cm.set_smooth_shade(False)
+    cm.set_transparency(0.6)
+
+    # Deformed coarse mesh at Z=0 — coarse topology, vertices at fine landing positions
+    active_v = _active_deform_mesh_v()
+    if active_v is not None:
+        dm = ps.register_surface_mesh(DEFORM_MESH, active_v, _bundle.coarseF)
+        dm.set_color((0.95, 0.50, 0.10))
+        dm.set_edge_width(0.7)
+        dm.set_smooth_shade(False)
+        dm.set_transparency(0.7)
+
+
+def _rebuild_simplified_mesh():
+    if ps.has_surface_mesh(_simplified_ps_name):
+        ps.remove_surface_mesh(_simplified_ps_name)
+    if not _show_simplified or _bundle is None:
+        return
+    if _bundle.coarseV is None or _bundle.coarseF is None:
+        print("[simplified] coarse mesh not available in bundle")
+        return
+    sv = _bundle.coarseV.copy()
+    sv[:, 2] += _z_offset
+    sm = ps.register_surface_mesh(_simplified_ps_name, sv, _bundle.coarseF)
+    sm.set_color((0.15, 0.75, 0.35))
+    sm.set_edge_width(1.5)
+    sm.set_smooth_shade(False)
+    sm.set_transparency(0.55)
+
+
+def _run_c2f_query(compact_vi: int):
+    """
+    Run a coarse→fine query for compact coarse vertex `compact_vi`.
+    Seeds one-hot BC at the vertex's corner on the first incident coarse face,
+    converts to global SSP indices, calls query_coarse_to_fine, and stores result.
+    """
+    global _c2f_result_pos, _c2f_result_bf, _c2f_result_bc
+
+    b = _bundle
+    if b is None or not b.has_ssp_data:
+        return
+
+    nC = b.coarseV.shape[0]
+    if not (0 <= compact_vi < nC):
+        return
+
+    # Find a coarse face incident to compact_vi and the column of this vertex
+    cf_idx = col = -1
+    for fi in range(b.coarseF.shape[0]):
+        row = b.coarseF[fi]
+        for c in range(3):
+            if int(row[c]) == compact_vi:
+                cf_idx, col = fi, c
+                break
+        if cf_idx >= 0:
+            break
+
+    if cf_idx < 0:
+        print(f"[c2f] compact vertex {compact_vi} not found in any coarse face")
+        return
+
+    ci0, ci1, ci2 = b.coarseF[cf_idx]
+    gvi0 = int(b.vtxMap[ci0])
+    gvi1 = int(b.vtxMap[ci1])
+    gvi2 = int(b.vtxMap[ci2])
+    gfi  = int(b.faceMap[cf_idx])
+
+    BC   = np.zeros((1, 3), dtype=np.float64)
+    BC[0, col] = 1.0
+    BF   = np.array([[gvi0, gvi1, gvi2]], dtype=np.int32)
+    FIdx = np.array([gfi], dtype=np.int32)
+
+    query_coarse_to_fine(b.decInfo, b.decIM, b.faceSheetID, BC, BF, FIdx)
+
+    v0, v1, v2 = int(BF[0, 0]), int(BF[0, 1]), int(BF[0, 2])
+    pos = BC[0, 0] * b.fineV[v0] + BC[0, 1] * b.fineV[v1] + BC[0, 2] * b.fineV[v2]
+
+    _c2f_result_pos = pos
+    _c2f_result_bf  = [v0, v1, v2]
+    _c2f_result_bc  = BC[0].copy()
+
+    coarse_pos = b.coarseV[compact_vi]
+    print(f"\n[C2F] coarse vtx {compact_vi}  →  fine pos ({pos[0]:.6f}, {pos[1]:.6f}, {pos[2]:.6f})")
+    print(f"      coarse pos ({coarse_pos[0]:.6f}, {coarse_pos[1]:.6f}, {coarse_pos[2]:.6f})")
+    print(f"      landing BF=({v0},{v1},{v2})  BC=({BC[0,0]:.4f},{BC[0,1]:.4f},{BC[0,2]:.4f})")
+
+
+def _rebuild_c2f_viz():
+    """Register/remove the C2F result structures (coarse dot, fine dot, arrow)."""
+    for name in (C2F_COARSE_PC, C2F_RESULT_PC, C2F_ARROW_PC):
+        if ps.has_point_cloud(name):
+            ps.remove_point_cloud(name)
+
+    if not _c2f_mode or _selected_coarse_vtx < 0 or _bundle is None:
+        return
+
+    coarse_pos = _bundle.coarseV[_selected_coarse_vtx].copy()
+    coarse_pos[2] += _z_offset   # coarse mesh is drawn at z_offset
+
+    pc_c = ps.register_point_cloud(C2F_COARSE_PC, coarse_pos[np.newaxis])
+    pc_c.set_color((0.15, 0.75, 0.35))   # green — matches simplified mesh
+    pc_c.set_radius(0.010, relative=True)
+
+    if _c2f_result_pos is None:
+        return
+
+    fine_pos = _c2f_result_pos.copy()  # fine mesh drawn at z=0
+
+    pc_f = ps.register_point_cloud(C2F_RESULT_PC, fine_pos[np.newaxis])
+    pc_f.set_color((1.0, 0.4, 0.0))    # orange — landing point on fine mesh
+    pc_f.set_radius(0.010, relative=True)
+
+    # Arrow from coarse position down to fine landing position
+    vec = fine_pos - coarse_pos
+    pc_a = ps.register_point_cloud(C2F_ARROW_PC, coarse_pos[np.newaxis])
+    pc_a.add_vector_quantity("to_fine", vec[np.newaxis],
+                             vectortype="ambient", enabled=True,
+                             color=(1.0, 0.85, 0.0))
+    pc_a.set_radius(0.001, relative=True)
+
+
+def _rebuild_deform_pc():
+    if ps.has_point_cloud(DEFORM_PC):
+        ps.remove_point_cloud(DEFORM_PC)
+
+    if not _show_deform_pc or _deform_pts is None:
+        return
+
+    step = max(1, _sample_step)
+    pts  = _deform_pts[::step].copy()   # fine landing positions at Z=0
+
+    pc = ps.register_point_cloud(DEFORM_PC, pts)
+    pc.set_color((0.95, 0.50, 0.10))
+    pc.set_radius(0.004, relative=True)
+
+
+def _rebuild_arrows():
+    """Subsampled arrows from original coarse positions (at Z=z_offset) → fine landing positions."""
+    if ps.has_point_cloud(ARROWS_PC):
+        ps.remove_point_cloud(ARROWS_PC)
+
+    if _fine_pts is None or _deform_pts is None:
+        return
+
+    step = max(1, _sample_step)
+    src  = _fine_pts[::step].copy()   # coarse positions
+    src[:, 2] += _z_offset
+    dst  = _deform_pts[::step].copy() # fine landing positions at Z=0
+    vecs = dst - src
+
+    pc = ps.register_point_cloud(ARROWS_PC, src)
+    pc.set_color((1.0, 0.85, 0.0))
+    pc.set_radius(0.003, relative=True)
+    pc.add_vector_quantity("to_fine", vecs,
+                           vectortype="ambient",
+                           enabled=_show_arrows,
+                           color=(1.0, 0.55, 0.05))
+
+
+def _rebuild_flipped_viz():
+    """
+    Flipped faces (dot(orig_normal, deformed_normal) < 0):
+      - DEFORM_MESH: transparency 0.4 (non-flipped faces are dimmed, keep orange).
+      - FLIPPED_MESH: re-indexed sub-mesh of flipped faces only, red, fully opaque.
+    On disable: remove FLIPPED_MESH, restore DEFORM_MESH transparency to 0.7.
+    """
+    global _flipped_highlight_active, _flipped_faces_glob, _selected_flipped_face
+
+    if ps.has_surface_mesh(FLIPPED_MESH):
+        ps.remove_surface_mesh(FLIPPED_MESH)
+    if ps.has_surface_mesh(DEFORM_MESH):
+        if _flipped_highlight_active:
+            _flipped_highlight_active = False
+        if not _show_flipped:
+            ps.get_surface_mesh(DEFORM_MESH).set_transparency(0.7)
+
+    active_v = _active_deform_mesh_v()
+    if not _show_flipped or active_v is None:
+        _rebuild_flipped_vtx_colors()
+        return
+
+    fineF = _bundle.coarseF
+    fineV = _bundle.coarseV
+    nF    = fineF.shape[0]
+
+    v0o = fineV[fineF[:, 0]];  v1o = fineV[fineF[:, 1]];  v2o = fineV[fineF[:, 2]]
+    orig_n = np.cross(v1o - v0o, v2o - v0o)
+    v0d = active_v[fineF[:, 0]];  v1d = active_v[fineF[:, 1]];  v2d = active_v[fineF[:, 2]]
+    deform_n = np.cross(v1d - v0d, v2d - v0d)
+
+    FLIP_EPS  = 1e-10
+    dots      = np.sum(orig_n * deform_n, axis=1)
+    flipped   = dots < -FLIP_EPS
+    n_flipped = int(flipped.sum())
+    print(f"[flip] {n_flipped} / {nF} coarse faces flipped")
+
+    if n_flipped == 0:
+        return
+
+    # dim the deformed mesh so non-flipped faces are at transparency 0.4
+    if ps.has_surface_mesh(DEFORM_MESH):
+        ps.get_surface_mesh(DEFORM_MESH).set_transparency(0.4)
+
+    # build flipped sub-mesh at Z=0 (deformed coarse mesh is already at Z=0)
+    dv = active_v.copy()   # fine landing positions — no z_offset
+
+    flip_face_idx   = np.where(flipped)[0]
+    flip_faces_glob = fineF[flip_face_idx]                          # (K, 3) global ids
+    unique_verts    = np.unique(flip_faces_glob)
+    old_to_new      = np.full(len(fineV), -1, dtype=np.int32)
+    old_to_new[unique_verts] = np.arange(len(unique_verts), dtype=np.int32)
+    new_verts = dv[unique_verts]                                    # positions at Z=0
+    new_faces = old_to_new[flip_faces_glob]                         # re-indexed
+
+    # push vertices along averaged face normals to avoid z-fighting with DEFORM_MESH
+    fn  = np.cross(new_verts[new_faces[:, 1]] - new_verts[new_faces[:, 0]],
+                   new_verts[new_faces[:, 2]] - new_verts[new_faces[:, 0]])
+    nl  = np.linalg.norm(fn, axis=1, keepdims=True)
+    fn  = fn / np.where(nl > 1e-10, nl, 1.0)
+    vn  = np.zeros_like(new_verts)
+    for i in range(3):
+        np.add.at(vn, new_faces[:, i], fn)
+    vnl = np.linalg.norm(vn, axis=1, keepdims=True)
+    vn  = vn / np.where(vnl > 1e-10, vnl, 1.0)
+    span    = float((new_verts.max(axis=0) - new_verts.min(axis=0)).max())
+    new_verts = new_verts + vn * span * 0.002
+
+    fm = ps.register_surface_mesh(FLIPPED_MESH, new_verts, new_faces)
+    fm.set_color((1.0, 0.10, 0.10))
+    fm.set_edge_width(0.7)
+    fm.set_smooth_shade(False)
+    fm.set_transparency(1.0)
+    _flipped_highlight_active = True
+
+    # Preserve the previous selection if it's still a valid index in the new list
+    prev_sel = _selected_flipped_face
+    _flipped_faces_glob    = flip_faces_glob
+    _selected_flipped_face = prev_sel if 0 <= prev_sel < len(flip_faces_glob) else -1
+    _rebuild_flipped_vtx_colors()
+    _rebuild_flipped_arrows()
+
+
+def _rebuild_flipped_vtx_colors():
+    """
+    Paint a color quantity on the FINE_VTX_PC point cloud:
+      - Flipped-face vertices → red
+      - All others            → default grey
+    When a single flipped face is selected, only its 3 corners go red.
+    Colors are cached in _flipped_vtx_colors so the checkbox can re-upload
+    with enabled=True/False without recomputing.
+    """
+    global _flipped_vtx_colors
+    if not ps.has_point_cloud(FINE_VTX_PC):
+        return
+    pc = ps.get_point_cloud(FINE_VTX_PC)
+
+    if not _show_flipped or _flipped_faces_glob is None:
+        try:
+            pc.remove_quantity("flipped_verts")
+        except Exception:
+            pass
+        _flipped_vtx_colors = None
+        return
+
+    NV     = _bundle.coarseV.shape[0]
+    colors = np.tile(np.array([0.75, 0.75, 0.75], dtype=np.float32), (NV, 1))
+
+    if _selected_flipped_face >= 0 and _selected_flipped_face < len(_flipped_faces_glob):
+        vids = _flipped_faces_glob[_selected_flipped_face]
+        colors[vids] = [1.0, 0.1, 0.1]
+    else:
+        for face_vids in _flipped_faces_glob:
+            colors[face_vids] = [1.0, 0.1, 0.1]
+
+    _flipped_vtx_colors = colors
+    pc.add_color_quantity("flipped_verts", colors, enabled=_show_flipped_verts)
+    # print ("dfaaf")
+
+
+def _rebuild_flipped_arrows():
+    """Vector quantity on FINE_VTX_PC: fine → deformed position for flipped vertices."""
+    global _flipped_vtx_arrows
+    if not ps.has_point_cloud(FINE_VTX_PC):
+        return
+    pc = ps.get_point_cloud(FINE_VTX_PC)
+
+    active_v = _active_deform_mesh_v()
+    if not _show_flipped or _flipped_faces_glob is None or active_v is None:
+        try:
+            pc.remove_quantity("flipped_arrows")
+        except Exception:
+            pass
+        _flipped_vtx_arrows = None
+        return
+
+    NV   = _bundle.coarseV.shape[0]
+    vecs = np.zeros((NV, 3), dtype=np.float32)
+    dv   = active_v.copy()   # fine landing positions at Z=0
+
+    if _selected_flipped_face >= 0 and _selected_flipped_face < len(_flipped_faces_glob):
+        vids = _flipped_faces_glob[_selected_flipped_face]
+    else:
+        vids = np.unique(_flipped_faces_glob)
+
+    src = _bundle.coarseV.copy()
+    src[:, 2] += _z_offset
+    vecs[vids] = (dv[vids] - src[vids]).astype(np.float32)
+    _flipped_vtx_arrows = vecs
+    pc.add_vector_quantity("flipped_arrows", vecs, vectortype="ambient",
+                           enabled=_show_flipped_arrows, color=(1.0, 0.30, 0.30))
+
+
+def _rebuild_deform_face_sel():
+    """
+    Color + vector quantities on FINE_VTX_PC for the selected deformed coarse face.
+      "deform_sel_colors"  — 3 corner coarse vertices yellow, rest grey
+      "deform_sel_arrows"  — coarse → fine landing vectors for those 3 corners
+    Cleared when no face is selected.
+    """
+    if not ps.has_point_cloud(FINE_VTX_PC):
+        return
+    pc = ps.get_point_cloud(FINE_VTX_PC)
+
+    if _selected_deform_face < 0:
+        for q in ("deform_sel_colors", "deform_sel_arrows"):
+            try:
+                pc.remove_quantity(q)
+            except Exception:
+                pass
+        return
+
+    active_v = _active_deform_mesh_v()
+    NC       = _bundle.coarseV.shape[0]
+    vids     = _bundle.coarseF[_selected_deform_face]   # 3 coarse vertex indices
+
+    colors = np.tile(np.array([0.75, 0.75, 0.75], dtype=np.float32), (NC, 1))
+    colors[vids] = [1.0, 0.85, 0.0]
+    pc.add_color_quantity("deform_sel_colors", colors, enabled=True)
+
+    vecs = np.zeros((NC, 3), dtype=np.float32)
+    if active_v is not None:
+        src = _bundle.coarseV.copy()
+        src[:, 2] += _z_offset
+        vecs[vids] = (active_v[vids] - src[vids]).astype(np.float32)
+    pc.add_vector_quantity("deform_sel_arrows", vecs, vectortype="ambient",
+                           enabled=True, color=(1.0, 0.85, 0.0))
+
+    print(f"[sel] deformed coarse face {_selected_deform_face}  "
+          f"verts=({int(vids[0])}, {int(vids[1])}, {int(vids[2])})")
+
+
+def _rebuild_fine_vtx_pc():
+    """Selectable point cloud over all coarse mesh vertices (shown at Z=z_offset)."""
+    if ps.has_point_cloud(FINE_VTX_PC):
+        ps.remove_point_cloud(FINE_VTX_PC)
+    cv = _bundle.coarseV.copy()
+    cv[:, 2] += _z_offset
+    pc = ps.register_point_cloud(FINE_VTX_PC, cv)
+    pc.set_color((0.15, 0.75, 0.35))
+    pc.set_radius(0.003, relative=True)
+    _rebuild_flipped_vtx_colors()
+    _rebuild_flipped_arrows()
+
+
+def _log_step_info():
+    n_steps = len(_vtx_collapse_steps)
+    if _selected_vtx < 0 or n_steps == 0:
+        return
+    step_idx = max(0, min(_current_step_idx, n_steps - 1))
+
+    # intermediate position from F2C query
+    # step 0       → positions[0] = fineV[vi] (fine-mesh start)
+    # step k       → positions[k] (position entering collapse k)
+    # last step    → positions[-1] = final coarse (special-cased so it's always exact)
+    if _vtx_query_positions:
+        n_pos = len(_vtx_query_positions)
+        qi = (n_pos - 1) if step_idx >= n_steps - 1 else step_idx
+        pos = _vtx_query_positions[qi]
+    else:
+        pos = _bundle.fineV[_selected_vtx]
+
+    # final deformed position (no Z offset)
+    if _f2c_deform_mesh_v is not None:
+        final_pos = _f2c_deform_mesh_v[_selected_vtx]
+    elif _fine_id_to_row is not None and _selected_vtx in _fine_id_to_row:
+        final_pos = _deform_pts[_fine_id_to_row[_selected_vtx]]
+    else:
+        final_pos = None
+
+    print(f"[step] {step_idx + 1}/{n_steps}  "
+          f"pos=({pos[0]:.6f}, {pos[1]:.6f}, {pos[2]:.6f})", end="")
+    if final_pos is not None:
+        print(f"  |  final=({final_pos[0]:.6f}, {final_pos[1]:.6f}, {final_pos[2]:.6f})", end="")
+    print()
+
+
+def _rebuild_step_viz():
+    """
+    Main-view (non-canonical) overlay for the current collapse step:
+      STEP_POS_PC  — single dot that interpolates between the fine-mesh position
+                     (step 0) and the coarse correspondence position (last step),
+                     so it slides along the F2C mapping as you press Prev/Next.
+      STEP_RING_PC — one-ring vertices for the current step's sheet (cyan).
+    Both are cleared when no vertex is selected.
+    """
+    for name in (STEP_POS_PC, STEP_RING_PC):
+        if ps.has_point_cloud(name):
+            ps.remove_point_cloud(name)
+
+    if _selected_vtx < 0 or not _vtx_collapse_steps:
+        return
+
+    step_idx = max(0, min(_current_step_idx, len(_vtx_collapse_steps) - 1))
+    _ci, sheet, _local_v = _vtx_collapse_steps[step_idx][:3]
+
+    # Use the actual C2F query intermediate position for this step.
+    # step 0 → positions[0] = fineV[vi] (fine-mesh start)
+    # step k → positions[k] (entering collapse k)
+    # last step → positions[-1] = final coarse (always exact)
+    if _vtx_query_positions:
+        n_pos   = len(_vtx_query_positions)
+        n_steps = len(_vtx_collapse_steps)
+        qi = (n_pos - 1) if step_idx >= n_steps - 1 else step_idx
+        current_pos = _vtx_query_positions[qi]
+    else:
+        base_v = _deform_mesh_v if (not _use_f2c_deform and _deform_mesh_v is not None) else _bundle.fineV
+        current_pos = base_v[_selected_vtx]
+
+    pc = ps.register_point_cloud(STEP_POS_PC, current_pos[np.newaxis])
+    pc.set_color((1.0, 0.35, 0.0))
+    pc.set_radius(0.009, relative=True)
+
+    # Arrow from current step position → final fine-mesh landing position (both at Z=0)
+    final_pos = None
+    if _vtx_query_positions:
+        final_pos = np.array(_vtx_query_positions[-1], dtype=np.float64)
+    elif _f2c_deform_mesh_v is not None:
+        final_pos = _f2c_deform_mesh_v[_selected_vtx].copy()
+    elif _fine_id_to_row is not None and _selected_vtx in _fine_id_to_row:
+        final_pos = _deform_pts[_fine_id_to_row[_selected_vtx]].copy()
+    if final_pos is not None:
+        vec = (final_pos - current_pos)[np.newaxis]
+        pc.add_vector_quantity("to_correspondence", vec, vectortype="ambient",
+                               enabled=True, color=(1.0, 0.85, 0.0))
+
+    # Ring point cloud: all subsetVIdx vertices for this step
+    # subV     = np.clip(sheet.subsetVIdx, 0, _bundle.fineV.shape[0] - 1)
+    # ring_pts = _bundle.fineV[subV]
+    # pc_ring  = ps.register_point_cloud(STEP_RING_PC, ring_pts)
+    # pc_ring.set_color((0.3, 0.85, 1.0))
+    # pc_ring.set_radius(0.006, relative=True)
+    # pc_ring.set_radius(0.006, relative=True)
+
+
+def _vtx_world_pos_after_collapse(sheet, local_v: int) -> np.ndarray:
+    """
+    Returns the 3-D world-space position of the tracked vertex after the
+    collapse described by `sheet`, by projecting UV_post[local_v] through
+    the ring's local tangent frame.  This is the actual intermediate result
+    of the F2C mapping at this collapse step.
+    """
+    subV    = np.clip(sheet.subsetVIdx, 0, len(_bundle.fineV) - 1)
+    base_v  = _deform_mesh_v if (not _use_f2c_deform and _deform_mesh_v is not None) else _bundle.fineV
+    verts   = base_v[subV]
+    uv_pre  = sheet.UV_pre
+    F       = sheet.FUV_pre
+
+    centroid = verts.mean(axis=0)
+    span     = (verts.max(axis=0) - verts.min(axis=0)).max()
+    if span < 1e-10:
+        span = 1.0
+
+    v0 = verts[F[:, 0]]; v1 = verts[F[:, 1]]; v2 = verts[F[:, 2]]
+    nrm = np.cross(v1 - v0, v2 - v0).sum(axis=0)
+    n   = np.linalg.norm(nrm)
+    nrm = nrm / n if n > 1e-10 else np.array([0., 0., 1.])
+
+    arb = np.array([1., 0., 0.]) if abs(nrm[0]) < 0.9 else np.array([0., 1., 0.])
+    t1  = arb - nrm * nrm.dot(arb); t1 /= np.linalg.norm(t1)
+    t2  = np.cross(nrm, t1);        t2 /= np.linalg.norm(t2)
+
+    uc     = (uv_pre[:, 0].max() + uv_pre[:, 0].min()) * 0.5
+    vc     = (uv_pre[:, 1].max() + uv_pre[:, 1].min()) * 0.5
+    pv     = verts - centroid
+    xu     = pv @ t1;  yu  = pv @ t2
+    du     = uv_pre[:, 0] - uc;  dv = uv_pre[:, 1] - vc
+    A_sum  = float((xu * du + yu * dv).sum())
+    B_sum  = float((yu * du - xu * dv).sum())
+    beta   = math.atan2(B_sum, A_sum)
+    cb, sb = math.cos(beta), math.sin(beta)
+    t1_old = t1.copy()
+    t1 =  cb * t1_old + sb * t2
+    t2 = -sb * t1_old + cb * t2
+
+    uv_span  = max(uv_pre[:, 0].max() - uv_pre[:, 0].min(),
+                   uv_pre[:, 1].max() - uv_pre[:, 1].min())
+    uv_scale = (1.0 / uv_span) if uv_span > 1e-10 else 1.0
+
+    uv = sheet.UV_post[local_v]
+    dU = (uv[0] - uc) * uv_scale * span
+    dV = (uv[1] - vc) * uv_scale * span
+    return centroid + dU * t1 + dV * t2
+
+
+def _compute_canonical(sheet, local_v: int, **kwargs) -> dict:
+    """
+    Port of compute_ring_geometry() + show_canonical_view() from visualizer.cpp.
+
+    3D ring  : fineV[subsetVIdx]  (original fine-mesh positions; approximation
+               of the true intermediate one-ring, which is not stored in the bundle)
+    UV panels: UV_pre / UV_post from SheetData  (exact)
+
+    Returns a dict with everything needed to register the canonical structures.
+    """
+    uv_pre    = sheet.UV_pre          # (N, 2)
+    uv_post   = sheet.UV_post         # (N, 2)
+    # subsetVIdx may have more entries than UV rows (sd_naf appends the survivor at index N
+    # for vertex-fixup only — it has no UV row).  Truncate to match UV_pre.
+    n_uv      = uv_pre.shape[0]
+    subV      = np.clip(sheet.subsetVIdx[:n_uv], 0, len(_bundle.fineV) - 1)
+    base_v    = _deform_mesh_v if (not _use_f2c_deform and _deform_mesh_v is not None) else _bundle.fineV
+    verts     = base_v[subV]   # (N, 3)
+    F         = sheet.FUV_pre         # (M, 3) — pre-collapse triangulation
+    F_post    = sheet.FUV_post if len(sheet.FUV_post) > 0 else sheet.FUV_pre
+
+    # ---- centroid and span ----
+    centroid = verts.mean(axis=0)
+    span     = (verts.max(axis=0) - verts.min(axis=0)).max()
+    if span < 1e-10:
+        span = 1.0
+
+    # ---- average face normal (vectorised) ----
+    v0 = verts[F[:, 0]]; v1 = verts[F[:, 1]]; v2 = verts[F[:, 2]]
+    nrm = np.cross(v1 - v0, v2 - v0).sum(axis=0)
+    n   = np.linalg.norm(nrm)
+    nrm = nrm / n if n > 1e-10 else np.array([0.0, 0.0, 1.0])
+
+    # ---- initial tangent frame (t1, t2) ----
+    arb = np.array([1.0, 0.0, 0.0]) if abs(nrm[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    t1  = arb - nrm * nrm.dot(arb);  t1 /= np.linalg.norm(t1)
+    t2  = np.cross(nrm, t1);          t2 /= np.linalg.norm(t2)
+
+    # ---- 2-D Procrustes: rotate (t1,t2) to align UV panel with ring projection ----
+    # (β = atan2(Σ(y·u − x·v),  Σ(x·u + y·v))  as in visualizer.cpp §"Rotate (t1,t2) by β")
+    uc    = (uv_pre[:, 0].max() + uv_pre[:, 0].min()) * 0.5
+    vc    = (uv_pre[:, 1].max() + uv_pre[:, 1].min()) * 0.5
+    pv    = verts - centroid
+    xu    = pv @ t1;   yu    = pv @ t2
+    du    = uv_pre[:, 0] - uc;  dv = uv_pre[:, 1] - vc
+    A_sum = float((xu * du + yu * dv).sum())
+    B_sum = float((yu * du - xu * dv).sum())
+    beta  = math.atan2(B_sum, A_sum)
+    cb, sb = math.cos(beta), math.sin(beta)
+    t1_old = t1.copy()
+    t1 =  cb * t1_old + sb * t2
+    t2 = -sb * t1_old + cb * t2
+
+    # ---- UV scale: map UV extent → 1 unit (in normalised space) ----
+    uv_span = max(uv_pre[:, 0].max() - uv_pre[:, 0].min(),
+                  uv_pre[:, 1].max() - uv_pre[:, 1].min())
+    uv_scale = (1.0 / uv_span) if uv_span > 1e-10 else 1.0
+
+    # UV_pre at ring level (centroid); UV_post offset above by _uv_post_offset normalised units.
+    # Both panels use the same tangent frame so they're visually aligned.
+    def to3d(UV, panel_origin):
+        dU = (UV[:, 0:1] - uc) * uv_scale * span
+        dV = (UV[:, 1:2] - vc) * uv_scale * span
+        return panel_origin + dU * t1 + dV * t2
+
+    uv_pre_3d  = to3d(uv_pre,  centroid)
+    uv_post_3d = to3d(uv_post, centroid + nrm * _uv_post_offset * span)
+
+    # ---- canonical rotation: nrm → world Y-up ----
+    world_up = np.array([0.0, 1.0, 0.0])
+    ax       = np.cross(nrm, world_up)
+    sin_a    = np.linalg.norm(ax)
+    cos_a    = float(nrm.dot(world_up))
+    if sin_a < 1e-6:
+        R = np.eye(3) if cos_a > 0 else np.diag([-1.0, -1.0, 1.0])
+    else:
+        ax    /= sin_a
+        theta  = math.atan2(sin_a, cos_a)
+        K      = np.array([[   0.0, -ax[2],  ax[1]],
+                            [ ax[2],    0.0, -ax[0]],
+                            [-ax[1],  ax[0],    0.0]])
+        R = np.eye(3) + math.sin(theta) * K + (1.0 - math.cos(theta)) * (K @ K)
+
+    # Normalise by span so every collapse step renders at unit scale — prevents
+    # UV panels jumping to wildly different heights between steps.
+    def rot_norm(P):
+        return (R @ ((P - centroid) / span).T).T
+
+    vr   = rot_norm(verts)
+    upr  = rot_norm(uv_pre_3d)
+    upor = rot_norm(uv_post_3d)
+
+    # ---- tracked point: true interpolated UV position (not just the dominant corner) ----
+    # BC / FUV_pre / FUV_post come from the step tuple stored in _vtx_collapse_steps.
+    # _compute_canonical receives the SheetData but not the per-step BC — the caller
+    # must pass them in via tracked_uv_pre / tracked_uv_post kwargs if available.
+    # Fallback: dominant corner vertex (legacy behaviour).
+    tracked_uv_pre_2d  = kwargs.get('tracked_uv_pre')   # (2,) or None
+    tracked_uv_post_2d = kwargs.get('tracked_uv_post')  # (2,) or None
+
+    def _uv_to_canonical(uv2d, panel_origin):
+        pt = np.array([[uv2d[0], uv2d[1]]])
+        return rot_norm(to3d(pt, panel_origin))[0]
+
+    if tracked_uv_pre_2d is not None:
+        tracked_pre_pt  = _uv_to_canonical(tracked_uv_pre_2d,  centroid)
+        tracked_post_pt = _uv_to_canonical(tracked_uv_post_2d, centroid + nrm * _uv_post_offset * span) \
+                          if tracked_uv_post_2d is not None else rot_norm(uv_post_3d)[local_v]
+    else:
+        tracked_pre_pt  = upr[local_v]
+        tracked_post_pt = upor[local_v]
+
+    # ---- collapsed edge in UV_pre ----
+    # b[0]=survivor, b[1]=absorbed; both are local indices into UV_pre.
+    edge_pts_pre = None
+    if len(sheet.b) >= 2 and sheet.b[0] >= 0 and sheet.b[1] >= 0:
+        b0, b1 = int(sheet.b[0]), int(sheet.b[1])
+        if b0 < uv_pre.shape[0] and b1 < uv_pre.shape[0]:
+            edge_uv_pre = uv_pre[[b0, b1]]          # (2, 2) — survivor, absorbed
+            edge_3d_pre = to3d(edge_uv_pre, centroid)
+            edge_pts_pre = rot_norm(edge_3d_pre)     # (2, 3) in canonical space
+
+    # ---- DC panels (boundary/seam collapses with double cover) ----
+    dc_panels = None
+    if getattr(sheet, 'has_dc', False) and len(sheet.UV_dc_pre) > 0:
+        uv_dc_pre  = sheet.UV_dc_pre    # (nVjoint_dc, 2) — top sheet + bottom-sheet B_reflected
+        uv_dc_post = sheet.UV_dc_post   # same shape
+        dc_F_pre   = sheet.FUV_dc_pre   # (2*nF_pre,  3) — top + bottom faces
+        dc_F_post  = sheet.FUV_dc_post  # (2*nF_post, 3)
+
+        # Center and scale from the full DC UV extent
+        dc_uc  = (uv_dc_pre[:, 0].max() + uv_dc_pre[:, 0].min()) * 0.5
+        dc_vc  = (uv_dc_pre[:, 1].max() + uv_dc_pre[:, 1].min()) * 0.5
+        dc_ext = max(uv_dc_pre[:, 0].max() - uv_dc_pre[:, 0].min(),
+                     uv_dc_pre[:, 1].max() - uv_dc_pre[:, 1].min())
+        dc_scale = (1.0 / dc_ext) if dc_ext > 1e-10 else 1.0
+
+        # Place DC panels to the right of the regular UV panels (+3 normalised units)
+        dc_shift = t1 * 3.0 * span
+
+        def to3d_dc(UV, panel_origin):
+            dU = (UV[:, 0:1] - dc_uc) * dc_scale * span
+            dV = (UV[:, 1:2] - dc_vc) * dc_scale * span
+            return panel_origin + dU * t1 + dV * t2
+
+        dc_pre_3d  = rot_norm(to3d_dc(uv_dc_pre,  centroid + dc_shift))
+        dc_post_3d = rot_norm(to3d_dc(uv_dc_post, centroid + dc_shift + nrm * _uv_post_offset * span))
+        dc_panels = {
+            'uv_dc_pre':  dc_pre_3d,
+            'uv_dc_post': dc_post_3d,
+            'F_dc_pre':   dc_F_pre,
+            'F_dc_post':  dc_F_post,
+        }
+
+    return {
+        'V_ring':        vr,
+        'uv_pre':        upr,
+        'uv_post':       upor,
+        'F':             F,       # FUV_pre — for UV_pre panel and 3-D ring
+        'F_post':        F_post,  # FUV_post — for UV_post panel (may differ from F)
+        'tracked_ring':  vr[local_v],
+        'tracked_pre':   tracked_pre_pt,
+        'tracked_post':  tracked_post_pt,
+        'span':          span,
+        'edge_pts_pre':  edge_pts_pre,
+        'dc_panels':     dc_panels,   # None when no DC data; dict otherwise
+    }
+
+
+def _clear_canonical():
+    for name in _CV_NAMES:
+        if ps.has_surface_mesh(name):
+            ps.remove_surface_mesh(name)
+        if ps.has_point_cloud(name):
+            ps.remove_point_cloud(name)
+        if ps.has_curve_network(name):
+            ps.remove_curve_network(name)
+    # edge overlay uses an extra _pts point cloud not in _CV_NAMES
+    pts_name = CV_EDGE_PRE + "_pts"
+    if ps.has_point_cloud(pts_name):
+        ps.remove_point_cloud(pts_name)
+
+
+def _print_step_bc_info():
+    """Print UV-space barycentric info for the current canonical step."""
+    step_idx = max(0, min(_current_step_idx, len(_vtx_collapse_steps) - 1))
+    entry    = _vtx_collapse_steps[step_idx]
+    ci, sd, local_v = entry[:3]
+    if len(entry) < 9:
+        print(f"[BC info] step {step_idx}: no cast data (old bundle?)")
+        return
+
+    _ci, _sd, _lv, pre_row, BC_pre, uv_q, best_row, BC_post, BF_post = entry
+
+    # Global vertex indices at the pre triangle corners
+    pre_tri     = sd.FUV_pre[pre_row]           # local indices
+    pre_verts   = [int(sd.subsetVIdx[pre_tri[i]]) for i in range(3)]
+    pre_uv_verts = [sd.UV_pre[pre_tri[i]] for i in range(3)]
+
+    # Post triangle
+    fuv_post    = sd.FUV_post if len(sd.FUV_post) > 0 else sd.FUV_pre
+    post_tri    = fuv_post[best_row]
+    post_verts  = [int(sd.subsetVIdx[post_tri[i]]) for i in range(3)]
+    post_uv_verts = [sd.UV_post[post_tri[i]] for i in range(3)]
+
+    # Survivor / absorbed edge
+    b0 = int(sd.b[0]) if len(sd.b) >= 2 else -1
+    b1 = int(sd.b[1]) if len(sd.b) >= 2 else -1
+    g_survivor = int(sd.subsetVIdx[b0]) if b0 >= 0 else -1
+    g_absorbed = int(sd.subsetVIdx[b1]) if b1 >= 0 else -1
+
+    print(f"\n{'='*60}")
+    print(f"[BC info] vtx={_selected_vtx}  step={step_idx}/{len(_vtx_collapse_steps)-1}  ci={ci}  sheet={sd.global_sheet_id}")
+    print(f"  Collapsed edge:  survivor g{g_survivor} (local {b0})  →  absorbed g{g_absorbed} (local {b1})")
+    # Reconstruct the UV coordinate from BC weights — both should equal uv_q
+    uv_pre_reconst  = sum(BC_pre[i]  * pre_uv_verts[i]  for i in range(3))
+    uv_post_reconst = sum(BC_post[i] * post_uv_verts[i] for i in range(3))
+    uv_delta = uv_post_reconst - uv_pre_reconst
+
+    print(f"  ── UV_pre ──")
+    print(f"    face row : {pre_row}")
+    print(f"    tri verts: g{pre_verts[0]}  g{pre_verts[1]}  g{pre_verts[2]}")
+    for i in range(3):
+        uv = pre_uv_verts[i]
+        print(f"    corner {i}: UV=({uv[0]:.6f}, {uv[1]:.6f})  w={BC_pre[i]:.6f}")
+    print(f"    tracked UV  (BC·UV_pre) : ({uv_pre_reconst[0]:.6f}, {uv_pre_reconst[1]:.6f})")
+    print(f"    query UV used for cast  : ({uv_q[0]:.6f}, {uv_q[1]:.6f})")
+    print(f"  ── UV_post ──")
+    print(f"    face row : {best_row}")
+    print(f"    tri verts: g{post_verts[0]}  g{post_verts[1]}  g{post_verts[2]}")
+    for i in range(3):
+        uv = post_uv_verts[i]
+        print(f"    corner {i}: UV=({uv[0]:.6f}, {uv[1]:.6f})  w={BC_post[i]:.6f}")
+    print(f"    tracked UV  (BC·UV_post): ({uv_post_reconst[0]:.6f}, {uv_post_reconst[1]:.6f})")
+    print(f"  ── consistency ──")
+    err = max(abs(float(uv_delta[0])), abs(float(uv_delta[1])))
+    flag = 'OK' if err < 1e-4 else '<<< MISMATCH'
+    print(f"    Δ UV (post − pre): ({uv_delta[0]:.2e}, {uv_delta[1]:.2e})  {flag}")
+    print(f"  BF (global, post): {BF_post}")
+
+    # ── full collapse geometry ──
+    n_pre  = len(sd.FUV_pre)
+    fuv_post_arr = sd.FUV_post if len(sd.FUV_post) > 0 else sd.FUV_pre
+    n_post = len(fuv_post_arr)
+    n_uv_pre  = sd.UV_pre.shape[0]
+    n_uv_post = sd.UV_post.shape[0]
+    print(f"\n  ── collapse geometry  (ci={ci}  sheet={sd.global_sheet_id}) ──")
+    print(f"    UV_pre  : {n_uv_pre} verts  {n_pre} tris")
+    print(f"    UV_post : {n_uv_post} verts  {n_post} tris")
+
+    # All UV_pre vertices with 3-D position
+    n_uv = sd.UV_pre.shape[0]
+    subV = np.clip(sd.subsetVIdx[:n_uv], 0, len(_bundle.fineV) - 1)
+    print(f"\n    UV_pre vertices (local → global → 3-D pos → UV):")
+    for li in range(n_uv):
+        gi  = int(sd.subsetVIdx[li]) if li < len(sd.subsetVIdx) else -1
+        pos = _bundle.fineV[gi] if 0 <= gi < len(_bundle.fineV) else np.zeros(3)
+        uv  = sd.UV_pre[li]
+        role = ''
+        if li == b0: role = ' [SURVIVOR]'
+        if li == b1: role = ' [ABSORBED]'
+        uv_post_str = ''
+        if li < sd.UV_post.shape[0]:
+            up = sd.UV_post[li]
+            uv_post_str = f"  UV_post=({up[0]:.4f},{up[1]:.4f})"
+        print(f"      local {li:2d}  g{gi:<5d}  "
+              f"pos=({pos[0]:.4f},{pos[1]:.4f},{pos[2]:.4f})  "
+              f"UV_pre=({uv[0]:.4f},{uv[1]:.4f}){uv_post_str}{role}")
+
+    # All UV_pre triangles
+    print(f"\n    UV_pre triangles:")
+    for fi in range(n_pre):
+        tri = sd.FUV_pre[fi]
+        gvs = [int(sd.subsetVIdx[tri[k]]) if tri[k] < len(sd.subsetVIdx) else -1 for k in range(3)]
+        marker = ' <-- tracked (pre_row)' if fi == pre_row else ''
+        print(f"      [{fi}] local({tri[0]},{tri[1]},{tri[2]})  "
+              f"global(g{gvs[0]},g{gvs[1]},g{gvs[2]}){marker}")
+
+    # All UV_post triangles
+    print(f"\n    UV_post triangles:")
+    for fi in range(n_post):
+        tri = fuv_post_arr[fi]
+        gvs = [int(sd.subsetVIdx[tri[k]]) if tri[k] < len(sd.subsetVIdx) else -1 for k in range(3)]
+        marker = ' <-- tracked (best_row)' if fi == best_row else ''
+        print(f"      [{fi}] local({tri[0]},{tri[1]},{tri[2]})  "
+              f"global(g{gvs[0]},g{gvs[1]},g{gvs[2]}){marker}")
+
+    # Check whether the absorbed vertex local index appears in UV_post faces
+    abs_in_post = any(b1 in fuv_post_arr[fi] for fi in range(n_post)) if b1 >= 0 else False
+    print(f"\n    Absorbed local {b1} (g{g_absorbed}) present in UV_post faces: {abs_in_post}")
+    print(f"{'='*60}\n")
+
+
+def _rebuild_canonical_view():
+    _clear_canonical()
+    if not _canonical_view or _selected_vtx < 0 or not _vtx_collapse_steps:
+        return
+    if _vtx_collapse_steps and _vtx_collapse_steps[0][1] is None:
+        # C2F steps have no SheetData — canonical view not available
+        return
+
+    step_idx = max(0, min(_current_step_idx, len(_vtx_collapse_steps) - 1))
+    entry    = _vtx_collapse_steps[step_idx]
+    _ci, sheet, local_v = entry[:3]
+
+    # Extract per-step UV positions if stored (tuples with len>=9 have cast data)
+    tracked_uv_pre  = None
+    tracked_uv_post = None
+    if len(entry) >= 9:
+        _ci2, _sd, _lv, pre_row, BC_pre, uv_q, best_row, BC_post, _BF = entry
+        fuv_pre  = sheet.FUV_pre
+        fuv_post = sheet.FUV_post if len(sheet.FUV_post) > 0 else sheet.FUV_pre
+        # Interpolated UV in pre panel (= uv_q exactly; BC_pre · UV_pre corners)
+        a, b, c = int(fuv_pre[pre_row, 0]), int(fuv_pre[pre_row, 1]), int(fuv_pre[pre_row, 2])
+        tracked_uv_pre = BC_pre[0]*sheet.UV_pre[a] + BC_pre[1]*sheet.UV_pre[b] + BC_pre[2]*sheet.UV_pre[c]
+        # Interpolated UV in post panel (BC_post · UV_post corners — should equal tracked_uv_pre)
+        pa, pb, pc = int(fuv_post[best_row, 0]), int(fuv_post[best_row, 1]), int(fuv_post[best_row, 2])
+        tracked_uv_post = BC_post[0]*sheet.UV_post[pa] + BC_post[1]*sheet.UV_post[pb] + BC_post[2]*sheet.UV_post[pc]
+
+    geo = _compute_canonical(sheet, local_v,
+                             tracked_uv_pre=tracked_uv_pre,
+                             tracked_uv_post=tracked_uv_post)
+
+    if _canonical_domain == 'ring':
+        # Spatial domain — show the 3D one-ring only
+        rm = ps.register_surface_mesh(CV_RING_MESH, geo['V_ring'], geo['F'])
+        rm.set_color((0.3, 0.55, 1.0))
+        rm.set_edge_width(1.5)
+        rm.set_smooth_shade(False)
+        rm.set_transparency(0.5)
+
+        pt3d = geo['tracked_ring'][np.newaxis]
+        pc   = ps.register_point_cloud(CV_TRACKED, pt3d)
+        pc.set_color((1.0, 0.3, 0.0))
+        pc.set_radius(0.025, relative=True)
+
+    else:
+        # UV domain — show UV_pre (blue) and UV_post (orange) panels
+        pm = ps.register_surface_mesh(CV_UV_PRE, geo['uv_pre'], geo['F'])
+        pm.set_color((0.3, 0.55, 1.0))
+        pm.set_edge_width(1.5)
+        pm.set_smooth_shade(False)
+        pm.set_transparency(1.0)
+
+        qm = ps.register_surface_mesh(CV_UV_POST, geo['uv_post'], geo['F_post'])
+        qm.set_color((1.0, 0.5, 0.15))
+        qm.set_edge_width(1.5)
+        qm.set_smooth_shade(False)
+        qm.set_transparency(1.0)
+
+        # Tracked vertex: orange dot at UV_pre position + yellow arrow → UV_post
+        pt3d  = geo['tracked_pre'][np.newaxis]
+        arrow = (geo['tracked_post'] - geo['tracked_pre'])[np.newaxis]
+        pc    = ps.register_point_cloud(CV_TRACKED, pt3d)
+        pc.set_color((1.0, 0.3, 0.0))
+        pc.set_radius(0.015, relative=True)
+        pc.add_vector_quantity("uv_disp", arrow, vectortype="ambient",
+                               enabled=True, color=(1.0, 0.85, 0.0))
+
+        # Tracked vertex: red  dot at UV_post  position
+        pt3d  = geo['tracked_post'][np.newaxis]
+        pc    = ps.register_point_cloud(CV_TRACKED_POST, pt3d)
+        pc.set_color((1.0, 0.0, 0.0))
+        pc.set_radius(0.015, relative=True)
+
+        # Collapsed edge: yellow curve + endpoint dots on UV_pre panel
+        # [0]=survivor (b[0]), [1]=absorbed (b[1])
+        edge_pts = geo.get('edge_pts_pre')
+        if edge_pts is not None:
+            net = ps.register_curve_network(CV_EDGE_PRE,
+                                            edge_pts,
+                                            np.array([[0, 1]]))
+            net.set_color((1.0, 0.9, 0.0))
+            net.set_radius(0.008, relative=True)
+            # Survivor = green dot, absorbed = red dot
+            ep = ps.register_point_cloud(CV_EDGE_PRE + "_pts", edge_pts)
+            ep.set_radius(0.018, relative=True)
+            ep.add_scalar_quantity("role", np.array([0.0, 1.0]),
+                                   enabled=True, cmap="blues")
+
+        # Double-cover panels (teal = pre, amber = post) — shown when collapse used DC LSCM
+        dc = geo.get('dc_panels')
+        if dc is not None:
+            dm = ps.register_surface_mesh(CV_DC_PRE, dc['uv_dc_pre'], dc['F_dc_pre'])
+            dm.set_color((0.15, 0.80, 0.75))   # teal
+            dm.set_edge_width(1.2)
+            dm.set_smooth_shade(False)
+            dm.set_transparency(0.55)
+
+            dm2 = ps.register_surface_mesh(CV_DC_POST, dc['uv_dc_post'], dc['F_dc_post'])
+            dm2.set_color((0.90, 0.55, 0.05))  # amber
+            dm2.set_edge_width(1.2)
+            dm2.set_smooth_shade(False)
+            dm2.set_transparency(0.55)
+
+
+def _find_vtx_collapse_steps(v: int):
+    """
+    Walk decIM forward and collect every collapse step that touches vertex v
+    via its incident faces only (direct method — fewer steps than full one-ring).
+    Returns list stored in _vtx_collapse_steps:
+        (collapse_idx, SheetData, local_idx_of_v_in_sheet)
+    """
+    global _vtx_collapse_steps
+    fineF = _bundle.fineF
+
+    # all fine faces that contain v
+    faces_of_v = np.where(np.any(fineF == v, axis=1))[0]
+
+    # union of collapse indices from decIM for those faces
+    seen: set = set()
+    for f in faces_of_v:
+        fi = int(f)
+        if fi < len(_bundle.decIM):
+            for ci in _bundle.decIM[fi]:
+                seen.add(ci)
+
+    # Collect v's incident face sheet IDs for multi-sheet preference
+    faceSheetID = _bundle.faceSheetID
+    nFO         = len(_bundle.decIM)
+    incident_sids = set()
+    if faceSheetID is not None:
+        for f in faces_of_v:
+            fi = int(f)
+            if fi < len(faceSheetID):
+                incident_sids.add(int(faceSheetID[fi]))
+
+    steps = []
+    for ci in sorted(seen):
+        cd = _bundle.decInfo[ci]
+        # Collect all sheets where v has a valid UV slot (local_v < uvRows).
+        valid_sheets = []
+        for sheet in cd.sheets:
+            uvRows = len(sheet.UV_post)
+            hits = np.where(sheet.subsetVIdx == v)[0]
+            if len(hits) and int(hits[0]) < uvRows:
+                valid_sheets.append((sheet, int(hits[0])))
+
+        if len(valid_sheets) > 1:
+            # Prefer the sheet whose global_sheet_id matches an incident face's sheet ID
+            chosen = None
+            for sh, lv in valid_sheets:
+                if sh.global_sheet_id in incident_sids:
+                    chosen = (sh, lv)
+                    break
+            sid_str = ', '.join(
+                f'sid={sh.global_sheet_id} uv_post={sh.UV_post[lv]}'
+                for sh, lv in valid_sheets)
+            match_sid = chosen[0].global_sheet_id if chosen else 'none'
+            print(f"[trace][multi-sheet] ci={ci} vertex={v}: "
+                  f"{len(valid_sheets)} valid sheets [{sid_str}] "
+                  f"incident_sids={incident_sids} → chosen sid={match_sid}")
+            if chosen is None:
+                chosen = valid_sheets[0]  # fallback to first
+        elif valid_sheets:
+            chosen = valid_sheets[0]
+        else:
+            chosen = None
+
+        if chosen is not None:
+            steps.append((ci, chosen[0], chosen[1]))
+        else:
+            # fallback: record even if no valid UV slot (will be skipped in query)
+            for sheet in cd.sheets:
+                hits = np.where(sheet.subsetVIdx == v)[0]
+                if len(hits):
+                    steps.append((ci, sheet, int(hits[0])))
+                    break
+
+    _vtx_collapse_steps = steps
+    print(f"[trace] vertex {v}: {len(steps)} collapse steps "
+          f"(incident faces only, from {len(faces_of_v)} fine faces)")
+
+
+def _load_vtx_collapse_steps(v: int):
+    """
+    Populate _vtx_collapse_steps for vertex v using the active method:
+      _use_incident_steps=True  → _bundle._f2c_incident_vtx_steps (incident faces)
+      _use_incident_steps=False → _bundle._f2c_vtx_steps (full one-ring)
+    Falls back to _find_vtx_collapse_steps if the precomputed map is missing.
+    """
+    global _vtx_collapse_steps
+    if _use_incident_steps:
+        incident_map = getattr(_bundle, '_f2c_incident_vtx_steps', None)
+        if incident_map is not None and v in incident_map:
+            _vtx_collapse_steps = incident_map[v]
+            print(f"[trace] vertex {v}: {len(_vtx_collapse_steps)} collapse steps (incident faces)")
+        else:
+            _find_vtx_collapse_steps(v)
+    else:
+        onering_map = getattr(_bundle, '_f2c_vtx_steps', None)
+        if onering_map is not None and v in onering_map:
+            _vtx_collapse_steps = onering_map[v]
+            print(f"[trace] vertex {v}: {len(_vtx_collapse_steps)} collapse steps (full one-ring)")
+        else:
+            _find_vtx_collapse_steps(v)
+
+
+def _run_query_intermediates(v: int):
+    """
+    Walk coarse vertex v through C2F (coarse→fine) and store intermediate positions.
+    v is a compact coarse vertex index.
+    """
+    global _vtx_query_positions, _vtx_collapse_steps
+    from c2f_query import query_point_with_intermediates
+
+    b = _bundle
+    cf_idx = col = -1
+    for fi in range(b.coarseF.shape[0]):
+        for c in range(3):
+            if int(b.coarseF[fi, c]) == v:
+                cf_idx, col = fi, c
+                break
+        if cf_idx >= 0:
+            break
+
+    if cf_idx < 0:
+        _vtx_query_positions = [b.coarseV[v].copy()]
+        _vtx_collapse_steps  = []
+        return
+
+    ci0 = int(b.coarseF[cf_idx, 0])
+    ci1 = int(b.coarseF[cf_idx, 1])
+    ci2 = int(b.coarseF[cf_idx, 2])
+    BC_init      = np.zeros(3, dtype=np.float64)
+    BC_init[col] = 1.0
+    BF_init      = [int(b.vtxMap[ci0]), int(b.vtxMap[ci1]), int(b.vtxMap[ci2])]
+    FIdx_init    = int(b.faceMap[cf_idx])
+
+    _vtx_query_positions = query_point_with_intermediates(
+        b.decInfo, b.decIM, b.faceSheetID,
+        BC_init, BF_init, FIdx_init, b.fineV
+    )
+    # No SheetData per step for C2F; dummy tuples keep step_idx indexing compatible
+    _vtx_collapse_steps = [(i, None, -1) for i in range(len(_vtx_query_positions) - 1)]
+    n = len(_vtx_collapse_steps)
+    print(f"[c2f_intermediates] coarse vtx {v}: {len(_vtx_query_positions)} positions  {n} steps")
+
+
+def _rebuild_vtx_trajectory():
+    """
+    3D view: green dot at clicked fine vertex + green curve to its coarse
+    correspondence (if it's a tracked vertex in samples_vertices_*.txt).
+    """
+    try:
+        if ps.has_curve_network(TRAJ_CURVE):
+            ps.remove_curve_network(TRAJ_CURVE)
+    except Exception:
+        pass
+    if ps.has_point_cloud(TRACKED_VTX_PC):
+        ps.remove_point_cloud(TRACKED_VTX_PC)
+
+    if _selected_vtx < 0:
+        return
+
+    coarse_pos = _bundle.coarseV[_selected_vtx].copy()
+    coarse_pos[2] += _z_offset
+    pc = ps.register_point_cloud(TRACKED_VTX_PC, coarse_pos[np.newaxis])
+    pc.set_color((0.1, 1.0, 0.3))
+    pc.set_radius(0.0035, relative=True)
+
+
+def _rebuild_uv_sheet_viz():
+    """
+    UV canonical view: render the sheet's UV_pre triangulation as a flat mesh
+    at Z = _uv_plane_z.  Orange dot marks the tracked vertex's UV_pre position;
+    a yellow arrow points to its UV_post position (the UV displacement caused by
+    this collapse step).
+    """
+    if ps.has_surface_mesh(UV_SHEET_MESH):
+        ps.remove_surface_mesh(UV_SHEET_MESH)
+    if ps.has_point_cloud(UV_TRACKED_PC):
+        ps.remove_point_cloud(UV_TRACKED_PC)
+
+    if _selected_vtx < 0 or not _vtx_collapse_steps:
+        return
+
+    step_idx = max(0, min(_current_step_idx, len(_vtx_collapse_steps) - 1))
+    ci, sheet, local_v = _vtx_collapse_steps[step_idx][:3]
+
+    uv     = sheet.UV_pre          # (uvRows, 2)
+    center = uv.mean(axis=0)
+    span   = (uv.max(axis=0) - uv.min(axis=0)).max()
+    if span < 1e-10:
+        span = 1.0
+    norm   = (uv - center) / span  # ~ [-0.5, 0.5]
+
+    verts3d = np.column_stack([
+        norm[:, 0] * _uv_scale,
+        norm[:, 1] * _uv_scale,
+        np.full(len(uv), _uv_plane_z),
+    ])
+    sm = ps.register_surface_mesh(UV_SHEET_MESH, verts3d, sheet.FUV_pre)
+    sm.set_color((0.4, 0.6, 1.0))
+    sm.set_edge_width(1.0)
+    sm.set_smooth_shade(False)
+    sm.set_transparency(0.5)
+
+    # tracked vertex: orange dot + yellow arrow (UV_pre → UV_post)
+    uv_pre_n  = (uv[local_v]             - center) / span * _uv_scale
+    uv_post_n = (sheet.UV_post[local_v]  - center) / span * _uv_scale
+    pt3d  = np.array([[uv_pre_n[0], uv_pre_n[1], _uv_plane_z]])
+    arrow = np.array([[uv_post_n[0] - uv_pre_n[0],
+                       uv_post_n[1] - uv_pre_n[1],
+                       0.0]])
+    pc = ps.register_point_cloud(UV_TRACKED_PC, pt3d)
+    pc.set_color((1.0, 0.3, 0.0))
+    pc.set_radius(0.010, relative=True)
+    pc.add_vector_quantity("uv_disp", arrow, vectortype="ambient",
+                           enabled=True, color=(1.0, 0.85, 0.0))
+
+
+def _rebuild_all():
+    _rebuild_meshes()
+    _rebuild_simplified_mesh()
+    _rebuild_deform_pc()
+    _rebuild_arrows()
+    _rebuild_flipped_viz()
+    _rebuild_fine_vtx_pc()
+    _rebuild_deform_face_sel()
+    _rebuild_vtx_trajectory()
+    _rebuild_step_viz()
+    _rebuild_c2f_viz()
+    # _rebuild_uv_sheet_viz()
+
+
+# ---------------------------------------------------------------------------
+# UI callback
+# ---------------------------------------------------------------------------
+
+def ui_callback():
+    global _z_offset, _mesh_span, _sample_step, _show_arrows, _show_deform_pc, _selected_deform_face, _show_flipped
+    global _show_flipped_verts, _show_flipped_arrows, _selected_flipped_face, _flipped_vtx_colors, _flipped_vtx_arrows
+    global _selected_vtx, _current_step_idx, _uv_scale, _uv_plane_z, _canonical_view, _uv_post_offset, _canonical_domain, _vtx_query_positions
+    global _use_f2c_deform, _use_incident_steps, _show_simplified, _vtx_input_id
+    global _c2f_mode, _selected_coarse_vtx, _coarse_vtx_input_id, _c2f_result_pos, _c2f_result_bf, _c2f_result_bc
+
+    changed = False
+
+    try:
+        psim.SetNextWindowSize((330, 280), psim.ImGuiCond_FirstUseEver)
+    except Exception:
+        pass
+    psim.Begin("Coarse -> Fine", True)
+
+    psim.TextUnformatted("[ C2F query active — coarse vertices → fine mesh ]")
+
+    psim.Separator()
+
+    _slider_range = max(2.0, _mesh_span * 5)
+    c, v = psim.SliderFloat("Z offset (deformed)", _z_offset, -_slider_range, _slider_range)
+    if c:
+        _z_offset = v
+        changed = True
+
+    c, v = psim.SliderInt("Arrow every N verts", _sample_step, 1, 500)
+    if c:
+        _sample_step = v
+        changed = True
+
+    c, v = psim.Checkbox("Show deformed verts PC", _show_deform_pc)
+    if c:
+        _show_deform_pc = v
+        _rebuild_deform_pc()
+    psim.SameLine()
+    c, v = psim.Checkbox("Show arrows", _show_arrows)
+    if c:
+        _show_arrows = v
+        changed = True
+
+    if _fine_pts is not None:
+        step  = max(1, _sample_step)
+        shown = (len(_fine_pts) + step - 1) // step
+        psim.TextUnformatted(f"Arrows: {shown} / {len(_fine_pts)} coarse verts")
+
+    psim.Separator()
+
+    if _selected_deform_face >= 0:
+        corner_vids = _bundle.coarseF[_selected_deform_face]
+        psim.TextUnformatted(
+            f"Deformed coarse face {_selected_deform_face}  "
+            f"(verts {int(corner_vids[0])}, {int(corner_vids[1])}, {int(corner_vids[2])})")
+        if psim.Button("Clear face selection"):
+            _selected_deform_face = -1
+            _rebuild_deform_face_sel()
+    else:
+        psim.TextUnformatted("Click a deformed coarse face to inspect")
+
+    psim.Separator()
+    psim.TextUnformatted("Flip detection")
+
+    c, v = psim.Checkbox("Show flipped faces", _show_flipped)
+    if c:
+        _show_flipped = v
+        _rebuild_flipped_viz()
+
+    if _show_flipped:
+        psim.Indent()
+        c, v = psim.Checkbox("Highlight flipped vertices on fine mesh", _show_flipped_verts)
+        if c:
+            _show_flipped_verts = v
+            if _flipped_vtx_colors is not None and ps.has_point_cloud(FINE_VTX_PC):
+                ps.get_point_cloud(FINE_VTX_PC).add_color_quantity(
+                    "flipped_verts", _flipped_vtx_colors, enabled=v)
+        c, v = psim.Checkbox("Show flipped arrows", _show_flipped_arrows)
+        if c:
+            _show_flipped_arrows = v
+            if _flipped_vtx_arrows is not None and ps.has_point_cloud(FINE_VTX_PC):
+                ps.get_point_cloud(FINE_VTX_PC).add_vector_quantity(
+                    "flipped_arrows", _flipped_vtx_arrows, vectortype="ambient",
+                    enabled=v, color=(1.0, 0.30, 0.30))
+        psim.Unindent()
+
+    if _show_flipped and _active_deform_mesh_v() is not None:
+        fineF    = _bundle.coarseF
+        fineV    = _bundle.coarseV
+        v0o = fineV[fineF[:, 0]];  v1o = fineV[fineF[:, 1]];  v2o = fineV[fineF[:, 2]]
+        _av = _active_deform_mesh_v()
+        v0d = _av[fineF[:, 0]];  v1d = _av[fineF[:, 1]];  v2d = _av[fineF[:, 2]]
+        orig_n   = np.cross(v1o - v0o, v2o - v0o)
+        deform_n = np.cross(v1d - v0d, v2d - v0d)
+        n_flipped = int((np.sum(orig_n * deform_n, axis=1) < -1e-10).sum())
+        psim.TextUnformatted(f"Flipped: {n_flipped} / {fineF.shape[0]} coarse faces")
+        if _selected_flipped_face >= 0 and _flipped_faces_glob is not None:
+            vids = _flipped_faces_glob[_selected_flipped_face]
+            psim.TextUnformatted(
+                f"Selected flipped face {_selected_flipped_face}  "
+                f"(verts {vids[0]}, {vids[1]}, {vids[2]})")
+            if psim.Button("Clear flipped face selection"):
+                _selected_flipped_face = -1
+                _rebuild_flipped_vtx_colors()
+                _rebuild_flipped_arrows()
+        else:
+            psim.TextDisabled("Click a flipped face to isolate its vertices")
+
+    psim.Separator()
+    c, v = psim.Checkbox(f"Show simplified mesh  [{_simplified_ps_name}]", _show_simplified)
+    if c:
+        _show_simplified = v
+        _rebuild_simplified_mesh()
+    if _show_simplified and _bundle is not None and _bundle.coarseV is not None:
+        psim.SameLine()
+        psim.TextDisabled(f"({_bundle.coarseV.shape[0]}v / {_bundle.coarseF.shape[0]}f)")
+
+    psim.Separator()
+    psim.TextUnformatted("C2F Collapse Trace")
+    nV = _bundle.coarseV.shape[0] if _bundle is not None else 0
+    c, v = psim.InputInt("Coarse Vtx ID", _vtx_input_id)
+    if c:
+        _vtx_input_id = max(0, min(v, nV - 1))
+    psim.SameLine()
+    if psim.Button("Go") and 0 <= _vtx_input_id < nV:
+        _selected_vtx     = _vtx_input_id
+        _current_step_idx = 0
+        _run_query_intermediates(_selected_vtx)
+        _rebuild_vtx_trajectory()
+        _rebuild_step_viz()
+        _rebuild_canonical_view()
+        _rebuild_fine_vtx_pc()
+
+    if _selected_vtx >= 0:
+        n_steps = len(_vtx_collapse_steps)
+        psim.TextUnformatted(f"Vertex {_selected_vtx}  |  {n_steps} collapse steps")
+
+        if n_steps > 0:
+            ci_cur = _vtx_collapse_steps[_current_step_idx][0]
+            psim.TextUnformatted(
+                f"Step {_current_step_idx + 1} / {n_steps}  "
+                f"(collapse #{ci_cur})")
+
+            if psim.Button("< Prev"):
+                if _current_step_idx > 0:
+                    _current_step_idx -= 1
+                    if _canonical_view:
+                        _rebuild_canonical_view()
+                    else:
+                        _rebuild_step_viz()
+                    _log_step_info()
+            psim.SameLine()
+            if psim.Button("Next >"):
+                if _current_step_idx < n_steps - 1:
+                    _current_step_idx += 1
+                    if _canonical_view:
+                        _rebuild_canonical_view()
+                    else:
+                        _rebuild_step_viz()
+                    _log_step_info()
+        else:
+            psim.TextUnformatted("(vertex not involved in any collapse)")
+
+        # ---- canonical / main view switch (mirrors visualizer.cpp) ----
+        psim.Separator()
+        _c2f_no_sheet = (_vtx_collapse_steps and _vtx_collapse_steps[_current_step_idx][1] is None)
+        if not _canonical_view:
+            if _c2f_no_sheet:
+                psim.TextDisabled("Canonical View (N/A — no sheet data for C2F steps)")
+            else:
+                if psim.Button("Canonical View"):
+                    _canonical_view = True
+                    try:
+                        ps.remove_all_structures()
+                    except Exception:
+                        pass
+                    _rebuild_canonical_view()
+                    try:
+                        ps.reset_camera_to_home_view()
+                    except Exception:
+                        pass
+                psim.SameLine()
+                psim.TextUnformatted("(ring + UV panels only)")
+
+            # flat UV sheet controls shown only in main view
+            c, v = psim.SliderFloat("UV scale", _uv_scale, 0.5, 10.0)
+            if c:
+                _uv_scale = v
+                _rebuild_uv_sheet_viz()
+            c, v = psim.SliderFloat("UV plane Z", _uv_plane_z, -5.0, 5.0)
+            if c:
+                _uv_plane_z = v
+                _rebuild_uv_sheet_viz()
+        else:
+            if psim.Button("Back to Main View"):
+                _canonical_view = False
+                try:
+                    ps.remove_all_structures()
+                except Exception:
+                    pass
+                _rebuild_all()
+                ps.reset_camera_to_home_view()
+            # Domain toggle — only one active at a time
+            c, chk = psim.Checkbox("UV domain (pre/post panels)", _canonical_domain == 'uv')
+            if c and chk:
+                _canonical_domain = 'uv'
+                _rebuild_canonical_view()
+            psim.SameLine()
+            c, chk = psim.Checkbox("Spatial domain (ring)", _canonical_domain == 'ring')
+            if c and chk:
+                _canonical_domain = 'ring'
+                _rebuild_canonical_view()
+
+            if _canonical_domain == 'uv':
+                psim.TextDisabled("Blue = UV_pre (down)   Orange = UV_post (offset above)")
+                c, v = psim.SliderFloat("Pre/Post offset", _uv_post_offset, 0.0, 5.0)
+                if c:
+                    _uv_post_offset = v
+                    _rebuild_canonical_view()
+
+                if psim.Button("Print step BC info") and _vtx_collapse_steps:
+                    _print_step_bc_info()
+            else:
+                psim.TextDisabled("Blue = 3-D one-ring")
+
+        psim.Separator()
+        if psim.Button("Clear vertex"):
+            was_canonical = _canonical_view
+            _selected_vtx = -1
+            _vtx_collapse_steps.clear()
+            _vtx_query_positions.clear()
+            _current_step_idx = 0
+            _canonical_view   = False
+            if was_canonical:
+                try:
+                    ps.remove_all_structures()
+                except Exception:
+                    pass
+                _rebuild_all()
+                ps.reset_camera_to_home_view()
+            else:
+                _rebuild_vtx_trajectory()
+                _rebuild_step_viz()
+                _clear_canonical()
+    else:
+        psim.TextUnformatted("No vertex selected — type ID above or click coarse_mesh_verts")
+
+    psim.End()
+
+    if changed and not _canonical_view:
+        _rebuild_all()
+
+    # ---- pick detection ----
+    io = psim.GetIO()
+
+    # Double-click: recenter camera on the clicked primitive
+    if io.MouseDoubleClicked[0]:
+        try:
+            pr = ps.pick(screen_coords=io.MousePos)
+        except Exception:
+            pr = None
+        if pr is not None and getattr(pr, 'is_hit', False):
+            target  = pr.position
+            cam_pos = ps.get_view_camera_parameters().get_position()
+            ps.look_at(cam_pos, target, fly_to=True)
+
+    if io.MouseClicked[0]:
+        try:
+            pr = ps.pick(screen_coords=io.MousePos)
+        except Exception:
+            pr = None
+        if pr is not None and getattr(pr, 'is_hit', False):
+            sname = getattr(pr, 'structure_name', None)
+            sdata = getattr(pr, 'structure_data', None) or {}
+
+            if sname == FINE_VTX_PC:
+                vidx = int(sdata.get('index', -1))
+                nV   = _bundle.coarseV.shape[0]
+                if 0 <= vidx < nV:
+                    _selected_vtx     = vidx
+                    _current_step_idx = 0
+                    _run_query_intermediates(vidx)
+                    _rebuild_vtx_trajectory()
+                    _rebuild_step_viz()
+                    _rebuild_canonical_view()
+                    # Re-register to clear Polyscope's built-in selection indicator
+                    # (picked point is rendered at larger radius by default)
+                    _rebuild_fine_vtx_pc()
+
+            elif sname == DEFORM_MESH:
+                etype = sdata.get('element_type', None)
+                fidx  = int(sdata.get('index', -1))
+                nF    = _bundle.coarseF.shape[0]
+                if etype == 'face' and 0 <= fidx < nF:
+                    _selected_deform_face = -1 if fidx == _selected_deform_face else fidx
+                    _rebuild_deform_face_sel()
+
+            elif sname == FLIPPED_MESH:
+                etype = sdata.get('element_type', None)
+                fidx  = int(sdata.get('index', -1))
+                if (etype == 'face' and _flipped_faces_glob is not None
+                        and 0 <= fidx < len(_flipped_faces_glob)):
+                    _selected_flipped_face = -1 if fidx == _selected_flipped_face else fidx
+                    _rebuild_flipped_vtx_colors()
+                    _rebuild_flipped_arrows()
+                    # clear previous on-the-fly query points
+                    if ps.has_point_cloud(FLIPPED_F2C_PC):
+                        ps.remove_point_cloud(FLIPPED_F2C_PC)
+                    if _selected_flipped_face >= 0:
+                        vids = _flipped_faces_glob[_selected_flipped_face]
+                        print(f"\n[flipped coarse face {_selected_flipped_face}]  vids={list(vids)}")
+                        for k, vid in enumerate(vids):
+                            coarse_pos = _bundle.coarseV[vid]
+                            fine_pos   = _deform_pts[vid] if _deform_pts is not None else coarse_pos
+                            print(f"  v{k}: coarse_id={vid}  "
+                                  f"coarse=({coarse_pos[0]:.6f},{coarse_pos[1]:.6f},{coarse_pos[2]:.6f})  "
+                                  f"fine=({fine_pos[0]:.6f},{fine_pos[1]:.6f},{fine_pos[2]:.6f})")
+
+
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic: decIM / subsetVIdx coverage
+# ---------------------------------------------------------------------------
+
+def _log_decim_stats():
+    if not _bundle.has_ssp_data:
+        return
+
+    fineF = _bundle.fineF
+    NV    = _bundle.fineV.shape[0]
+    NF    = fineF.shape[0]
+    nFO   = len(_bundle.decIM)
+
+    # ---- face-level: how many original faces have any collapse entry ----
+    nonempty_faces = sum(1 for d in _bundle.decIM if len(d) > 0)
+    print(f"\n[decIM] ---- decIM coverage ----")
+    print(f"[decIM] decIM entries  : {nFO}  (fine faces: {NF})")
+    print(f"[decIM] non-empty rows : {nonempty_faces} / {nFO}  "
+          f"({100*nonempty_faces/nFO:.1f}%)" if nFO > 0 else "")
+
+    # ---- vertex-level: which fine verts have at least one incident face with decIM ----
+    vtx_face_covered = np.zeros(NV, dtype=bool)
+    for fi in range(min(NF, nFO)):
+        if len(_bundle.decIM[fi]) > 0:
+            vtx_face_covered[fineF[fi, 0]] = True
+            vtx_face_covered[fineF[fi, 1]] = True
+            vtx_face_covered[fineF[fi, 2]] = True
+    n_face_covered = int(vtx_face_covered.sum())
+    print(f"[decIM] fine verts with ≥1 incident non-empty decIM face : "
+          f"{n_face_covered} / {NV}  ({100*n_face_covered/NV:.1f}%)")
+    print(f"[decIM] fine verts with NO  incident non-empty decIM face : "
+          f"{NV - n_face_covered} / {NV}  ({100*(NV-n_face_covered)/NV:.1f}%)")
+
+    # ---- vertex-level: which fine verts appear in any sheet's subsetVIdx ----
+    vtx_in_sheet = np.zeros(NV, dtype=bool)
+    for cd in _bundle.decInfo:
+        for sheet in cd.sheets:
+            for v in sheet.subsetVIdx:
+                if 0 <= v < NV:
+                    vtx_in_sheet[v] = True
+    n_in_sheet = int(vtx_in_sheet.sum())
+    print(f"[decIM] fine verts appearing in ≥1 sheet subsetVIdx       : "
+          f"{n_in_sheet} / {NV}  ({100*n_in_sheet/NV:.1f}%)")
+    print(f"[decIM] fine verts never in any sheet subsetVIdx           : "
+          f"{NV - n_in_sheet} / {NV}  ({100*(NV-n_in_sheet)/NV:.1f}%)")
+
+    # ---- total collapse-step count across all vertices ----
+    total_entries = sum(len(d) for d in _bundle.decIM)
+    print(f"[decIM] total (face, collapse) pairs in decIM              : {total_entries}")
+    print(f"[decIM] SSP collapses recorded                             : {len(_bundle.decInfo)}")
+
+    # ---- simulate _find_vtx_collapse_steps for every fine vertex ----
+    # A face in decIM[fi] for collapse ci doesn't mean v is in ci's one-ring;
+    # this sweep finds how many vertices actually get ≥1 step.
+    print(f"[decIM] sweeping all {NV} fine vertices for reachable steps …")
+    step_counts = np.zeros(NV, dtype=np.int32)
+    for v in range(NV):
+        faces_of_v = np.where(np.any(fineF == v, axis=1))[0]
+        seen: set = set()
+        for f in faces_of_v:
+            fi = int(f)
+            if fi < nFO:
+                for ci in _bundle.decIM[fi]:
+                    seen.add(ci)
+        count = 0
+        for ci in seen:
+            cd = _bundle.decInfo[ci]
+            for sheet in cd.sheets:
+                if np.any(sheet.subsetVIdx == v):
+                    count += 1
+                    break
+        step_counts[v] = count
+
+    zero_steps = int((step_counts == 0).sum())
+    print(f"[decIM] fine verts with 0 reachable collapse steps         : {zero_steps} / {NV}  ({100*zero_steps/NV:.1f}%)")
+    print(f"[decIM] fine verts with ≥1 reachable collapse steps        : {NV-zero_steps} / {NV}  ({100*(NV-zero_steps)/NV:.1f}%)")
+    if NV > zero_steps:
+        nz = step_counts[step_counts > 0]
+        print(f"[decIM] steps per vertex (non-zero): min={nz.min()}  median={int(np.median(nz))}  max={nz.max()}  mean={nz.mean():.1f}")
+    print(f"[decIM] --------------------------------\n")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main():
+    global _bundle, _bundle_dir, _z_offset, _mesh_span, _simplified_ps_name
+# 
+    c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\01_00040057_f8f78dbd17414efda75bc437_trimesh_000\\correspondence_01_00040057_f8f78dbd17414efda75bc437_trimesh_000_mat_initial.c2f"
+    # c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\0002000_partstudio_14_model_ste_00_1024\\correspondence_0002000_partstudio_14_model_ste_00_1024.c2f"
+    # c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\hand\\correspondence_hand.c2f"
+    # c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\subDiv_cube\\correspondence_subDiv_cube.c2f"
+    # c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\non_manifold_planes\\correspondence_non_manifold_planes.c2f"
+    _bundle_dir = os.path.dirname(os.path.abspath(c2f_path))
+    _bundle     = load_bundle(c2f_path)
+
+    # Derive Polyscope display name for the simplified (coarse) mesh from the directory name
+    mesh_dir_name       = os.path.basename(_bundle_dir)
+    _simplified_ps_name = f"simplified_{mesh_dir_name}"
+
+    # Auto-scale z_offset to ~1× the mesh bounding-box diagonal so the deformed
+    # copy is visibly separated regardless of mesh scale.
+    fv = _bundle.fineV
+    mesh_span = float((fv.max(axis=0) - fv.min(axis=0)).max())
+    if mesh_span > 1e-10:
+        _z_offset   = mesh_span
+        _mesh_span  = mesh_span
+
+    print(f"Fine:   {_bundle.fineV.shape[0]} verts  {_bundle.fineF.shape[0]} faces")
+    if _bundle.has_ssp_data:
+        print(f"SSP:    {len(_bundle.decInfo)} collapses")
+
+    ok = _compute_c2f_batch()
+    if not ok:
+        print("ERROR: could not compute C2F correspondences — exiting.")
+        sys.exit(1)
+
+    _compute_f2c_deformed_mesh()
+
+    _log_decim_stats()
+
+    ps.init()
+    ps.set_program_name("Coarse -> Fine")
+    ps.set_up_dir("y_up")
+
+    _rebuild_all()
+
+    ps.set_user_callback(ui_callback)
+    ps.show()
+
+
+if __name__ == "__main__":
+    main()
