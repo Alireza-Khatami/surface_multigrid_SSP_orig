@@ -72,6 +72,7 @@ static bool  gShowUVPost        = false;
 // Canonical-view two-group toggles
 static bool  gShowCanonRing     = true;   // one-ring + non-active sheets
 static bool  gShowCanonUV       = true;   // UV meshes + UV collapsed edge
+static bool  gShowCase1PinViz   = true;   // Case 1: vertex role colors, arc curve, pin markers
 // DC vertex group toggles
 static bool  gShowBDVtx         = true;   // boundary vertex highlight (Case 1/2, magenta)
 static bool  gShowDCVertVi      = true;   // vi and vj (collapse endpoints)
@@ -522,6 +523,151 @@ static void register_ring_geometry(const DisplayGeometry & g)
             ->setEnabled(gShowCollapsedEdge);
     }
 
+    // ---- Case 1 UV pin visualization ----------------------------------------
+    // Only meaningful when lscm_case==1 and BDSnap is valid.
+    // (1) Vertex role colors on uv_pre surface mesh
+    // (2) Boundary arc curve network (one-ring boundary edges in UV)
+    // (3) Pin marker point clouds: vi pin (green) and vj pin (blue)
+    // -------------------------------------------------------------------------
+    if (gSnap.lscm_case.has_value() && gSnap.lscm_case.value() == 1 &&
+        gSnap.UV_pre.rows() > 0 && gSnap.b.size() >= 2 &&
+        gSnap.FUV_pre.rows() > 0)
+    {
+        const BDSnap & bds = SSP_get_bd_snap();
+        bool bds_ok  = bds.valid;
+        int  bd_local = -1;
+        bool bd_is_vi = false;
+        if (bds_ok) {
+            bd_is_vi = bds.injected_ndv;
+            bd_local = bd_is_vi ? (int)gSnap.b(0) : (int)gSnap.b(1);
+        }
+        int local_vi = (int)gSnap.b(0);
+        int local_vj = (int)gSnap.b(1);
+        int nV = (int)gSnap.UV_pre.rows();
+
+        // -- edge valence for ring_bd detection (same logic as build_dc_snap_str) --
+        std::map<std::pair<int,int>, int> edge_cnt;
+        for (int f = 0; f < gSnap.FUV_pre.rows(); f++)
+            for (int e = 0; e < 3; e++) {
+                int a = gSnap.FUV_pre(f,e), b2 = gSnap.FUV_pre(f,(e+1)%3);
+                if (a > b2) std::swap(a, b2);
+                edge_cnt[{a,b2}]++;
+            }
+        std::set<int> ring_bd;
+        for (auto& kv : edge_cnt)
+            if (kv.second == 1) { ring_bd.insert(kv.first.first); ring_bd.insert(kv.first.second); }
+
+        // U value of bd_vtx for HIGHER/LOWER comparison
+        double bd_U = (bds_ok && bd_local >= 0 && bd_local < nV)
+                      ? gSnap.UV_pre(bd_local, 1) : 0.0;  // col1 = U
+
+        // (1) Vertex role colors: build per-vertex RGB for uv_pre
+        {
+            // Colors: bd_vtx=red, other_pin=green, ring_bd HIGHER=orange, LOWER=purple, SAME=yellow, interior=gray
+            Eigen::MatrixXd vColors(nV, 3);
+            for (int v = 0; v < nV; v++) {
+                if (bds_ok && v == bd_local) {
+                    vColors.row(v) << 1.0, 0.08, 0.08;  // red — boundary vertex (pinned)
+                } else if (v == local_vi || v == local_vj) {
+                    // other collapse endpoint (non-boundary pin)
+                    vColors.row(v) << 0.1, 0.85, 0.2;   // green — other pin
+                } else if (ring_bd.count(v)) {
+                    double v_U  = gSnap.UV_pre(v, 1);
+                    double diff = v_U - bd_U;
+                    if (diff >  1e-7)
+                        vColors.row(v) << 1.0, 0.55, 0.1;   // orange — HIGHER
+                    else if (diff < -1e-7)
+                        vColors.row(v) << 0.65, 0.1, 0.9;   // purple — LOWER
+                    else
+                        vColors.row(v) << 0.95, 0.9, 0.1;   // yellow — SAME
+                } else {
+                    vColors.row(v) << 0.55, 0.55, 0.55;     // gray — interior
+                }
+            }
+            auto * up = polyscope::getSurfaceMesh("uv_pre");
+            auto * cq = up->addVertexColorQuantity("case1_pin_roles", vColors);
+            cq->setEnabled(gShowCase1PinViz);
+        }
+
+        // (2) Boundary arc curve network — boundary edges of FUV_pre in UV space
+        {
+            std::vector<std::array<double,3>> arcV;
+            std::vector<std::array<int,2>>    arcE;
+            std::map<int,int> vmap;  // local UV vertex → arcV index
+            auto get_or_add = [&](int v) -> int {
+                auto it = vmap.find(v);
+                if (it != vmap.end()) return it->second;
+                int idx = (int)arcV.size();
+                vmap[v] = idx;
+                Eigen::Vector3d p = g.uv_pre_3d.row(v);
+                arcV.push_back({p.x(), p.y(), p.z()});
+                return idx;
+            };
+            for (auto& kv : edge_cnt) {
+                if (kv.second != 1) continue;  // boundary edges only
+                int a = kv.first.first, b2 = kv.first.second;
+                arcE.push_back({get_or_add(a), get_or_add(b2)});
+            }
+            if (!arcV.empty()) {
+                Eigen::MatrixXd aV(arcV.size(), 3);
+                Eigen::MatrixXi aE(arcE.size(), 2);
+                for (int i = 0; i < (int)arcV.size(); i++) aV.row(i) << arcV[i][0], arcV[i][1], arcV[i][2];
+                for (int i = 0; i < (int)arcE.size(); i++) aE.row(i) << arcE[i][0], arcE[i][1];
+                polyscope::registerCurveNetwork("uv_case1_arc", aV, aE)
+                    ->setRadius(edge_radius * 1.8)->setColor({0.0f, 0.85f, 1.0f})
+                    ->setEnabled(false);
+            } else {
+                // Register a degenerate network so get calls in update_display don't crash
+                Eigen::MatrixXd dV(1,3); dV.setZero();
+                Eigen::MatrixXi dE(0,2);
+                polyscope::registerCurveNetwork("uv_case1_arc", dV, dE)->setEnabled(false);
+            }
+        }
+
+        // (3) Pin marker point clouds: vi_pin and vj_pin in UV space
+        {
+            // vi pin point
+            if (local_vi >= 0 && local_vi < nV) {
+                Eigen::MatrixXd viPt(1, 3);
+                viPt.row(0) = g.uv_pre_3d.row(local_vi);
+                polyscope::registerPointCloud("uv_case1_vi_pin", viPt)
+                    ->setPointColor({0.1f, 0.85f, 0.2f})
+                    ->setPointRadius(0.03, true)
+                    ->setEnabled(false);
+            }
+            // vj pin point
+            if (local_vj >= 0 && local_vj < nV) {
+                Eigen::MatrixXd vjPt(1, 3);
+                vjPt.row(0) = g.uv_pre_3d.row(local_vj);
+                polyscope::registerPointCloud("uv_case1_vj_pin", vjPt)
+                    ->setPointColor({0.2f, 0.4f, 1.0f})
+                    ->setPointRadius(0.03, true)
+                    ->setEnabled(false);
+            }
+            // bd_vtx pin point (extra large, red)
+            if (bds_ok && bd_local >= 0 && bd_local < nV) {
+                Eigen::MatrixXd bdPt(1, 3);
+                bdPt.row(0) = g.uv_pre_3d.row(bd_local);
+                polyscope::registerPointCloud("uv_case1_bd_pin", bdPt)
+                    ->setPointColor({1.0f, 0.08f, 0.08f})
+                    ->setPointRadius(0.03, true)
+                    ->setEnabled(false);
+            } else {
+                Eigen::MatrixXd dummy(0,3);
+                polyscope::registerPointCloud("uv_case1_bd_pin", dummy)->setEnabled(false);
+            }
+        }
+    } else {
+        // Not Case 1 or missing data — register empty objects so update_display can always find them
+        Eigen::MatrixXd dV(1,3); dV.setZero();
+        Eigen::MatrixXi dE(0,2);
+        polyscope::registerCurveNetwork("uv_case1_arc", dV, dE)->setEnabled(false);
+        Eigen::MatrixXd dummy(0,3);
+        polyscope::registerPointCloud("uv_case1_vi_pin", dummy)->setEnabled(false);
+        polyscope::registerPointCloud("uv_case1_vj_pin", dummy)->setEnabled(false);
+        polyscope::registerPointCloud("uv_case1_bd_pin", dummy)->setEnabled(false);
+    }
+
 }
 
 // ---- canonical mesh export ----
@@ -923,6 +1069,18 @@ static void show_canonical_view()
     polyscope::getPointCloud ("ring_pre_pts")        ->setEnabled(gShowCanonUV);
     polyscope::getPointCloud ("ring_post_pts")       ->setEnabled(gShowCanonUV);
     polyscope::getCurveNetwork("uv_collapsed_edge")  ->setEnabled(showRegularUV);
+
+    // Case 1 pin visualization group (vertex colors live on uv_pre, managed by quantity enable)
+    bool showC1 = gShowCase1PinViz && showRegularUV &&
+                  gSnap.lscm_case.has_value() && gSnap.lscm_case.value() == 1;
+    if (polyscope::hasCurveNetwork("uv_case1_arc"))
+        polyscope::getCurveNetwork("uv_case1_arc")->setEnabled(showC1);
+    if (polyscope::hasPointCloud("uv_case1_vi_pin"))
+        polyscope::getPointCloud("uv_case1_vi_pin")->setEnabled(showC1);
+    if (polyscope::hasPointCloud("uv_case1_vj_pin"))
+        polyscope::getPointCloud("uv_case1_vj_pin")->setEnabled(showC1);
+    if (polyscope::hasPointCloud("uv_case1_bd_pin"))
+        polyscope::getPointCloud("uv_case1_bd_pin")->setEnabled(showC1);
 
     // Non-active sheet geometry: two kinds rendered separately.
     //
@@ -1770,6 +1928,8 @@ void ui_callback()
         vis |= ImGui::Checkbox("Ring post",       &gShowRingPost);
         vis |= ImGui::Checkbox("UV pre",          &gShowUVPre);     ImGui::SameLine();
         vis |= ImGui::Checkbox("UV post",         &gShowUVPost);
+        if (gSnap.lscm_case.has_value() && gSnap.lscm_case.value() == 1)
+            vis |= ImGui::Checkbox("Case1 pin viz (role colors / arc / pins)", &gShowCase1PinViz);
         vis |= ImGui::Checkbox("Arrows pre",      &gShowArrowPre);  ImGui::SameLine();
         vis |= ImGui::Checkbox("Arrows post",     &gShowArrowPost);
         vis |= ImGui::Checkbox("Pre→Post corr",   &gShowCorrArrows); ImGui::SameLine();
@@ -1809,8 +1969,8 @@ void ui_callback()
             if (allChanged) {
                 for (int ci = 0; ci < nC; ci++) {
                     char nm[64]; snprintf(nm, sizeof(nm), "stale_chain_%d", ci);
-                    auto * cn = polyscope::getCurveNetwork(nm);
-                    if (cn) cn->setEnabled(gStaleChainShowAll && gStaleChainVisible[ci]);
+                    if (polyscope::hasCurveNetwork(nm))
+                        polyscope::getCurveNetwork(nm)->setEnabled(gStaleChainShowAll && gStaleChainVisible[ci]);
                 }
             }
             for (int ci = 0; ci < nC; ci++) {
@@ -1824,8 +1984,8 @@ void ui_callback()
                 bool vis = gStaleChainVisible[ci] != 0;
                 if (ImGui::Checkbox(label, &vis)) {
                     gStaleChainVisible[ci] = vis ? 1 : 0;
-                    auto * cn = polyscope::getCurveNetwork(nm);
-                    if (cn) cn->setEnabled(gStaleChainShowAll && vis);
+                    if (polyscope::hasCurveNetwork(nm))
+                        polyscope::getCurveNetwork(nm)->setEnabled(gStaleChainShowAll && vis);
                 }
                 ImGui::PopStyleColor();
             }
