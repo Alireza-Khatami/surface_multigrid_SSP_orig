@@ -38,6 +38,10 @@
 #include <string>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
+#include <sstream>
+#include <unordered_set>
+#include <filesystem>
 
 #ifdef C2F_VIZ_DIAGNOSTIC
 #include "visualizer.h"
@@ -51,6 +55,10 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
 #include "load_matstruct.h"
 
 using namespace Eigen;
+
+// ---- output path globals (extern'd by visualizer.cpp) ----
+std::string gStem;    // mesh filename without extension, e.g. "bunny"
+std::string gOutDir;  // output directory with trailing separator, e.g. "output/"
 
 // ---- SSP loop state (extern'd by visualizer.cpp) ----
 MatrixXd gV;
@@ -72,6 +80,12 @@ std::vector<std::set<int>> gVertexStructIDs;  // per-vertex struct ID sets from 
 FILE* gStructGateLog = nullptr;               // dedicated log file for struct-ID gate decisions
 std::vector<std::pair<int,int>> gSeamEdgeList;  // vertex pairs of seam (non-manifold) edges
 std::vector<double> gInitCosts;               // initial cost per edge (index = gE row)
+
+// Stale chains: naked l-element edges in the fine mesh that SSP must not touch.
+// Populated by detect_stale_chains() inside init_ssp, before any collapse.
+std::vector<std::vector<int>> gStaleChains;    // each chain = ordered vertex ID sequence
+std::unordered_set<int>       gStaleVertexSet; // fast lookup used by the pre-collapse lock
+
 int gTargetFaces  = 100;
 int gCollapseCount = 0;
 int gSeamCollapseCount = 0;   // collapses where the edge was still a seam at collapse time
@@ -92,12 +106,205 @@ static decimate_cost_and_placement_func gCostFn;
 static decimate_pre_collapse_func       gPreFn;
 static decimate_post_collapse_func      gPostFn;
 
+// ---- stale chain detection ----
+// Loads an OBJ file in a single pass, extracting vertex positions (V), triangle
+// faces (F), and raw line-element edges (l_edges, 0-based).  This replaces the
+// igl::read_triangle_mesh call so that 'l' elements are never seen by libigl's
+// parser (which would print a warning for every such line).
+static bool load_obj_vfl(
+    const std::string & path,
+    MatrixXd & V,
+    MatrixXi & F,
+    std::vector<std::pair<int,int>> & l_edges)
+{
+    std::ifstream fh(path);
+    if (!fh.is_open()) {
+        fprintf(stderr, "[OBJ] cannot open '%s'\n", path.c_str());
+        return false;
+    }
+    std::vector<std::array<double,3>> verts;
+    std::vector<std::array<int,3>>   faces;
+    std::string line;
+    while (std::getline(fh, line)) {
+        if (line.empty()) continue;
+        // strip leading whitespace
+        size_t s = line.find_first_not_of(" \t\r");
+        if (s == std::string::npos || line[s] == '#') continue;
+        char token = line[s];
+        if (token == 'v' && (s+1 < line.size()) && std::isspace((unsigned char)line[s+1])) {
+            std::istringstream ss(line.substr(s+1));
+            double x, y, z; ss >> x >> y >> z;
+            verts.push_back({x, y, z});
+        } else if (token == 'f' && (s+1 < line.size()) && std::isspace((unsigned char)line[s+1])) {
+            std::istringstream ss(line.substr(s+1));
+            std::array<int,3> tri;
+            for (int k = 0; k < 3; k++) {
+                std::string tok; ss >> tok;
+                // handle v, v/vt, v/vt/vn, v//vn
+                tri[k] = std::stoi(tok) - 1;  // 1-based → 0-based
+            }
+            faces.push_back(tri);
+        } else if (token == 'l' && (s+1 < line.size()) && std::isspace((unsigned char)line[s+1])) {
+            std::istringstream ss(line.substr(s+1));
+            std::vector<int> vs;
+            int vi;
+            while (ss >> vi) vs.push_back(vi - 1);
+            for (int i = 0; i + 1 < (int)vs.size(); i++)
+                l_edges.push_back({vs[i], vs[i+1]});
+        }
+        // 'vn', 'vt', 'usemtl', etc. are silently skipped — we don't need them
+    }
+    V.resize((int)verts.size(), 3);
+    for (int i = 0; i < (int)verts.size(); i++)
+        V.row(i) << verts[i][0], verts[i][1], verts[i][2];
+    F.resize((int)faces.size(), 3);
+    for (int i = 0; i < (int)faces.size(); i++)
+        F.row(i) << faces[i][0], faces[i][1], faces[i][2];
+    return true;
+}
+
+// Filters raw l-element edges to keep only those that appear in no triangle face,
+// then builds a maximal chain decomposition of those naked edges.
+// Populates gStaleChains and gStaleVertexSet.
+static void detect_stale_chains(
+    const std::vector<std::pair<int,int>> & l_edges_raw,
+    const MatrixXi & FO)
+{
+    // 1. Already have l-edges from the OBJ parse; nothing to re-read.
+    std::vector<std::pair<int,int>> raw_edges = l_edges_raw;
+    if (raw_edges.empty()) {
+        std::cout << "[STALE] no l-elements found — no stale chains\n";
+        return;
+    }
+    std::cout << "[STALE] " << raw_edges.size() << " l-edges parsed\n";
+
+    // 2. Build a set of all face edges so we can exclude them.
+    //    A true naked/stale edge must NOT appear in any triangle face.
+    std::set<std::pair<int,int>> face_edges;
+    for (int f = 0; f < FO.rows(); f++)
+        for (int c = 0; c < 3; c++) {
+            int u = FO(f, c), v = FO(f, (c + 1) % 3);
+            face_edges.insert({std::min(u, v), std::max(u, v)});
+        }
+
+    {
+        std::vector<std::pair<int,int>> naked;
+        naked.reserve(raw_edges.size());
+        int n_face = 0;
+        for (auto & e : raw_edges) {
+            auto key = std::make_pair(std::min(e.first, e.second),
+                                      std::max(e.first, e.second));
+            if (face_edges.count(key)) { n_face++; continue; }
+            naked.push_back(e);
+        }
+        if (n_face)
+            std::cout << "[STALE] " << n_face << " l-edges skipped (also a face edge)\n";
+        raw_edges = std::move(naked);
+    }
+
+    if (raw_edges.empty()) {
+        std::cout << "[STALE] all l-edges were face edges — no stale chains\n";
+        return;
+    }
+    std::cout << "[STALE] " << raw_edges.size() << " naked l-edges remain\n";
+
+    // 3. Build adjacency from naked edges (deduplicated)
+    std::map<int, std::vector<int>> adj;
+    for (auto & e : raw_edges) {
+        adj[e.first].push_back(e.second);
+        adj[e.second].push_back(e.first);
+    }
+    for (auto & kv : adj) {
+        auto & nb = kv.second;
+        std::sort(nb.begin(), nb.end());
+        nb.erase(std::unique(nb.begin(), nb.end()), nb.end());
+    }
+
+    // 4. Build maximal chains (same algorithm as visualize_naked_edge_chains.py)
+    std::set<std::pair<int,int>> visited;
+    auto mark_edge = [&](int u, int v) {
+        visited.insert({std::min(u,v), std::max(u,v)});
+    };
+    auto edge_visited = [&](int u, int v) -> bool {
+        return visited.count({std::min(u,v), std::max(u,v)}) > 0;
+    };
+
+    // Trace one chain starting from 'start' stepping first to 'nxt'
+    auto trace = [&](int start, int nxt) -> std::vector<int> {
+        std::vector<int> chain = {start};
+        int prev = start, cur = nxt;
+        while (true) {
+            chain.push_back(cur);
+            mark_edge(prev, cur);
+            const auto & nbrs = adj[cur];
+            if ((int)nbrs.size() != 2) break;   // endpoint or junction — stop
+            int next_v = (nbrs[0] != prev) ? nbrs[0] : nbrs[1];
+            if (edge_visited(cur, next_v)) break; // loop closed — stop
+            prev = cur; cur = next_v;
+        }
+        return chain;
+    };
+
+    // Pass 0: endpoints (degree 1), Pass 1: junctions (degree > 2)
+    for (int pass = 0; pass < 2; pass++) {
+        for (auto & kv : adj) {
+            int v   = kv.first;
+            int deg = (int)kv.second.size();
+            if (pass == 0 ? deg != 1 : deg <= 2) continue;
+            for (int nb : kv.second)
+                if (!edge_visited(v, nb))
+                    gStaleChains.push_back(trace(v, nb));
+        }
+    }
+
+    // Pass 2: closed loops — unvisited edges among degree-2 vertices
+    for (auto & kv : adj) {
+        if ((int)kv.second.size() != 2) continue;
+        int v = kv.first;
+        for (int nb : kv.second) {
+            if (!edge_visited(v, nb)) {
+                auto chain = trace(v, nb);
+                if (chain.front() != chain.back())
+                    chain.push_back(chain.front()); // close the loop
+                gStaleChains.push_back(chain);
+                break;
+            }
+        }
+    }
+
+    // 5. Populate vertex set
+    for (const auto & chain : gStaleChains)
+        for (int vid : chain)
+            gStaleVertexSet.insert(vid);
+
+    std::cout << "[STALE] " << gStaleChains.size() << " chains  ("
+              << gStaleVertexSet.size() << " unique vertices protected)\n";
+    for (int i = 0; i < (int)gStaleChains.size(); i++)
+        printf("[STALE]   chain[%d]: %d vertices\n", i, (int)gStaleChains[i].size());
+}
+
 // ---- init ----
 static void init_ssp(const std::string & mesh_path, int tarF, const std::string & out_dir)
 {
     MatrixXd VO; MatrixXi FO;
-    igl::read_triangle_mesh(mesh_path, VO, FO);
-    std::cout << "Loaded: |V|=" << VO.rows() << "  |F|=" << FO.rows() << "\n";
+    std::vector<std::pair<int,int>> l_edges;
+    {
+        // Use our own parser for .obj so that 'l' elements are captured and
+        // libigl's "ignored non-comment line" warning is never triggered.
+        // For all other formats (.off, .stl, .ply, ...) fall back to libigl —
+        // those formats don't have 'l' elements so no warning would appear anyway.
+        std::string ext = mesh_path;
+        { size_t dot = ext.rfind('.'); ext = (dot != std::string::npos) ? ext.substr(dot+1) : ""; }
+        for (char & c : ext) c = (char)std::tolower((unsigned char)c);
+
+        bool ok = (ext == "obj") ? load_obj_vfl(mesh_path, VO, FO, l_edges)
+                                 : igl::read_triangle_mesh(mesh_path, VO, FO);
+        if (!ok) return;
+    }
+    std::cout << "Loaded: |V|=" << VO.rows() << "  |F|=" << FO.rows()
+              << "  |l|=" << l_edges.size() << "\n";
+
+    detect_stale_chains(l_edges, FO);
 
     gTargetFaces = tarF;
 
@@ -426,7 +633,7 @@ int main(int argc, char * argv[])
     std::string meshPath         = "bunny.obj";
     int         targetFaces      = 285;
     std::string namedMode;
-    int         gNSamplesTotal   = 2000;
+    int         gNSamplesTotal   = -1;   // -1 = not given → sampling disabled
     std::string namedOutDir;
     bool        validityChecks   = false;
     std::string matstructPath;      // optional: path to .ma_struct file for struct-ID collapse gating
@@ -439,7 +646,7 @@ int main(int argc, char * argv[])
     // [--mesh_path PATH]       default: bunny.obj
     // [--target_faces N]       default: 285
     // [--mode midpoint|qslim|meshlab]   default: qslim
-    // [--n_samples_total N]    default: 2000
+    // [--n_samples_total N]    optional — omit to disable sampling entirely
     // [--output_dir PATH]      default: .
     // [--validity-checks]
     // [--trace_vertices PATH]  text file: one fine_vertex_id per line; enables per-step walk trace
@@ -488,11 +695,6 @@ int main(int argc, char * argv[])
         }
     }
 
-    if (gNSamplesTotal < 1) {
-        std::cerr << "--n_samples_total must be >= 1\n";
-        return 1;
-    }
-
     if (gDecType == 2) {
         if (gMlCfg.read("meshlab_qem.ini"))
             std::cout << "Loaded meshlab_qem.ini\n";
@@ -511,6 +713,18 @@ int main(int argc, char * argv[])
     std::string out_dir = namedOutDir.empty() ? "." : namedOutDir;
     if (!out_dir.empty() && out_dir.back() != '/' && out_dir.back() != '\\')
         out_dir += '/';
+    gStem   = stem;
+    gOutDir = out_dir;
+
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(out_dir, ec);
+        if (ec)
+            fprintf(stderr, "[OUT] warning: could not create output dir '%s': %s\n",
+                    out_dir.c_str(), ec.message().c_str());
+        else
+            printf("[OUT] output dir: %s\n", out_dir.c_str());
+    }
 
     init_ssp(meshPath.c_str(), targetFaces, out_dir);
 
@@ -593,6 +807,23 @@ int main(int argc, char * argv[])
     if (gDecType == 2)
         meshlab_enable_cost_logging();
 
+    // Lock: no collapse may involve a stale chain vertex (protects l-element chain edges).
+    // Any collapse where either endpoint is a stale vertex is permanently blocked.
+    if (!gStaleVertexSet.empty()) {
+        auto stale_pre = gPreFn;
+        gPreFn = [stale_pre](
+            const MatrixXd & V, const MatrixXi & F, const MatrixXi & E,
+            const VectorXi & EMAP, const MatrixXi & EF, const MatrixXi & EI,
+            const igl::min_heap<std::tuple<double,int,int>> & Q,
+            const VectorXi & EQ, const MatrixXd & C, const int e) -> bool
+        {
+            if (!stale_pre(V, F, E, EMAP, EF, EI, Q, EQ, C, e)) return false;
+            return !gStaleVertexSet.count(E(e,0)) && !gStaleVertexSet.count(E(e,1));
+        };
+        std::cout << "[STALE] pre-collapse lock active: "
+                  << gStaleVertexSet.size() << " vertices protected\n";
+    }
+
     // Wrap gPreFn to detect seam collapses at collapse time.
     // A seam edge is one where 3+ live real faces share the same vertex pair in the
     // CURRENT topology (rechecked every collapse, not just from the initial seam list).
@@ -628,17 +859,22 @@ int main(int argc, char * argv[])
     const std::string samples_coarse_path   = out_dir + "samples_coarse_"     + stem + ".txt";
     const std::string samples_vertices_path = out_dir + "samples_vertices_"   + stem + ".txt";
 
-    if (!traceVerticesPath.empty()) {
-        const std::string trace_out = out_dir + "fine_samples_log_" + stem + ".txt";
-        sample_tracker_set_trace(traceVerticesPath, trace_out);
+    if (gNSamplesTotal >= 0) {
+        if (!traceVerticesPath.empty()) {
+            const std::string trace_out = out_dir + "fine_samples_log_" + stem + ".txt";
+            sample_tracker_set_trace(traceVerticesPath, trace_out);
+        }
+        sample_tracker_init(gNSamplesTotal);
+    } else {
+        std::cout << "Sampling disabled (--n_samples_total not given).\n";
     }
-    sample_tracker_init(gNSamplesTotal);
     if (trackFaceFlip >= 0)
         face_flip_tracker_init(trackFaceFlip);
 
     print_seam_edge_costs(out_dir + "seam_edge_costs_" + stem + ".txt");
-    SSP_seam_log_open((out_dir + "seam_diag_" + stem + ".txt").c_str());
+    SSP_seam_log_open((out_dir + "seam_diag_"         + stem + ".txt").c_str());
     SSP_rej_log_open ((out_dir + "collapse_rejections_" + stem + ".txt").c_str());
+    dc_log_open      ((out_dir + "dc_log_"             + stem + ".txt").c_str());
 
 #ifdef C2F_VIZ_DIAGNOSTIC
     polyscope::init();
@@ -672,6 +908,7 @@ int main(int argc, char * argv[])
 
     SSP_seam_log_close();
     SSP_rej_log_close();
+    dc_log_close();
 
     // Export the simplified mesh regardless of how many collapses happened.
     save_simplified_mesh(out_dir + "simplified_" + stem + ".obj");

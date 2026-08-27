@@ -39,6 +39,10 @@ struct SheetData
     // B vertex classification (local one-ring indices, same space as FUV_pre/UV_pre).
     std::vector<int> dc_B_glued;       // arc endpoints shared between DC sheets
     std::vector<int> dc_B_reflected;   // middle arc vertices (top-sheet local indices)
+    // Post-UV symmetry across y=0 (the seam line at the (-1,0)↔(+1,0) pins).
+    // +1 = symmetric,  0 = asymmetric (DC OK but UV not mirrored),  -1 = DC failed (NaN UV).
+    int    dc_uv_symmetric    = 1;
+    double dc_uv_asym_max_err = 0.0;
 };
 
 struct single_collapse_data

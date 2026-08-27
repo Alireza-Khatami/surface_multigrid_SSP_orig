@@ -4,6 +4,7 @@
 #include <vector>
 #include <map>
 #include <set>
+#include <queue>
 #include <sstream>
 #include <cstdio>
 #include <cmath>
@@ -39,6 +40,15 @@ void SSP_rej_log_close() {
 FILE * SSP_rej_log_file() { return s_rej_log; }
 #define SEAM_LOG(fmt, ...) fprintf(s_seam_log ? s_seam_log : stderr, fmt, __VA_ARGS__)
 
+// ---- DC-fail snapshot (last sheet whose DC solve failed) ----
+static DCFailSnap s_dc_fail_snap;
+const DCFailSnap & SSP_get_dc_fail_snap()  { return s_dc_fail_snap; }
+void              SSP_clear_dc_fail_snap() { s_dc_fail_snap = DCFailSnap{}; }
+
+static BDSnap s_bd_snap;
+const BDSnap & SSP_get_bd_snap()  { return s_bd_snap; }
+void           SSP_clear_bd_snap() { s_bd_snap = BDSnap{}; }
+
 // ============================================================
 // Inner overload
 // Performs per-sheet UV computation and VF-based topology update.
@@ -66,6 +76,7 @@ bool SSP_collapse_edge(
   single_collapse_data & data,
   Eigen::VectorXi & FIdx_onering_pre,
   const Eigen::VectorXi & faceSheetID,
+  const std::vector<std::vector<int>> & VF,
   Eigen::VectorXi & EQ)
 {
   using namespace Eigen;
@@ -240,18 +251,78 @@ bool SSP_collapse_edge(
   };
   // ---- end fan_walk_local ----
 
-  // ---- Bucket Nsf/Ndf by sheet (real faces only) ----
-  map<int, vector<int>> sheets_Nsf, sheets_Ndf;
-  for (int f : Nsf) {
-    if (null_face(f) || f >= numOrigFaces) continue;
-    sheets_Nsf[faceSheetID(f)].push_back(f);
-  }
-  for (int f : Ndf) {
-    if (null_face(f) || f >= numOrigFaces) continue;
-    sheets_Ndf[faceSheetID(f)].push_back(f);
+  // ---- Local BFS sheet detection ----
+  // Collect all real one-ring faces from both endpoints.
+  vector<int> onering_vec;
+  {
+    set<int> tmp;
+    for (int f : Nsf) if (!null_face(f) && f < numOrigFaces) tmp.insert(f);
+    for (int f : Ndf) if (!null_face(f) && f < numOrigFaces) tmp.insert(f);
+    onering_vec.assign(tmp.begin(), tmp.end());
   }
 
-  // Active sheets: only those where BOTH Nsf and Ndf have real faces
+  // Build local edge → one-ring face list for BFS traversal.
+  map<pair<int,int>, vector<int>> edge_local_faces;
+  for (int f : onering_vec) {
+    for (int k = 0; k < 3; k++) {
+      int va = F(f,k), vb = F(f,(k+1)%3);
+      if (va > vb) swap(va, vb);
+      edge_local_faces[{va,vb}].push_back(f);
+    }
+  }
+
+  // BFS: assign local sheet IDs; cross only edges whose current global valence == 2.
+  // Global valence = number of live real faces containing the edge (via VF adjacency).
+  map<int,int> face_localSheetID;
+  int localSheetCount = 0;
+  for (int seed : onering_vec) {
+    if (face_localSheetID.count(seed)) continue;
+    queue<int> bfsQ;
+    bfsQ.push(seed);
+    face_localSheetID[seed] = localSheetCount;
+    while (!bfsQ.empty()) {
+      int cur = bfsQ.front(); bfsQ.pop();
+      for (int k = 0; k < 3; k++) {
+        int va = F(cur,k), vb = F(cur,(k+1)%3);
+        if (va > vb) swap(va, vb);
+        auto it = edge_local_faces.find({va,vb});
+        if (it == edge_local_faces.end()) continue;
+        // Count global valence: all live real faces sharing this edge.
+        int global_val = 0;
+        for (int nf : VF[va]) {
+          if (nf >= numOrigFaces || null_face(nf)) continue;
+          for (int c = 0; c < 3; c++)
+            if (F(nf,c) == vb) { global_val++; break; }
+        }
+        if (global_val != 2) continue; // seam (3+) or boundary (1) — don't cross
+        for (int nf : it->second) {
+          if (!face_localSheetID.count(nf)) {
+            face_localSheetID[nf] = localSheetCount;
+            bfsQ.push(nf);
+          }
+        }
+      }
+    }
+    localSheetCount++;
+  }
+
+  // Map local sheet ID → a representative global faceSheetID (for display).
+  map<int,int> local_to_global_sid;
+  for (int f : onering_vec)
+    if (!local_to_global_sid.count(face_localSheetID[f]))
+      local_to_global_sid[face_localSheetID[f]] = faceSheetID(f);
+
+  // Bucket Nsf/Ndf by local sheet ID.
+  map<int, vector<int>> sheets_Nsf, sheets_Ndf;
+  for (int f : onering_vec) {
+    int lsid = face_localSheetID[f];
+    bool in_nsf = find(Nsf.begin(), Nsf.end(), f) != Nsf.end();
+    bool in_ndf = find(Ndf.begin(), Ndf.end(), f) != Ndf.end();
+    if (in_nsf) sheets_Nsf[lsid].push_back(f);
+    if (in_ndf) sheets_Ndf[lsid].push_back(f);
+  }
+
+  // Active sheets: only those where BOTH Nsf and Ndf have real faces.
   set<int> active_sheets;
   for (auto & kv : sheets_Nsf)
     if (sheets_Ndf.count(kv.first) && !sheets_Ndf[kv.first].empty())
@@ -273,18 +344,20 @@ bool SSP_collapse_edge(
     ss << "=== One-Ring Seam Diagnostic ===\n";
     ss << "e=(" << E(e,0) << "," << E(e,1) << ")  vi=" << vi << "  vj=" << vj << "\n";
     ss << "active_sheets (" << active_sheets.size() << "): [";
-    for (int sid : active_sheets) ss << sid << " ";
+    for (int lsid : active_sheets)
+      ss << "local" << lsid << "(global" << local_to_global_sid[lsid] << ") ";
     ss << "]\n\n";
 
-    // Per-face: which side of the edge (vi/vj) + sheet ID.
-    ss << "Faces in one-ring (global_idx  sheet_id  side):\n";
+    // Per-face: which side of the edge (vi/vj) + local BFS sheet ID + global sheet ID.
+    ss << "Faces in one-ring (global_idx  local_sid  global_sid  side):\n";
     for (int f : onering_set) {
       bool in_nsf = std::find(Nsf.begin(), Nsf.end(), f) != Nsf.end();
       bool in_ndf = std::find(Ndf.begin(), Ndf.end(), f) != Ndf.end();
       const char * side = (in_nsf && in_ndf) ? "both" : (in_nsf ? "vi" : "vj");
-      int sid = faceSheetID(f);
-      bool is_active = active_sheets.count(sid) > 0;
-      ss << "  f=" << f << "  sid=" << sid
+      int lsid = face_localSheetID.count(f) ? face_localSheetID.at(f) : -1;
+      int gsid = faceSheetID(f);
+      bool is_active = active_sheets.count(lsid) > 0;
+      ss << "  f=" << f << "  lsid=" << lsid << "  gsid=" << gsid
          << (is_active ? "  [ACTIVE]" : "  [naf]  ")
          << "  side=" << side << "\n";
     }
@@ -318,13 +391,18 @@ bool SSP_collapse_edge(
     }
     if (!any) ss << "  (none — all adjacent one-ring face pairs share the same sheet ID)\n";
 
-    // Sheet breakdown: which faces belong to each sheet.
-    ss << "\nSheet breakdown:\n";
-    map<int, vector<int>> by_sheet;
-    for (int f : onering_set) by_sheet[faceSheetID(f)].push_back(f);
-    for (auto & kv : by_sheet) {
+    // Sheet breakdown by local BFS ID (with representative global sheet ID shown).
+    ss << "\nSheet breakdown (local BFS IDs):\n";
+    map<int, vector<int>> by_local_sheet;
+    for (int f : onering_set) {
+      int lsid = face_localSheetID.count(f) ? face_localSheetID.at(f) : -1;
+      by_local_sheet[lsid].push_back(f);
+    }
+    for (auto & kv : by_local_sheet) {
       bool is_active = active_sheets.count(kv.first) > 0;
-      ss << "  sid=" << kv.first << (is_active ? " [ACTIVE]" : " [naf]  ")
+      int gsid = local_to_global_sid.count(kv.first) ? local_to_global_sid.at(kv.first) : -1;
+      ss << "  lsid=" << kv.first << "  gsid=" << gsid
+         << (is_active ? " [ACTIVE]" : " [naf]  ")
          << "  nF=" << kv.second.size() << "  faces=[";
       for (int f : kv.second) ss << f << " ";
       ss << "]\n";
@@ -648,25 +726,70 @@ bool SSP_collapse_edge(
     // Injection is after the invariant check so INV-H does not fire on the
     // pre-injection walk.
     {
-      auto has_inf_face = [&](const vector<int> & wf) -> bool {
-        for (int f : wf) if (!null_face(f) && f >= numOrigFaces) return true;
+      // Detect open fan by checking whether vi or vj is on the boundary of the
+      // local one-ring mesh (FUV_pre_si).
+      //
+      // For a true Case 0 (both interior in this sheet), vi and vj are interior
+      // vertices of the local disc — every edge they touch has valence 2 in
+      // FUV_pre_si.  For any open fan — actual mesh boundary, seam-adjacent split,
+      // or cross-sheet face exclusion — the fan is incomplete and vi/vj land on a
+      // boundary edge (valence 1 in FUV_pre_si).  No infinity faces required.
+      auto is_local_bd_vtx = [&](int local_v) -> bool {
+        map<pair<int,int>, int> ecnt;
+        for (int f = 0; f < FUV_pre_si.rows(); f++)
+          for (int k = 0; k < 3; k++) {
+            int a = FUV_pre_si(f,k), b = FUV_pre_si(f,(k+1)%3);
+            if (a > b) swap(a,b);
+            ecnt[{a,b}]++;
+          }
+        for (auto & kv : ecnt)
+          if (kv.second == 1 && (kv.first.first == local_v || kv.first.second == local_v))
+            return true;
         return false;
       };
+
+      bool vi_on_bd = is_local_bd_vtx(b_si(0));
+      bool vj_on_bd = is_local_bd_vtx(b_si(1));
+      bool did_inject_ndv = false, did_inject_nsv = false;
+
       if (active_sheets.size() > 1) {
         // Seam collapse: both endpoints are on the seam, inject into both.
         if (std::find(Nsv_local.begin(), Nsv_local.end(), -1) == Nsv_local.end())
-          Nsv_local.insert(Nsv_local.begin(), -1);
+          { Nsv_local.insert(Nsv_local.begin(), -1); did_inject_nsv = true; }
         if (std::find(Ndv_local.begin(), Ndv_local.end(), -1) == Ndv_local.end())
-          Ndv_local.insert(Ndv_local.begin(), -1);
+          { Ndv_local.insert(Ndv_local.begin(), -1); did_inject_ndv = true; }
       } else {
-        // Mesh-boundary collapse: inject -1 only for endpoints that actually
-        // have an infinity face in their walk (i.e. sit on the open boundary).
-        if (has_inf_face(Nsf_walk) &&
+        // Nsv_local walks around vj; Ndv_local walks around vi.
+        if (vj_on_bd &&
             std::find(Nsv_local.begin(), Nsv_local.end(), -1) == Nsv_local.end())
-          Nsv_local.insert(Nsv_local.begin(), -1);
-        if (has_inf_face(Ndf_walk) &&
+          { Nsv_local.insert(Nsv_local.begin(), -1); did_inject_nsv = true; }
+        if (vi_on_bd &&
             std::find(Ndv_local.begin(), Ndv_local.end(), -1) == Ndv_local.end())
-          Ndv_local.insert(Ndv_local.begin(), -1);
+          { Ndv_local.insert(Ndv_local.begin(), -1); did_inject_ndv = true; }
+      }
+
+      // Snapshot boundary detection state for visualizer diagnostic button.
+      {
+        BDSnap snap;
+        snap.valid          = true;
+        snap.collapse_idx   = (int)decInfo.size();
+        snap.sid            = sid;
+        snap.vi_global      = E(e,0);
+        snap.vj_global      = E(e,1);
+        snap.active_sheets  = (int)active_sheets.size();
+        snap.vi_on_boundary = vi_on_bd;
+        snap.vj_on_boundary = vj_on_bd;
+        snap.injected_ndv   = did_inject_ndv;
+        snap.injected_nsv   = did_inject_nsv;
+        snap.Nsv_local      = Nsv_local;
+        snap.Ndv_local      = Ndv_local;
+        snap.subsetVIdx     = std::vector<int>(
+            subsetVIdx_si.data(), subsetVIdx_si.data() + subsetVIdx_si.size());
+        for (int f : VF[E(e,0)])
+          snap.vi_vf.push_back({f, !null_face(f) && f >= numOrigFaces});
+        for (int f : VF[E(e,1)])
+          snap.vj_vf.push_back({f, !null_face(f) && f >= numOrigFaces});
+        s_bd_snap = std::move(snap);
       }
     }
 
@@ -679,13 +802,19 @@ bool SSP_collapse_edge(
     // joint_lscm — boundary cases (1/2) use double cover + 2-point pinning.
     MatrixXd UV_pre_si, UV_post_si;
     DCVizData dc_viz_si;
+    std::optional<int> lscm_case_out;
     bool isValid = joint_lscm(
         V_pre_si, FUV_pre_si, V_post_si, FUV_post_si,
         b_si(0), b_si(1), Nsv_local, Ndv_local,
         UV_pre_si, UV_post_si,
-        any_sheet_ok ? nullptr : &data.lscm_case,
+        &lscm_case_out,
         &dc_viz_si,
         (int)decInfo.size());
+    if (!any_sheet_ok && lscm_case_out.has_value())
+        data.lscm_case = lscm_case_out;
+    if (s_bd_snap.valid && s_bd_snap.collapse_idx == (int)decInfo.size()
+        && s_bd_snap.sid == sid && lscm_case_out.has_value())
+        s_bd_snap.lscm_case = lscm_case_out.value();
     if (!isValid) {
       if (is_seam_collapse)
         SEAM_LOG("[SEAM-FAIL-LSCM]  sid=%d  e=(%d,%d) vi=%d vj=%d\n",
@@ -695,6 +824,17 @@ bool SSP_collapse_edge(
         "[LSCM-FAIL] after_collapse=%zu  e=(%d,%d)  sid=%d  vi=%d vj=%d\n",
         decInfo.size(), E(e,0), E(e,1), sid, vi, vj);
 #endif
+      if (dc_viz_si.has_data) {
+        // DC was attempted but failed — snapshot this sheet's 3D geometry
+        // so the visualizer can render it as a red mesh.
+        s_dc_fail_snap.valid          = true;
+        s_dc_fail_snap.V              = V_pre_si;
+        s_dc_fail_snap.F              = FUV_pre_si;
+        s_dc_fail_snap.global_sheet_id = local_to_global_sid.count(sid)
+                                          ? local_to_global_sid.at(sid) : sid;
+        s_dc_fail_snap.vi             = vi;
+        s_dc_fail_snap.vj             = vj;
+      }
       return false;
     }
 
@@ -802,7 +942,7 @@ bool SSP_collapse_edge(
     store_sheet_data:
     // Store SheetData
     SheetData sd;
-    sd.global_sheet_id = sid;
+    sd.global_sheet_id = local_to_global_sid.count(sid) ? local_to_global_sid.at(sid) : sid;
     sd.b          = b_si;
     sd.subsetVIdx = subsetVIdx_si;
     sd.UV_pre     = UV_pre_si;
@@ -818,8 +958,10 @@ bool SSP_collapse_edge(
     sd.FUV_dc_post   = dc_viz_si.FUV_dc_post;
     sd.UV_dc_pre     = dc_viz_si.UV_dc_pre;
     sd.UV_dc_post    = dc_viz_si.UV_dc_post;
-    sd.dc_B_glued    = dc_viz_si.B_glued;
-    sd.dc_B_reflected = dc_viz_si.B_reflected;
+    sd.dc_B_glued         = dc_viz_si.B_glued;
+    sd.dc_B_reflected     = dc_viz_si.B_reflected;
+    sd.dc_uv_symmetric    = dc_viz_si.dc_uv_symmetric;
+    sd.dc_uv_asym_max_err = dc_viz_si.dc_uv_asym_max_err;
     data.sheets.push_back(sd);
 
     // First successful sheet → set top-level 3D data (for display and Nsv/Ndv compat)
@@ -1189,7 +1331,7 @@ bool SSP_collapse_edge(
         V, F, E, EMAP, EF, EI,
         e1, e2, f1, f2,
         decInfo, decIM, data, FIdx_onering_pre,
-        faceSheetID, EQ);
+        faceSheetID, *VF, EQ);
   } else {
     collapsed = false;
   }

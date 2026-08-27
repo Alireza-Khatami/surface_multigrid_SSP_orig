@@ -157,10 +157,6 @@ void sample_tracker_init(int n_total)
         gSamples.push_back(s);
     }
 
-    // INTERIOR_SAMPLES: disabled while debugging vertex tracking.
-    // TODO: uncomment the block below once vertex correspondence is validated,
-    //       to restore area-weighted interior sample tracking.
-    /*
     // --- interior barycentric samples (area-weighted) ---
     // Build CDF over face areas so larger faces receive proportionally more samples.
     std::vector<double> area_cdf(nFO);
@@ -204,8 +200,7 @@ void sample_tracker_init(int n_total)
         fs_insert(fi, (int)gSamples.size());
         gSamples.push_back(s);
     }
-    */
-    const int n_interior = 0; // interior samples disabled; was n_total
+    const int n_interior = n_total;
 
     fprintf(stderr,
         "[sample_tracker] init: %d samples (%d vertex + %d interior)  nFO=%d  nVO=%d  trace_set=%zu\n",
@@ -651,16 +646,35 @@ void vertex_watch_pre_step()
 void vertex_watch_check_collapse(int s_vtx, int d_vtx)
 {
     if (gVWT_fineVtxId < 0 || gVWT_sampleIdx < 0 || gVWT_triggered) return;
-    for (int k = 0; k < 3; k++) {
-        int bfv = gVWT_snapBF(k);
-        if (bfv == s_vtx || bfv == d_vtx) {
+
+    // The watched fine vertex lives on the coarse face with corners snapBF[0..2].
+    // Trigger if s or d appears in the one-ring of any of those corners — i.e.
+    // there exists a live coarse face that contains both a watched corner and
+    // the collapse endpoint.  This is strictly broader than the old direct-match
+    // check (which only caught collapses incident to the host face itself).
+    std::unordered_set<int> watched = {
+        gVWT_snapBF(0), gVWT_snapBF(1), gVWT_snapBF(2)
+    };
+
+    for (int fi = 0; fi < gF.rows(); fi++) {
+        if (is_face_dead(gF, fi)) continue;
+        bool has_collapse_vtx = false, has_watched_vtx = false;
+        int  matching_collapse = -1, matching_watched = -1;
+        for (int k = 0; k < 3; k++) {
+            int v = gF(fi, k);
+            if (v == s_vtx || v == d_vtx) { has_collapse_vtx = true; matching_collapse = v; }
+            if (watched.count(v))          { has_watched_vtx  = true; matching_watched  = v; }
+        }
+        if (has_collapse_vtx && has_watched_vtx) {
             gVWT_triggered = true;
             gVWT_triggerAt = gCollapseCount;
             fprintf(stderr,
                 "[vertex_watch] *** TRIGGERED at collapse #%d ***"
-                "  fine_vtx=%d  cur_BF[%d]=%d  matched_%s\n",
-                gCollapseCount, gVWT_fineVtxId, k, bfv,
-                (bfv == s_vtx) ? "survivor" : "absorbed");
+                "  fine_vtx=%d  via coarse face %d"
+                "  collapse_vtx=%d(%s)  watched_corner=%d\n",
+                gCollapseCount, gVWT_fineVtxId, fi,
+                matching_collapse, (matching_collapse == s_vtx) ? "survivor" : "absorbed",
+                matching_watched);
             return;
         }
     }
@@ -716,13 +730,13 @@ void sample_tracker_show_canonical(const Eigen::MatrixXd& uv_pre_3d,
 
     // Pre samples sit on the UV_pre surface (green), with arrows to their UV_post destinations.
     auto * pc_pre = polyscope::registerPointCloud("ring_sample_pre", prePts);
-    pc_pre->setPointColor({0.3f, 0.9f, 0.4f})->setPointRadius(0.003, true)->setEnabled(true);
+    pc_pre->setPointColor({0.3f, 0.9f, 0.4f})->setPointRadius(0.003, false)->setEnabled(false);
     pc_pre->addVectorQuantity("to_uv_post", arrows, polyscope::VectorType::AMBIENT)
          ->setVectorColor({1.0f, 0.95f, 0.1f})
          ->setEnabled(false);
 
     // Post samples sit on the UV_post surface (orange).
     polyscope::registerPointCloud("ring_sample_post", postPts)
-        ->setPointColor({0.9f, 0.4f, 0.2f})->setPointRadius(0.003, true)->setEnabled(false);
+        ->setPointColor({0.9f, 0.4f, 0.2f})->setPointRadius(0.003, false)->setEnabled(false);
 #endif
 }

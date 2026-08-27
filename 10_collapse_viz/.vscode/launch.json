@@ -10,15 +10,15 @@
         "--mesh_path",
         // "C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\meshes\\bunny.obj",
         // "c:\\Users\\alirz\\OneDrive\\Desktop\\subDiv_cube.obj"
-        "C:\\Users\\alirz\\Projects\\Graphics\\QMAT_old working version  exe file\\qmat_x64\\qmat\\output\\01_00040057_f8f78dbd17414efda75bc437_trimesh_000\\01_00040057_f8f78dbd17414efda75bc437_trimesh_000_mat_initial.off"
+        "C:\\Users\\alirz\\Projects\\Graphics\\QMAT_old working version  exe file\\qmat_x64\\qmat\\output\\01_00040057_f8f78dbd17414efda75bc437_trimesh_000\\mat_01_00040051_b95bd5d02f4d435098659bb3_trimesh_000.obj__2025-05-06_04_41_27.obj"
         // "C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\latest_snapshot.obj",
         ,"--matstruct_path", "D:\\datasets\\abc_full_10k\\out_ABC_v6_knn_poission40_20_15_10\\01_00040057_f8f78dbd17414efda75bc437_trimesh_000\\mat\\mat_01_00040057_f8f78dbd17414efda75bc437_trimesh_000.obj__2025-05-06_02_38_00.ma_struct"
         ,"--target_faces", "200"
         ,"--mode", "qslim"//qslim , midpoint, meshlab/
-        ,"--n_samples_total", "1000000"
+        // ,"--n_samples_total", "1000000"
         ,"--output_dir", "./output/01_00040057_f8f78dbd17414efda75bc437_trimesh_000"
         ,"--validity-checks"
-        ,"--mat_struct_check"
+        // ,"--mat_struct_check"
         ,"--trace_vertices", "trace_vids.txt"
       ],
       "cwd": "${workspaceFolder}",
@@ -26,6 +26,56 @@
       "console": "internalConsole",
       "preLaunchTask": "cmake: build debug"
     },
+
+
+       {
+      "name": "Debug – collapse_viz_stale_edges",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/debug/Debug/collapse_viz_bin.exe",
+      "args": [
+        "--mesh_path",
+        "D:\\datasets\\abc_full_10k\\out_ABC_v6_knn_poission40_20_15_10\\01_00040051_b95bd5d02f4d435098659bb3_trimesh_000\\mat\\mat_01_00040051_b95bd5d02f4d435098659bb3_trimesh_000.obj__2025-05-06_04_41_27.obj"
+        , "--matstruct_path",
+        "D:\\datasets\\abc_full_10k\\out_ABC_v6_knn_poission40_20_15_10\\01_00040051_b95bd5d02f4d435098659bb3_trimesh_000\\mat\\mat_01_00040051_b95bd5d02f4d435098659bb3_trimesh_000.obj__2025-05-06_04_41_27.ma_struct"
+        ,"--target_faces", "200"
+        ,"--mode", "qslim"//qslim , midpoint, meshlab/
+        // ,"--n_samples_total", "1000000"
+        ,"--output_dir", "./output/01_00040051_b95bd5d02f4d435098659bb3_trimesh_000"
+        ,"--validity-checks"
+        // ,"--mat_struct_check"
+        ,"--trace_vertices", "trace_vids.txt"
+      ],
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "console": "internalConsole",
+      "preLaunchTask": "cmake: build debug"
+    },
+    
+    {
+      "name": "Release – collapse_viz_stale_edges",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/release/Release/collapse_viz_bin.exe",
+      "args": [
+        "--mesh_path",
+        "D:\\datasets\\abc_full_10k\\out_ABC_v6_knn_poission40_20_15_10\\01_00040051_b95bd5d02f4d435098659bb3_trimesh_000\\mat\\mat_01_00040051_b95bd5d02f4d435098659bb3_trimesh_000.obj__2025-05-06_04_41_27.obj"
+        , "--matstruct_path",
+        "D:\\datasets\\abc_full_10k\\out_ABC_v6_knn_poission40_20_15_10\\01_00040051_b95bd5d02f4d435098659bb3_trimesh_000\\mat\\mat_01_00040051_b95bd5d02f4d435098659bb3_trimesh_000.obj__2025-05-06_04_41_27.ma_struct"
+        ,"--target_faces", "200"
+        ,"--mode", "qslim"//qslim , midpoint, meshlab/
+        ,"--n_samples_total", "1000000"
+        ,"--output_dir", "./output/01_00040051_b95bd5d02f4d435098659bb3_trimesh_000"
+        ,"--validity-checks"
+        // ,"--mat_struct_check"
+        ,"--trace_vertices", "trace_vids.txt"
+      ],
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "console": "internalConsole",
+      "preLaunchTask": "cmake: build release"
+    },
+
     {
       "name": "Release – collapse_viz",
       "type": "cppvsdbg",
@@ -33,14 +83,14 @@
       "program": "${workspaceFolder}/build/release/Release/collapse_viz_bin.exe",
       "args": [
         "--mesh_path",
-        // ".\\subDiv_planeobj.obj",
+        // ".\\\subDiv_planeobj.obj",
         // ".\\non_manifold_planes.obj",
         "C:\\Users\\alirz\\Projects\\Graphics\\QMAT_old working version  exe file\\qmat_x64\\qmat\\output\\01_00040057_f8f78dbd17414efda75bc437_trimesh_000\\01_00040057_f8f78dbd17414efda75bc437_trimesh_000_mat_initial.off"
         // "C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\latest_snapshot.obj",
         , "--matstruct_path", "D:\\datasets\\abc_full_10k\\out_ABC_v6_knn_poission40_20_15_10\\01_00040057_f8f78dbd17414efda75bc437_trimesh_000\\mat\\mat_01_00040057_f8f78dbd17414efda75bc437_trimesh_000.obj__2025-05-06_02_38_00.ma_struct"
         ,"--target_faces", "200"
         ,"--mode", "qslim"//qslim , midpoint, meshlab/
-        ,"--n_samples_total", "1000000"
+        ,"--n_samples_total", "100000"
         ,"--output_dir", "./output/01_00040057_f8f78dbd17414efda75bc437_trimesh_000"
         ,"--validity-checks"
         ,"--mat_struct_check"

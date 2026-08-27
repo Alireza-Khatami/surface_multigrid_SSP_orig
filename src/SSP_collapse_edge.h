@@ -65,6 +65,48 @@
   //   f2  index into F of face collpased on right
   // Returns true if edge was collapsed
   #define IGL_COLLAPSE_EDGE_NULL 0
+
+// Snapshot of the sheet geometry that caused the most recent DC failure.
+// Populated whenever joint_lscm returns false with dc_viz.has_data == true.
+// Cleared by calling SSP_clear_dc_fail_snap().
+struct DCFailSnap {
+    bool              valid          = false;
+    Eigen::MatrixXd   V;          // compact 3D vertices for the failing sheet (V_pre_si)
+    Eigen::MatrixXi   F;          // face indices into V          (FUV_pre_si)
+    int               global_sheet_id = -1;
+    int               vi = -1, vj = -1;  // global edge endpoints
+};
+const DCFailSnap & SSP_get_dc_fail_snap();
+void              SSP_clear_dc_fail_snap();
+
+// Snapshot captured at the -1 injection / case-selection point for each sheet.
+// Lets the visualizer show exactly why a particular LSCM case was chosen.
+struct BDSnap {
+    bool valid = false;
+    int  collapse_idx   = -1;
+    int  sid            = -1;   // local BFS sheet id
+    int  vi_global      = -1;   // E(e,0) — survivor
+    int  vj_global      = -1;   // E(e,1) — absorbed
+    int  active_sheets  =  0;
+
+    // VF adjacency for each global endpoint (face indices, is_inf flag)
+    struct FaceEntry { int f; bool is_inf; };
+    std::vector<FaceEntry> vi_vf;   // VF[vi_global]
+    std::vector<FaceEntry> vj_vf;   // VF[vj_global]
+
+    bool vi_on_boundary = false;    // vtx_on_boundary(vi_global)
+    bool vj_on_boundary = false;    // vtx_on_boundary(vj_global)
+    bool injected_ndv   = false;    // -1 was prepended to Ndv_local
+    bool injected_nsv   = false;    // -1 was prepended to Nsv_local
+
+    std::vector<int> Nsv_local;     // walk around vj (after injection)
+    std::vector<int> Ndv_local;     // walk around vi (after injection)
+    std::vector<int> subsetVIdx;    // local → global vertex mapping
+
+    int  lscm_case      = -1;       // 0 / 1 / 2 (filled after joint_lscm returns)
+};
+const BDSnap & SSP_get_bd_snap();
+void           SSP_clear_bd_snap();
 // bool SSP_collapse_edge(
 //     const int e,
 //     const Eigen::RowVectorXd & p,
@@ -101,6 +143,7 @@ bool SSP_collapse_edge(
     single_collapse_data & data,
     Eigen::VectorXi & FIdx_onering_pre,
     const Eigen::VectorXi & faceSheetID,
+    const std::vector<std::vector<int>> & VF,
     Eigen::VectorXi & EQ);
 // bool SSP_collapse_edge(
 //     const int e,

@@ -46,6 +46,13 @@ struct DCVizData {
     //   bottom-sheet copies are at UV_dc rows nVjoint+k = (V_pre.rows()+1)+k.
     std::vector<int> B_glued;
     std::vector<int> B_reflected;
+    // Post-UV symmetry across y=0 (the seam line defined by the (-1,0)↔(+1,0) pins).
+    //   +1 = all B_reflected top/bottom pairs are mirror-symmetric within tolerance.
+    //    0 = DC solved OK, but at least one pair violates symmetry; max_err has the worst deviation.
+    //   -1 = DC solve failed (NaN UV) — symmetry could not be measured.
+    // TODO: investigate why DC fails produce NaN UV and whether the arc topology is the root cause.
+    int    dc_uv_symmetric    = 1;
+    double dc_uv_asym_max_err = 0.0;
 };
 
 // Build double cover: F_dc = [F; F_reversed] where F_reversed swaps columns 1 and 2.
@@ -122,11 +129,34 @@ bool joint_lscm(
   DCVizData * dc_viz = nullptr,
   int collapse_idx = -1);
 
+// Open / close the DC log file.  Must be called from main() with the per-shape
+// output path (e.g. out_dir + "dc_log_" + stem + ".txt") before the first collapse.
+// Falls back to stderr if dc_log_open() was never called.
+void dc_log_open(const char * path);
+void dc_log_close();
+
 // Write a per-sheet header line to dc_log.txt so sheet boundaries are visible
 // in the log even when no DC is attempted (Case 0/1 collapses).
 void dc_log_sheet_header(int collapse_idx, int sid,
                          int vi_global, int vj_global,
                          int nFpre, int nV, bool is_seam);
+
+// Check whether the double-cover post-UV is symmetric across y=0 (the seam line).
+//
+// The DC pins B_glued[0] at (-1,0) and B_glued[1] at (+1,0), so the expected
+// symmetry axis is y=0.  For each B_reflected[k], its top-sheet UV slot
+// (index B_reflected[k]) and bottom-sheet UV slot (index nVjoint+k) must satisfy:
+//   - same x:  |UV_dc(top,0) − UV_dc(bot,0)| ≤ tol
+//   - mirror y: |UV_dc(top,1) + UV_dc(bot,1)| ≤ tol
+// vi and vj themselves are checked for |y| ≤ tol (they must lie on the seam line).
+// max_err is set to the worst observed deviation across all checks.
+bool check_dc_symmetry(
+    const Eigen::MatrixXd & UV_dc,
+    const std::vector<int> & B_reflected,
+    int nVjoint,
+    int vi, int vj,
+    double tol,
+    double & max_err);
 
 bool check_valid_UV_lscm(
   const Eigen::MatrixXd & V_pre,

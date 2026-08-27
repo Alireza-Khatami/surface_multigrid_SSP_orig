@@ -1,9 +1,46 @@
 #include "joint_lscm.h"
 
-// All DC-related log messages go to dc_log.txt in the working directory.
-static FILE* dc_log() {
-    static FILE* f = fopen("dc_log.txt", "w");
-    return f ? f : stderr;
+// DC log — path set by dc_log_open() called from main() with the per-shape out_dir.
+// Falls back to stderr if dc_log_open() was never called.
+static FILE* s_dc_log = nullptr;
+static FILE* dc_log() { return s_dc_log ? s_dc_log : stderr; }
+
+void dc_log_open(const char* path) {
+    if (s_dc_log) fclose(s_dc_log);
+    s_dc_log = path ? fopen(path, "w") : nullptr;
+}
+void dc_log_close() {
+    if (s_dc_log) { fclose(s_dc_log); s_dc_log = nullptr; }
+}
+
+bool check_dc_symmetry(
+    const Eigen::MatrixXd & UV_dc,
+    const std::vector<int> & B_reflected,
+    int nVjoint,
+    int vi, int vj,
+    double tol,
+    double & max_err)
+{
+    using std::abs; using std::max;
+    max_err = 0.0;
+    int nRows = (int)UV_dc.rows();
+    // vi and vj must lie on the seam line (y ≈ 0)
+    auto check_y0 = [&](int idx) {
+        if (idx >= 0 && idx < nRows)
+            max_err = max(max_err, abs(UV_dc(idx, 1)));
+    };
+    check_y0(vi);
+    check_y0(vj);
+    // Each B_reflected[k] (top) and nVjoint+k (bottom) must be y=0 mirrors
+    for (int k = 0; k < (int)B_reflected.size(); k++) {
+        int top = B_reflected[k];
+        int bot = nVjoint + k;
+        if (top < 0 || top >= nRows || bot < 0 || bot >= nRows) continue;
+        double dx = abs(UV_dc(top, 0) - UV_dc(bot, 0));   // x must match
+        double dy = abs(UV_dc(top, 1) + UV_dc(bot, 1));   // y must be opposite
+        max_err = max(max_err, max(dx, dy));
+    }
+    return max_err <= tol;
 }
 
 void dc_log_sheet_header(int collapse_idx, int sid,
@@ -805,6 +842,39 @@ bool joint_lscm(
 					dc_viz->UV_dc_post  = dc_UV_post;
 					dc_viz->B_glued     = dc_B_glued;
 					dc_viz->B_reflected = dc_B_reflected;
+				}
+			}
+
+			// ---- DC symmetry check (always, after both ok/fail branches) ----
+			// The DC pins B_glued[0] at (-1,0) and B_glued[1] at (+1,0), so the seam
+			// line is y=0.  A well-formed DC UV must be symmetric across y=0: vi and vj
+			// at y≈0, and each B_reflected top/bottom pair mirrored in y.
+			// dc_UV_post is the full nVjoint_dc-row UV; nVjoint = V_pre.rows()+1.
+			//
+			// sym encoding:  +1 = symmetric,  0 = asymmetric,  -1 = DC failed (NaN UV).
+			// TODO: investigate why DC-fail cases produce NaN UV — likely the LSCM linear
+			//       solve is singular for certain arc topologies; see [DC-FATAL] log entries.
+			{
+				double asym_err = std::numeric_limits<double>::infinity();
+				int sym_val;   // +1 / 0 / -1
+				int dc_nVjoint = (int)V_pre.rows() + 1;
+				if (dc_UV_post.rows() > 0 && !dc_UV_post.array().isNaN().any()) {
+					sym_val = check_dc_symmetry(dc_UV_post, dc_B_reflected, dc_nVjoint,
+					                            vi, vj, 1e-4, asym_err) ? 1 : 0;
+				} else {
+					sym_val  = -1;  // DC solve failed — NaN UV, symmetry unmeasurable
+					asym_err = std::numeric_limits<double>::infinity();
+				}
+				fprintf(dc_log(),
+				  "[DC-SYM #%d] symmetric=%+d max_asym_err=%.6f"
+				  "  vi_y=%.6f  vj_y=%.6f\n",
+				  dc_log_count, sym_val, asym_err,
+				  (vi < dc_UV_post.rows() && !std::isnan(dc_UV_post(vi,1)) ? dc_UV_post(vi, 1) : 0.0),
+				  (vj < dc_UV_post.rows() && !std::isnan(dc_UV_post(vj,1)) ? dc_UV_post(vj, 1) : 0.0));
+				fflush(dc_log());
+				if (dc_viz) {
+					dc_viz->dc_uv_symmetric    = sym_val;
+					dc_viz->dc_uv_asym_max_err = asym_err;
 				}
 			}
 			break;

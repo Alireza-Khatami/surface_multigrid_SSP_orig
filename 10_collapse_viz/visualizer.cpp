@@ -12,21 +12,30 @@
 #include <igl/collapse_edge.h>  // IGL_COLLAPSE_EDGE_NULL
 #include "face_dead.h"
 #include <igl/writeOBJ.h>
+#include <igl/writePLY.h>
+#include <ctime>
 
 #include <single_collapse_data.h>
+#include <SSP_collapse_edge.h>
 #include <compute_barycentric.h>
 
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
 #include <vector>
 #include <set>
+#include <map>
 #include <limits>
 #include <cmath>
 #include <thread>
 #include <chrono>
 #include <string>
+#include <cstdarg>
 
 using namespace Eigen;
+
+// ---- output path globals defined in main.cpp ----
+extern std::string gStem;
+extern std::string gOutDir;
 
 // ---- SSP state defined in main.cpp ----
 extern MatrixXd gV;
@@ -39,6 +48,7 @@ extern bool     gFinished;
 extern int      gDecType;   // 0=midpoint, 1=qslim, 2=meshlab
 extern std::vector<single_collapse_data> gDecInfo;
 extern std::vector<std::set<int>> gVertexStructIDs;
+extern std::vector<std::vector<int>> gStaleChains;
 
 bool do_next_step();  // defined in main.cpp
 
@@ -50,6 +60,8 @@ static bool  gRunning           = false;
 static bool  gRunToSeam         = false;
 static bool  gRunToBdCase       = false;  // stop at LSCM Case 1 or 2 (one/both endpoints on boundary)
 static bool  gStopAtDC         = false;  // persistent: stop + enter canonical view on every double cover case
+static bool  gStopAtDCAsym    = false;  // persistent: stop when a DC Post UV is not symmetric (sym=0)
+static bool  gStopAtDCFail   = false;  // persistent: stop when DC solve itself failed (sym=-1, NaN UV)
 static int   gBreakAtCollapse   = -1;     // stop when gCollapseCount reaches this; -1 = disabled
 static char  gBreakAtBuf[16]    = "";
 static bool  gCanonicalView     = false;
@@ -61,6 +73,7 @@ static bool  gShowUVPost        = false;
 static bool  gShowCanonRing     = true;   // one-ring + non-active sheets
 static bool  gShowCanonUV       = true;   // UV meshes + UV collapsed edge
 // DC vertex group toggles
+static bool  gShowBDVtx         = true;   // boundary vertex highlight (Case 1/2, magenta)
 static bool  gShowDCVertVi      = true;   // vi and vj (collapse endpoints)
 static bool  gShowDCVertBglued  = true;   // B_glued: arc endpoints shared between sheets
 static bool  gShowDCBrefTop     = true;   // B_reflected top-sheet copies
@@ -84,6 +97,12 @@ static bool     gHasPreMesh = false;
 // Export directory: editable via the UI, written as snapshot_at_<N>.obj
 static char gExportDir[512] = ".";
 
+// Canonical-mesh export panel: 4 checkboxes + cached geometry
+static bool gExportUVPre    = true;
+static bool gExportUVPost   = true;
+static bool gExportRingPre  = true;
+static bool gExportRingPost = true;
+
 struct DisplaySnap {
     bool valid = false;
     int vi = -1, vj = -1;
@@ -98,6 +117,11 @@ struct DisplaySnap {
     MatrixXd UV_dc_pre, UV_dc_post;
     std::vector<int> dc_B_glued;      // arc endpoint indices (local one-ring space)
     std::vector<int> dc_B_reflected;  // middle B indices (top-sheet local indices)
+    std::optional<int> lscm_case;     // 0=both interior, 1=one on bd, 2=both on bd
+    // Post-UV symmetry result for this sheet's DC solve (only valid when has_dc==true).
+    // +1 = symmetric,  0 = asymmetric (DC OK but UV not mirrored),  -1 = DC failed (NaN UV).
+    int    dc_uv_symmetric    = 1;
+    double dc_uv_asym_max_err = 0.0;
 } gSnap;
 
 // Per-sheet browsing: all sheets from the most recent collapse, and which is active.
@@ -177,8 +201,10 @@ static void apply_sheet_to_snap(const SheetData & sd)
     gSnap.FUV_dc_post     = sd.FUV_dc_post;
     gSnap.UV_dc_pre       = sd.UV_dc_pre;
     gSnap.UV_dc_post      = sd.UV_dc_post;
-    gSnap.dc_B_glued      = sd.dc_B_glued;
-    gSnap.dc_B_reflected  = sd.dc_B_reflected;
+    gSnap.dc_B_glued          = sd.dc_B_glued;
+    gSnap.dc_B_reflected      = sd.dc_B_reflected;
+    gSnap.dc_uv_symmetric     = sd.dc_uv_symmetric;
+    gSnap.dc_uv_asym_max_err  = sd.dc_uv_asym_max_err;
 }
 
 static void refresh_snap()
@@ -197,6 +223,7 @@ static void refresh_snap()
     gActiveSheetIdx = 0;
     if (!gAllSheets.empty())
         apply_sheet_to_snap(gAllSheets[0]);
+    gSnap.lscm_case = d.lscm_case;
 }
 
 // ---- shared geometry ----
@@ -218,6 +245,9 @@ struct DisplayGeometry {
     MatrixXd dc_uv_pre_3d;
     MatrixXd dc_uv_post_3d;
 };
+
+static DisplayGeometry gLastCanonGeom;   // saved from last show_canonical_view()
+static bool            gHasCanonGeom = false;
 
 static DisplayGeometry compute_ring_geometry()
 {
@@ -494,88 +524,304 @@ static void register_ring_geometry(const DisplayGeometry & g)
 
 }
 
+// ---- canonical mesh export ----
+static void export_canonical_meshes()
+{
+    if (!gHasCanonGeom || !gSnap.valid) {
+        fprintf(stderr, "[EXPORT] no canonical geometry — enter canonical view first\n");
+        return;
+    }
+    time_t t = time(nullptr);
+    char dt[32];
+    strftime(dt, sizeof(dt), "%Y%m%d_%H%M%S", localtime(&t));
+
+    std::string base = gOutDir + "collapse_"
+                     + std::to_string(gCollapseCount) + "_";
+
+    auto save_ply = [&](const char * tag, const MatrixXd & V, const MatrixXi & F) {
+        std::string path = base + tag + "_" + dt + ".ply";
+        if (!igl::writePLY(path, V, F))
+            fprintf(stderr, "[EXPORT] FAILED: %s\n", path.c_str());
+        else
+            fprintf(stderr, "[EXPORT] wrote %s  (%d verts, %d faces)\n",
+                    path.c_str(), (int)V.rows(), (int)F.rows());
+    };
+
+    if (gExportUVPre)    save_ply("UV_Pre",       gLastCanonGeom.uv_pre_3d,   gSnap.FUV_pre);
+    if (gExportUVPost)   save_ply("UV_Post",      gLastCanonGeom.uv_post_3d,  gSnap.FUV_post);
+    if (gExportRingPre)  save_ply("OneRing_Pre",  gLastCanonGeom.V_ring,      gSnap.FUV_pre);
+    if (gExportRingPost) save_ply("OneRing_Post", gLastCanonGeom.V_ring_post, gSnap.FUV_post);
+}
+
 // ---- canonical view ----
-// Print a full diagnostic dump of the current snap's DC/joint-LSCM data to stdout.
-static void print_dc_snap()
+
+// Helper: append a formatted line to a std::string.
+static void snap_appendf(std::string& out, const char* fmt, ...)
+{
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    out += buf;
+}
+
+// Build the DC / Joint-LSCM diagnostic as a string (shown inline and printed to stdout).
+static std::string build_dc_snap_str()
 {
     const auto& s = gSnap;
-    if (!s.valid) { printf("[PRINT-DC] no valid snap\n"); return; }
+    if (!s.valid) return "[no valid snap]\n";
 
-    printf("\n========== DC / Joint-LSCM Diagnostic Dump ==========\n");
-    printf("  vi=%d  vj=%d  local_vi=%d  local_vj=%d\n",
-           s.vi, s.vj, s.b.size() > 0 ? s.b(0) : -1, s.b.size() > 1 ? s.b(1) : -1);
-    printf("  has_dc=%d\n", (int)s.has_dc);
-    printf("  V_pre: %dx3   V_post: %dx3\n",
-           (int)s.V_pre.rows(), (int)s.V_post.rows());
+    std::string out;
+    snap_appendf(out, "vi=%d  vj=%d  local_vi=%d  local_vj=%d\n",
+                 s.vi, s.vj,
+                 s.b.size() > 0 ? s.b(0) : -1,
+                 s.b.size() > 1 ? s.b(1) : -1);
+    if (s.lscm_case.has_value()) {
+        const char* case_desc[] = {"both interior", "one on boundary", "both on boundary"};
+        int c = s.lscm_case.value();
+        snap_appendf(out, "lscm_case=%d  (%s)\n", c,
+                     (c >= 0 && c <= 2) ? case_desc[c] : "unknown");
+    } else {
+        out += "lscm_case=n/a\n";
+    }
 
-    // FUV_pre
-    printf("\n--- FUV_pre (%dx3) ---\n", (int)s.FUV_pre.rows());
+    // Case 1 UV pin confirmation: the boundary vertex is always pinned to an inner UV
+    // position (vi->0,0 or vj->1,0) regardless of which is topologically on the boundary.
+    if (s.lscm_case.has_value() && s.lscm_case.value() == 1 &&
+        s.UV_pre.rows() > 0 && s.b.size() >= 2)
+    {
+        const BDSnap & bds = SSP_get_bd_snap();
+        if (bds.valid) {
+            bool bd_is_vi = bds.injected_ndv;
+            int  bd_local = bd_is_vi ? (int)s.b(0) : (int)s.b(1);
+            // UV stored as col(0)=V, col(1)=U due to column-swap in reshape.
+            // vi pin: (0,0).  vj pin: (0,1).
+            double exp_col0 = 0.0;
+            double exp_col1 = bd_is_vi ? 0.0 : 1.0;
+            if (bd_local >= 0 && bd_local < (int)s.UV_pre.rows() &&
+                s.FUV_pre.rows() > 0)
+            {
+                // col(0)=V, col(1)=U due to column-swap in reshape.
+                // Read as U=col1, V=col0 and display in (U,V) order throughout.
+                double act_U = s.UV_pre(bd_local, 1);
+                double act_V = s.UV_pre(bd_local, 0);
+                double exp_U = exp_col1;   // vi->0  vj->1
+                double exp_V = exp_col0;   // always 0
+                bool ok = std::fabs(act_U - exp_U) < 1e-4 &&
+                          std::fabs(act_V - exp_V) < 1e-4;
+
+                out += "\n[CASE1_BD_PINNED_TO_CENTER]\n";
+                snap_appendf(out, "  boundary_vertex=%s  local=%d\n",
+                             bd_is_vi ? "vi" : "vj", bd_local);
+                snap_appendf(out, "  expected_UV=(U=%.4f, V=%.4f)  actual_UV=(U=%.6f, V=%.6f)  -> %s\n",
+                             exp_U, exp_V, act_U, act_V,
+                             ok ? "CONFIRMED" : "MISMATCH!");
+                out += "  raw storage: col(0)=V  col(1)=U  (columns swapped in reshape)\n";
+                out += "  pin order: vi->(U=0,V=0)  vj->(U=1,V=0)  by local index, not topology\n";
+                out += "  root cause of UV orientation swap between Case 1 collapses\n";
+
+                // Find all vertices on the actual 3D boundary of the one-ring
+                // by counting edge valence in FUV_pre (valence==1 → boundary edge).
+                std::map<std::pair<int,int>, int> edge_cnt;
+                for (int f = 0; f < s.FUV_pre.rows(); f++) {
+                    for (int e = 0; e < 3; e++) {
+                        int a = s.FUV_pre(f, e), b = s.FUV_pre(f, (e+1)%3);
+                        if (a > b) std::swap(a, b);
+                        edge_cnt[{a, b}]++;
+                    }
+                }
+                std::set<int> ring_bd;
+                for (auto& kv : edge_cnt)
+                    if (kv.second == 1) {
+                        ring_bd.insert(kv.first.first);
+                        ring_bd.insert(kv.first.second);
+                    }
+
+                // Compare other one-ring boundary vertices' UV to detected bd vertex.
+                // All values shown as (U, V) = (col1, col0) after swap.
+                out += "\n  -- one-ring boundary verts (FUV_pre edge valence==1) vs detected bd UV --\n";
+                out += "     format:  local=N  UV=(U, V)  U_vs_bd_vtx: HIGHER/LOWER/SAME\n";
+                bool any_other = false;
+                bool has_higher = false, has_lower = false;
+                for (int v : ring_bd) {
+                    if (v == bd_local) continue;
+                    any_other = true;
+                    if (v < 0 || v >= (int)s.UV_pre.rows()) {
+                        snap_appendf(out, "     local=%d  UV=<out of range>\n", v);
+                        continue;
+                    }
+                    double v_U   = s.UV_pre(v, 1);   // col1=U
+                    double v_V   = s.UV_pre(v, 0);   // col0=V
+                    double diffU = v_U - act_U;
+                    if (diffU >  1e-7) has_higher = true;
+                    if (diffU < -1e-7) has_lower  = true;
+                    const char* rel = std::fabs(diffU) < 1e-7 ? "SAME"
+                                    : diffU > 0.0             ? "HIGHER"
+                                                               : "LOWER";
+                    snap_appendf(out,
+                        "     local=%d  UV=(U=%.6f, V=%.6f)  U_vs_bd_vtx: %s (%+.6f)\n",
+                        v, v_U, v_V, rel, diffU);
+                }
+                if (!any_other)
+                    out += "     (no other boundary vertices found in one-ring)\n";
+
+                // Arc position conclusion — this is the actual inner-pin check.
+                if (any_other) {
+                    if (has_higher && has_lower)
+                        out += "\n  [ARC_POSITION] MIXED — pin is INTERIOR of boundary arc"
+                               " (arc verts on both sides → genuinely inner pin)\n";
+                    else if (has_higher)
+                        out += "\n  [ARC_POSITION] ALL_HIGHER — pin is at LOW end of arc"
+                               " (arc extends above pin only)\n";
+                    else if (has_lower)
+                        out += "\n  [ARC_POSITION] ALL_LOWER — pin is at HIGH end of arc"
+                               " (arc extends below pin only)\n";
+                    else
+                        out += "\n  [ARC_POSITION] ALL_SAME — all arc verts at same U as pin\n";
+                }
+
+                // Also note where the two collapse endpoints sit relative to ring_bd.
+                bool vi_in_ring = ring_bd.count((int)s.b(0)) > 0;
+                bool vj_in_ring = ring_bd.count((int)s.b(1)) > 0;
+                snap_appendf(out,
+                    "\n  vi(local=%d) in ring_bd=%d  vj(local=%d) in ring_bd=%d\n",
+                    (int)s.b(0), vi_in_ring,
+                    (int)s.b(1), vj_in_ring);
+            }
+        }
+    }
+
+    snap_appendf(out, "has_dc=%d\n", (int)s.has_dc);
+    snap_appendf(out, "V_pre: %dx3   V_post: %dx3\n",
+                 (int)s.V_pre.rows(), (int)s.V_post.rows());
+
+    snap_appendf(out, "\n-- FUV_pre (%dx3) --\n", (int)s.FUV_pre.rows());
     for (int f = 0; f < s.FUV_pre.rows(); f++)
-        printf("  f%d: [%d %d %d]\n", f, s.FUV_pre(f,0), s.FUV_pre(f,1), s.FUV_pre(f,2));
+        snap_appendf(out, "  f%d:[%d %d %d]\n", f,
+                     s.FUV_pre(f,0), s.FUV_pre(f,1), s.FUV_pre(f,2));
 
-    // FUV_post
-    printf("\n--- FUV_post (%dx3) ---\n", (int)s.FUV_post.rows());
+    snap_appendf(out, "\n-- FUV_post (%dx3) --\n", (int)s.FUV_post.rows());
     for (int f = 0; f < s.FUV_post.rows(); f++)
-        printf("  f%d: [%d %d %d]\n", f, s.FUV_post(f,0), s.FUV_post(f,1), s.FUV_post(f,2));
+        snap_appendf(out, "  f%d:[%d %d %d]\n", f,
+                     s.FUV_post(f,0), s.FUV_post(f,1), s.FUV_post(f,2));
 
-    // UV_pre
-    printf("\n--- UV_pre (%dx2) ---\n", (int)s.UV_pre.rows());
+    snap_appendf(out, "\n-- UV_pre (%dx2) --\n", (int)s.UV_pre.rows());
     for (int v = 0; v < s.UV_pre.rows(); v++)
-        printf("  v%d: (%.6f, %.6f)\n", v, s.UV_pre(v,0), s.UV_pre(v,1));
+        snap_appendf(out, "  v%d:(%.6f, %.6f)\n", v, s.UV_pre(v,0), s.UV_pre(v,1));
 
-    // UV_post
-    printf("\n--- UV_post (%dx2) ---\n", (int)s.UV_post.rows());
+    snap_appendf(out, "\n-- UV_post (%dx2) --\n", (int)s.UV_post.rows());
     for (int v = 0; v < s.UV_post.rows(); v++)
-        printf("  v%d: (%.6f, %.6f)\n", v, s.UV_post(v,0), s.UV_post(v,1));
+        snap_appendf(out, "  v%d:(%.6f, %.6f)\n", v, s.UV_post(v,0), s.UV_post(v,1));
 
     if (s.has_dc) {
-        printf("\n--- DC B classification ---\n");
-        printf("  B_glued (%d):", (int)s.dc_B_glued.size());
-        for (int b : s.dc_B_glued)   printf(" %d", b);
-        printf("\n  B_reflected (%d):", (int)s.dc_B_reflected.size());
-        for (int b : s.dc_B_reflected) printf(" %d", b);
-        printf("\n");
+        out += "\n-- DC B classification --\n";
+        snap_appendf(out, "  B_glued (%d):", (int)s.dc_B_glued.size());
+        for (int b : s.dc_B_glued)    snap_appendf(out, " %d", b);
+        out += "\n";
+        snap_appendf(out, "  B_reflected (%d):", (int)s.dc_B_reflected.size());
+        for (int b : s.dc_B_reflected) snap_appendf(out, " %d", b);
+        out += "\n";
 
-        printf("\n--- FUV_dc_pre (%dx3) ---\n", (int)s.FUV_dc_pre.rows());
+        snap_appendf(out, "\n-- FUV_dc_pre (%dx3) --\n", (int)s.FUV_dc_pre.rows());
         for (int f = 0; f < s.FUV_dc_pre.rows(); f++)
-            printf("  f%d: [%d %d %d]%s\n", f,
-                   s.FUV_dc_pre(f,0), s.FUV_dc_pre(f,1), s.FUV_dc_pre(f,2),
-                   f == s.FUV_pre.rows() - 1 ? "  <- top/bot split" : "");
+            snap_appendf(out, "  f%d:[%d %d %d]%s\n", f,
+                         s.FUV_dc_pre(f,0), s.FUV_dc_pre(f,1), s.FUV_dc_pre(f,2),
+                         f == s.FUV_pre.rows() - 1 ? " <- top/bot split" : "");
 
-        printf("\n--- FUV_dc_post (%dx3) ---\n", (int)s.FUV_dc_post.rows());
+        snap_appendf(out, "\n-- FUV_dc_post (%dx3) --\n", (int)s.FUV_dc_post.rows());
         for (int f = 0; f < s.FUV_dc_post.rows(); f++)
-            printf("  f%d: [%d %d %d]%s\n", f,
-                   s.FUV_dc_post(f,0), s.FUV_dc_post(f,1), s.FUV_dc_post(f,2),
-                   f == s.FUV_post.rows() - 1 ? "  <- top/bot split" : "");
+            snap_appendf(out, "  f%d:[%d %d %d]%s\n", f,
+                         s.FUV_dc_post(f,0), s.FUV_dc_post(f,1), s.FUV_dc_post(f,2),
+                         f == s.FUV_post.rows() - 1 ? " <- top/bot split" : "");
 
-        printf("\n--- UV_dc_pre (%dx2) ---\n", (int)s.UV_dc_pre.rows());
+        snap_appendf(out, "\n-- UV_dc_pre (%dx2) --\n", (int)s.UV_dc_pre.rows());
         int nVjoint = (int)s.V_pre.rows() + 1;
         for (int v = 0; v < s.UV_dc_pre.rows(); v++) {
             const char* tag = "";
-            if (v == s.b(0))    tag = "  <- local_vi (top)";
-            else if (v == s.b(1)) tag = "  <- local_vj (top)";
-            else if (v == (int)s.V_pre.rows()) tag = "  <- vi post-collapse slot";
-            else {
-                for (int k = 0; k < (int)s.dc_B_reflected.size(); k++)
-                    if (v == nVjoint + k) { tag = "  <- B_ref_bot"; break; }
-            }
-            printf("  v%d: (%.6f, %.6f)%s\n", v, s.UV_dc_pre(v,0), s.UV_dc_pre(v,1), tag);
+            if      (v == s.b(0))               tag = " <- vi(top)";
+            else if (v == s.b(1))               tag = " <- vj(top)";
+            else if (v == (int)s.V_pre.rows())  tag = " <- vi_post";
+            else for (int k = 0; k < (int)s.dc_B_reflected.size(); k++)
+                if (v == nVjoint + k) { tag = " <- B_ref_bot"; break; }
+            snap_appendf(out, "  v%d:(%.6f, %.6f)%s\n",
+                         v, s.UV_dc_pre(v,0), s.UV_dc_pre(v,1), tag);
         }
 
-        printf("\n--- UV_dc_post (%dx2) ---\n", (int)s.UV_dc_post.rows());
+        snap_appendf(out, "\n-- UV_dc_post (%dx2) --\n", (int)s.UV_dc_post.rows());
         for (int v = 0; v < s.UV_dc_post.rows(); v++) {
             const char* tag = "";
-            if (v == s.b(0))    tag = "  <- local_vi (top)";
-            else if (v == s.b(1)) tag = "  <- local_vj (top)";
-            else if (v == (int)s.V_pre.rows()) tag = "  <- vi post-collapse slot";
-            else {
-                for (int k = 0; k < (int)s.dc_B_reflected.size(); k++)
-                    if (v == nVjoint + k) { tag = "  <- B_ref_bot"; break; }
-            }
-            printf("  v%d: (%.6f, %.6f)%s\n", v, s.UV_dc_post(v,0), s.UV_dc_post(v,1), tag);
+            if      (v == s.b(0))               tag = " <- vi(top)";
+            else if (v == s.b(1))               tag = " <- vj(top)";
+            else if (v == (int)s.V_post.rows()) tag = " <- vi_post";
+            else for (int k = 0; k < (int)s.dc_B_reflected.size(); k++)
+                if (v == nVjoint + k) { tag = " <- B_ref_bot"; break; }
+            snap_appendf(out, "  v%d:(%.6f, %.6f)%s\n",
+                         v, s.UV_dc_post(v,0), s.UV_dc_post(v,1), tag);
         }
     }
+    return out;
+}
+
+// Print a full diagnostic dump of the current snap's DC/joint-LSCM data to stdout.
+static void print_dc_snap()
+{
+    if (!gSnap.valid) { printf("[PRINT-DC] no valid snap\n"); return; }
+    printf("\n========== DC / Joint-LSCM Diagnostic Dump ==========\n");
+    printf("%s", build_dc_snap_str().c_str());
     printf("======================================================\n\n");
+    fflush(stdout);
+}
+
+static void print_bd_snap()
+{
+    const BDSnap & b = SSP_get_bd_snap();
+    if (!b.valid) { printf("[BD-SNAP] no data recorded yet\n"); return; }
+
+    printf("\n========== Boundary Detection / Case Selection Dump ==========\n");
+    printf("  collapse_idx=%d  sid=%d\n", b.collapse_idx, b.sid);
+    printf("  vi_global=%d  vj_global=%d  active_sheets=%d\n",
+           b.vi_global, b.vj_global, b.active_sheets);
+    printf("  vi_on_boundary=%d  vj_on_boundary=%d\n",
+           (int)b.vi_on_boundary, (int)b.vj_on_boundary);
+    printf("  injected_ndv(around vi)=%d  injected_nsv(around vj)=%d\n",
+           (int)b.injected_ndv, (int)b.injected_nsv);
+    if (b.lscm_case >= 0) {
+        const char* desc[] = {"both interior", "one on boundary", "both on boundary"};
+        printf("  lscm_case=%d  (%s)\n", b.lscm_case,
+               b.lscm_case <= 2 ? desc[b.lscm_case] : "unknown");
+    } else {
+        printf("  lscm_case=not yet set\n");
+    }
+
+    // local→global vertex map
+    printf("\n--- subsetVIdx (local → global) ---\n");
+    for (int i = 0; i < (int)b.subsetVIdx.size(); i++)
+        printf("  local%d → global%d\n", i, b.subsetVIdx[i]);
+
+    // Nsv_local walk (around vj)
+    printf("\n--- Nsv_local (walk around vj=%d, local indices) ---\n", b.vj_global);
+    printf(" [");
+    for (int v : b.Nsv_local) { if (v == -1) printf(" -1(inf)"); else printf(" %d(g%d)", v, (v>=0&&v<(int)b.subsetVIdx.size())?b.subsetVIdx[v]:-1); }
+    printf(" ]\n");
+
+    // Ndv_local walk (around vi)
+    printf("\n--- Ndv_local (walk around vi=%d, local indices) ---\n", b.vi_global);
+    printf(" [");
+    for (int v : b.Ndv_local) { if (v == -1) printf(" -1(inf)"); else printf(" %d(g%d)", v, (v>=0&&v<(int)b.subsetVIdx.size())?b.subsetVIdx[v]:-1); }
+    printf(" ]\n");
+
+    // VF for vi
+    printf("\n--- VF[vi=%d] (%zu faces) ---\n", b.vi_global, b.vi_vf.size());
+    for (auto & fe : b.vi_vf)
+        printf("  f=%d  %s\n", fe.f, fe.is_inf ? "<< INFINITY FACE" : "");
+
+    // VF for vj
+    printf("\n--- VF[vj=%d] (%zu faces) ---\n", b.vj_global, b.vj_vf.size());
+    for (auto & fe : b.vj_vf)
+        printf("  f=%d  %s\n", fe.f, fe.is_inf ? "<< INFINITY FACE" : "");
+
+    printf("==============================================================\n\n");
     fflush(stdout);
 }
 
@@ -745,8 +991,8 @@ static void show_canonical_view()
                     ->setSurfaceColor({c[0], c[1], c[2]})
                     ->setEdgeWidth(1.0)
                     ->setSmoothShade(false)
-                    ->setTransparency(0.40f)
-                    ->setEnabled(gShowCanonRing);
+                    ->setTransparency(1.0f)
+                    ->setEnabled(false);
                 slot++;
             }
         }
@@ -797,6 +1043,34 @@ static void show_canonical_view()
                     ->setEnabled(gShowCanonRing);
             }
             colorSlot++;
+        }
+    }
+
+    // DC-fail sheet: render as opaque red mesh so the failing geometry is obvious.
+    {
+        const DCFailSnap & dcf = SSP_get_dc_fail_snap();
+        if (dcf.valid && dcf.F.rows() > 0) {
+            // Lift into canonical 3D ring space using the same transform as one_ring_pre.
+            Eigen::MatrixXd V_fail = dcf.V;
+            // Center and scale to match gc.V_ring framing (same affine as register_ring_geometry).
+            if (gc.V_ring.rows() > 0) {
+                Eigen::RowVector3d ctr = gc.V_ring.colwise().mean();
+                double scale = (gc.V_ring.rowwise() - ctr).rowwise().norm().maxCoeff();
+                if (scale < 1e-12) scale = 1.0;
+                Eigen::RowVector3d fail_ctr = V_fail.colwise().mean();
+                double fail_scale = (V_fail.rowwise() - fail_ctr).rowwise().norm().maxCoeff();
+                if (fail_scale < 1e-12) fail_scale = 1.0;
+                V_fail = ((V_fail.rowwise() - fail_ctr) / fail_scale) * scale;
+                V_fail = V_fail.rowwise() + ctr;
+            }
+            char label[64];
+            snprintf(label, sizeof(label), "dc_fail_sheet_sid%d", dcf.global_sheet_id);
+            polyscope::registerSurfaceMesh(label, V_fail, dcf.F)
+                ->setSurfaceColor({1.0f, 0.10f, 0.10f})
+                ->setEdgeWidth(2.0)
+                ->setSmoothShade(false)
+                ->setTransparency(1.0f)
+                ->setEnabled(false);
         }
     }
 
@@ -885,7 +1159,61 @@ static void show_canonical_view()
         }
     }
 
+    // Boundary-vertex highlight: magenta point cloud on UV_pre showing which
+    // vertex(es) were detected as on-boundary and drove the Case 1 / Case 2 selection.
+    //   Case 1 — one vertex: determined by BDSnap injection flags.
+    //   Case 2 — both vi and vj are boundary (seam collapse or both on open boundary).
+    // For DC (Case 2) positions come from dc_uv_pre_3d; otherwise from uv_pre_3d.
+    if (gSnap.lscm_case.has_value() && gSnap.b.size() >= 2) {
+        int lscm_case   = gSnap.lscm_case.value();
+        int local_vi    = gSnap.b(0);
+        int local_vj    = gSnap.b(1);
+
+        std::vector<int> bd_locals;
+        if (lscm_case == 2) {
+            bd_locals = {local_vi, local_vj};
+        } else if (lscm_case == 1) {
+            const BDSnap & bds = SSP_get_bd_snap();
+            if (bds.valid) {
+                if (bds.injected_ndv) bd_locals.push_back(local_vi);  // vi was boundary
+                if (bds.injected_nsv) bd_locals.push_back(local_vj);  // vj was boundary
+            }
+            if (bd_locals.empty()) {
+                // BDSnap not recorded for this collapse — fall back to showing both
+                bd_locals = {local_vi, local_vj};
+            }
+        }
+
+        if (!bd_locals.empty()) {
+            // Pick the right UV position buffer: DC overlay or regular UV panel.
+            const MatrixXd & uv_src = gc.has_dc ? gc.dc_uv_pre_3d : gc.uv_pre_3d;
+            if (uv_src.rows() > 0) {
+                MatrixXd bd_pts((int)bd_locals.size(), 3);
+                bool any_valid = false;
+                for (int k = 0; k < (int)bd_locals.size(); k++) {
+                    int idx = bd_locals[k];
+                    if (idx >= 0 && idx < (int)uv_src.rows()) {
+                        bd_pts.row(k) = uv_src.row(idx);
+                        any_valid = true;
+                    } else {
+                        bd_pts.row(k).setZero();
+                    }
+                }
+                if (any_valid) {
+                    polyscope::registerPointCloud("bd_vtx_uv_pre", bd_pts)
+                        ->setPointColor({1.0f, 0.15f, 0.85f})  // magenta
+                        ->setPointRadius(0.024f, true)
+                        ->setEnabled(gShowBDVtx && gShowCanonUV);
+                }
+            }
+        }
+    }
+
     sample_tracker_show_canonical(gc.uv_pre_3d, gc.uv_post_3d, gSnap.FUV_pre, gSnap.FUV_post);
+
+    // Cache for the export panel.
+    gLastCanonGeom = gc;
+    gHasCanonGeom  = true;
 }
 
 // ---- face flip tracker visualization ----
@@ -943,6 +1271,53 @@ static void face_flip_tracker_show_viz()
         polyscope::registerCurveNetwork(kNames[i], nodes, edges)
             ->setColor({kColors[i][0], kColors[i][1], kColors[i][2]})
             ->setRadius(0.003, true);
+    }
+}
+
+// ---- stale chain visualization ----
+static std::vector<uint8_t> gStaleChainVisible;  // uint8_t avoids vector<bool> proxy issues
+static bool                 gStaleChainShowAll = true;
+
+static std::array<float,3> stale_hsv_rgb(float h, float s, float v)
+{
+    float c = v*s, x = c*(1.f - std::fabs(std::fmod(h*6.f, 2.f) - 1.f)), m = v-c;
+    float r,g,b;
+    switch ((int)(h*6.f) % 6) {
+        case 0: r=c;g=x;b=0;break; case 1:r=x;g=c;b=0;break;
+        case 2: r=0;g=c;b=x;break; case 3:r=0;g=x;b=c;break;
+        case 4: r=x;g=0;b=c;break; default:r=c;g=0;b=x;break;
+    }
+    return {r+m, g+m, b+m};
+}
+
+static void update_stale_chains_display()
+{
+    if (gStaleChains.empty()) return;
+    int nC = (int)gStaleChains.size();
+    if ((int)gStaleChainVisible.size() != nC)
+        gStaleChainVisible.assign(nC, 1);
+
+    for (int ci = 0; ci < nC; ci++) {
+        const auto & chain = gStaleChains[ci];
+        int nV = (int)chain.size();
+        if (nV < 2) continue;
+
+        MatrixXd Vc(nV, 3);
+        for (int k = 0; k < nV; k++) {
+            int vid = chain[k];
+            if (vid < (int)gVO.rows()) Vc.row(k) = gVO.row(vid);
+            else                       Vc.row(k).setZero();
+        }
+        int nEdges = nV - 1;
+        MatrixXi Ec(nEdges, 2);
+        for (int k = 0; k < nEdges; k++) Ec.row(k) << k, k+1;
+
+        auto col = stale_hsv_rgb((float)ci / (float)std::max(1, nC), 0.85f, 0.95f);
+        char nm[64]; snprintf(nm, sizeof(nm), "stale_chain_%d", ci);
+        polyscope::registerCurveNetwork(nm, Vc, Ec)
+            ->setRadius(0.003, true)
+            ->setColor({col[0], col[1], col[2]})
+            ->setEnabled(gStaleChainShowAll && gStaleChainVisible[ci]);
     }
 }
 
@@ -1004,6 +1379,7 @@ void update_display()
 
         update_sheet_display();
         update_seam_onering_display();
+        update_stale_chains_display();
     }
 
     sample_tracker_show();
@@ -1068,6 +1444,21 @@ void ui_callback()
                 show_canonical_view();
                 polyscope::view::resetCameraToHomeView();
             }
+            // Stop when DC Post UV is not symmetric across y=0 (sym=0: DC solved but UV asymmetric).
+            if (gStopAtDCAsym && gSnap.has_dc && gSnap.dc_uv_symmetric == 0) {
+                gRunning       = false;
+                gCanonicalView = true;
+                show_canonical_view();
+                polyscope::view::resetCameraToHomeView();
+            }
+            // Stop when the DC solve itself failed (sym=-1: NaN UV, symmetry unmeasurable).
+            // TODO: these cases need root-cause investigation — see [DC-FATAL] + [DC-SYM] in dc_log.
+            if (gStopAtDCFail && gSnap.has_dc && gSnap.dc_uv_symmetric == -1) {
+                gRunning       = false;
+                gCanonicalView = true;
+                show_canonical_view();
+                polyscope::view::resetCameraToHomeView();
+            }
 
             if (gBreakAtCollapse > 0 && gCollapseCount >= gBreakAtCollapse) {
                 gRunning         = false;
@@ -1094,10 +1485,49 @@ void ui_callback()
 
     ImGui::Text("Collapses: %d  [%s]", gCollapseCount,
         gDecType == 0 ? "midpoint" : gDecType == 1 ? "qslim" : "meshlab");
-    if (gSnap.valid)
+    if (gSnap.valid) {
         ImGui::Text("Edge: vi=%d  vj=%d", gSnap.vi, gSnap.vj);
-    else
+        if (gSnap.lscm_case.has_value()) {
+            int c = gSnap.lscm_case.value();
+            static const char* case_label[] = {
+                "Case 0: both interior",
+                "Case 1: one on boundary",
+                "Case 2: both on boundary (DC)"
+            };
+            ImVec4 col = (c == 0) ? ImVec4{0.7f,0.7f,0.7f,1.0f}
+                       : (c == 1) ? ImVec4{1.0f,0.75f,0.2f,1.0f}
+                                  : ImVec4{1.0f,0.35f,0.35f,1.0f};
+            ImGui::TextColored(col, "LSCM: %s",
+                               (c >= 0 && c <= 2) ? case_label[c] : "unknown");
+
+            // Case 1 inline UV pin confirmation
+            if (c == 1 && gSnap.UV_pre.rows() > 0 && gSnap.b.size() >= 2) {
+                const BDSnap & bds = SSP_get_bd_snap();
+                if (bds.valid) {
+                    bool bd_is_vi = bds.injected_ndv;
+                    int  bd_local = bd_is_vi ? (int)gSnap.b(0) : (int)gSnap.b(1);
+                    // UV stored as col(0)=V, col(1)=U (columns swapped in reshape).
+                    // vi pin: (0,0).  vj pin: (0,1).
+                    double exp_col0 = 0.0;
+                    double exp_col1 = bd_is_vi ? 0.0 : 1.0;
+                    if (bd_local >= 0 && bd_local < (int)gSnap.UV_pre.rows()) {
+                        double act_U = gSnap.UV_pre(bd_local, 1);  // col1=U
+                        double act_V = gSnap.UV_pre(bd_local, 0);  // col0=V
+                        bool ok = std::fabs(act_U - exp_col1) < 1e-4 &&
+                                  std::fabs(act_V - exp_col0) < 1e-4;
+                        ImGui::Indent();
+                        ImGui::TextColored({0.95f, 0.85f, 0.2f, 1.0f},
+                                           "[CASE1_BD_PINNED_TO_CENTER]");
+                        ImGui::Text("  bd_vtx=%s (local %d)  UV=(U=%.4f, V=%.4f)",
+                                    bd_is_vi ? "vi" : "vj", bd_local, act_U, act_V);
+                        ImGui::Unindent();
+                    }
+                }
+            }
+        }
+    } else {
         ImGui::Text("(no collapse yet)");
+    }
 
     if (gFinished) {
         ImGui::TextColored({0.4f,1.0f,0.4f,1.0f}, "Reached target faces.");
@@ -1121,10 +1551,39 @@ void ui_callback()
         if (ImGui::Button("Next seam"))      { gRunToSeam   = true; gRunning = true; }
         ImGui::SameLine();
         if (ImGui::Button("Next bd case"))   { gRunToBdCase = true; gRunning = true; }
-        ImGui::SameLine();
+        ImGui::NewLine();
         ImGui::Checkbox("Stop at DC", &gStopAtDC);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Halt + switch to canonical view on every double cover (boundary) case");
+        ImGui::SameLine();
+        ImGui::Checkbox("Stop on DC asym (sym=0)", &gStopAtDCAsym);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Halt when DC solved OK but Post UV is NOT symmetric across y=0 (sym=0).\n"
+                "Symmetry axis: y=0 (seam line between the (-1,0) and (+1,0) pins).\n"
+                "Check: each B_reflected top/bottom pair must have same x and opposite y.\n"
+                "vi and vj must have |y| < 1e-4.\n"
+                "Does NOT fire on DC-fail cases (sym=-1) — use the next checkbox for those.");
+        ImGui::NewLine();
+        ImGui::Checkbox("Stop on DC fail (sym=-1)", &gStopAtDCFail);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Halt when the DC solve itself failed — UV contains NaN (sym=-1).\n"
+                "Distinct from sym=0 (DC OK but asymmetric).\n"
+                "TODO: investigate root cause via [DC-FATAL] + [DC-SYM] entries in dc_log.");
+        // Show symmetry status for the current DC snap
+        if (gSnap.has_dc) {
+            int s = gSnap.dc_uv_symmetric;
+            if (s == 1)
+                ImGui::TextColored({0.4f,1.0f,0.4f,1.0f},
+                    "DC UV sym=+1 (symmetric, err=%.5f)", gSnap.dc_uv_asym_max_err);
+            else if (s == 0)
+                ImGui::TextColored({1.0f,0.6f,0.1f,1.0f},
+                    "DC UV sym=0 (asymmetric, max_err=%.5f)", gSnap.dc_uv_asym_max_err);
+            else
+                ImGui::TextColored({1.0f,0.2f,0.2f,1.0f},
+                    "DC UV sym=-1 (DC FAILED — NaN UV, unmeasurable)");
+        }
 
         ImGui::SetNextItemWidth(80);
         ImGui::InputText("##breakat", gBreakAtBuf, sizeof(gBreakAtBuf),
@@ -1198,21 +1657,60 @@ void ui_callback()
             }
             ImGui::Separator();
         }
-        // Seam diagnostic button — prints one-ring face/sheet/seam-edge info to stdout.
-        if (ImGui::Button("Log Seam Info")) {
-            if (!gDecInfo.empty() && !gDecInfo.back().onering_seam_log.empty()) {
-                printf("\n%s\n", gDecInfo.back().onering_seam_log.c_str());
-                fflush(stdout);
+        // DC-fail snapshot controls
+        {
+            const DCFailSnap & dcf = SSP_get_dc_fail_snap();
+            if (dcf.valid) {
+                ImGui::TextColored({1.0f, 0.3f, 0.3f, 1.0f},
+                    "DC FAIL: sid=%d  vi=%d vj=%d  nF=%d",
+                    dcf.global_sheet_id, dcf.vi, dcf.vj, dcf.F.rows());
+                ImGui::SameLine();
+                if (ImGui::Button("Clear##dcfail")) {
+                    char label[64];
+                    snprintf(label, sizeof(label), "dc_fail_sheet_sid%d", dcf.global_sheet_id);
+                    polyscope::removeStructure(label, /*errorIfAbsent=*/false);
+                    SSP_clear_dc_fail_snap();
+                }
             } else {
-                printf("[Log Seam Info] no data for current collapse\n");
-                fflush(stdout);
+                ImGui::TextDisabled("No DC fail recorded");
             }
         }
-        ImGui::SameLine();
-        ImGui::TextDisabled("(prints to stdout)");
+        ImGui::Separator();
+
+        // Seam diagnostic — inline collapsible + print button.
+        {
+            const std::string& seam_log =
+                (!gDecInfo.empty()) ? gDecInfo.back().onering_seam_log : std::string{};
+            bool has_seam = !seam_log.empty();
+            if (ImGui::CollapsingHeader(has_seam ? "Seam Log" : "Seam Log (none)")) {
+                if (has_seam) {
+                    ImGui::InputTextMultiline(
+                        "##seamlog",
+                        const_cast<char*>(seam_log.c_str()),
+                        seam_log.size() + 1,
+                        ImVec2(-1.0f, 150.0f),
+                        ImGuiInputTextFlags_ReadOnly);
+                } else {
+                    ImGui::TextDisabled("no seam log for this collapse");
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Print##seam")) {
+                if (has_seam) { printf("\n%s\n", seam_log.c_str()); fflush(stdout); }
+                else          { printf("[Log Seam Info] no data\n"); fflush(stdout); }
+            }
+        }
         ImGui::Separator();
 
         vis |= ImGui::Checkbox("UV", &gShowCanonUV);
+        if (gSnap.lscm_case.has_value() && gSnap.lscm_case.value() >= 1) {
+            ImGui::SameLine();
+            vis |= ImGui::Checkbox("Boundary vtx [magenta]", &gShowBDVtx);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Case 1: the vertex detected as on-boundary (drove case selection).\n"
+                    "Case 2: both vi and vj (both boundary / seam collapse).");
+        }
         vis |= ImGui::Checkbox("One ring (+ non-active sheets)", &gShowCanonRing);
         if (gSnap.has_dc) {
             ImGui::Separator();
@@ -1231,7 +1729,42 @@ void ui_callback()
             ImGui::SameLine(); ImGui::TextColored({1.0f, 0.8f, 0.1f, 1.0f}, "[gold]");
         }
         ImGui::Separator();
-        if (ImGui::Button("Print DC / LSCM info")) print_dc_snap();
+        // DC / Joint-LSCM diagnostic — inline collapsible panel.
+        {
+            static std::string s_dc_str;
+            static int s_dc_last_collapse = -2;
+            if (gCollapseCount != s_dc_last_collapse) {
+                s_dc_str = build_dc_snap_str();
+                s_dc_last_collapse = gCollapseCount;
+            }
+            if (ImGui::CollapsingHeader("DC / LSCM Info")) {
+                ImGui::InputTextMultiline(
+                    "##dcinfo",
+                    const_cast<char*>(s_dc_str.c_str()),
+                    s_dc_str.size() + 1,
+                    ImVec2(-1.0f, 200.0f),
+                    ImGuiInputTextFlags_ReadOnly);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Print##dc")) print_dc_snap();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Print BD detection")) print_bd_snap();
+
+        // ---- Export canonical meshes panel ----
+        ImGui::Separator();
+        if (ImGui::CollapsingHeader("Export Canonical Meshes (.ply)")) {
+            ImGui::TextDisabled("%scollapse_%d_<type>_<datetime>.ply",
+                gOutDir.c_str(), gCollapseCount);
+            ImGui::Checkbox("UV Pre##expuvpre",           &gExportUVPre);
+            ImGui::SameLine();
+            ImGui::Checkbox("UV Post##expuvpost",         &gExportUVPost);
+            ImGui::Checkbox("One Ring Pre##expringpre",   &gExportRingPre);
+            ImGui::SameLine();
+            ImGui::Checkbox("One Ring Post##expringpost", &gExportRingPost);
+            if (ImGui::Button("Export selected##expbtn"))
+                export_canonical_meshes();
+        }
     } else {
         vis |= ImGui::Checkbox("Ring pre",        &gShowRingPre);   ImGui::SameLine();
         vis |= ImGui::Checkbox("Ring post",       &gShowRingPost);
@@ -1261,6 +1794,43 @@ void ui_callback()
     ImGui::SameLine();
     if (ImGui::Button("Save now")) export_current_mesh();
     ImGui::TextDisabled("Auto-saved before every collapse.");
+
+    // ---- Stale Chains panel ----
+    if (!gStaleChains.empty()) {
+        ImGui::Separator();
+        int nC = (int)gStaleChains.size();
+        if ((int)gStaleChainVisible.size() != nC)
+            gStaleChainVisible.assign(nC, 1);
+
+        if (ImGui::CollapsingHeader(
+                (std::string("Stale Chains (") + std::to_string(nC) + ")").c_str()))
+        {
+            bool allChanged = ImGui::Checkbox("Show all##sc_all", &gStaleChainShowAll);
+            if (allChanged) {
+                for (int ci = 0; ci < nC; ci++) {
+                    char nm[64]; snprintf(nm, sizeof(nm), "stale_chain_%d", ci);
+                    auto * cn = polyscope::getCurveNetwork(nm);
+                    if (cn) cn->setEnabled(gStaleChainShowAll && gStaleChainVisible[ci]);
+                }
+            }
+            for (int ci = 0; ci < nC; ci++) {
+                if (ci % 3 != 0) ImGui::SameLine();
+                char label[48], nm[64];
+                snprintf(label, sizeof(label), "C%d(%dv)##sc%d",
+                         ci, (int)gStaleChains[ci].size(), ci);
+                snprintf(nm, sizeof(nm), "stale_chain_%d", ci);
+                auto col = stale_hsv_rgb((float)ci / (float)std::max(1, nC), 0.85f, 0.95f);
+                ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4(col[0], col[1], col[2], 1.f));
+                bool vis = gStaleChainVisible[ci] != 0;
+                if (ImGui::Checkbox(label, &vis)) {
+                    gStaleChainVisible[ci] = vis ? 1 : 0;
+                    auto * cn = polyscope::getCurveNetwork(nm);
+                    if (cn) cn->setEnabled(gStaleChainShowAll && vis);
+                }
+                ImGui::PopStyleColor();
+            }
+        }
+    }
 
     if (face_flip_tracker_enabled()) {
         ImGui::Separator();
