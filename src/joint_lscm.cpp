@@ -462,15 +462,42 @@ void joint_lscm_case1_dc(
                 pin_left, pin_right);
     }
 
-    // Solve
-    VectorXd UVjoint_flat;
-    flatten(Vjoint_dc, Fdc_pre, Vjoint_dc, Fdc_post,
-            b_UV, bc_UV, nVjoint_dc, isDebug, UVjoint_flat);
+    // Solve (with automatic orientation correction)
+    // The B_arc direction from igl::boundary_loop may produce inverted top-sheet faces
+    // depending on the local face winding.  After the first solve, check the signed area
+    // of all top-sheet pre faces.  If the majority are negative, swap the pin x-values
+    // (-1 ↔ +1) and re-solve — this mirrors the diamond horizontally without breaking
+    // the y=0 symmetry, turning the inverted layout into a valid positive-area one.
+    auto solve_and_reshape = [&]() -> MatrixXd {
+        VectorXd flat;
+        flatten(Vjoint_dc, Fdc_pre, Vjoint_dc, Fdc_post,
+                b_UV, bc_UV, nVjoint_dc, isDebug, flat);
+        MatrixXd UV(nVjoint_dc, 2);
+        for (int c = 0; c < 2; c++)
+            UV.col(1 - c) = flat.segment(nVjoint_dc * c, nVjoint_dc);
+        return UV;
+    };
 
-    // Reshape: flatten stores [first-coord; second-coord]; col(1)=first, col(0)=second
-    MatrixXd UVjoint(nVjoint_dc, 2);
-    for (int col = 0; col < 2; col++)
-        UVjoint.col(1 - col) = UVjoint_flat.segment(nVjoint_dc * col, nVjoint_dc);
+    MatrixXd UVjoint = solve_and_reshape();
+
+    // Orientation check on top-sheet pre faces
+    {
+        int pos_cnt = 0, neg_cnt = 0;
+        for (int fi = 0; fi < Fjoint_pre.rows(); fi++) {
+            double ax = UVjoint(Fjoint_pre(fi,0),0), ay = UVjoint(Fjoint_pre(fi,0),1);
+            double bx = UVjoint(Fjoint_pre(fi,1),0), by = UVjoint(Fjoint_pre(fi,1),1);
+            double cx = UVjoint(Fjoint_pre(fi,2),0), cy = UVjoint(Fjoint_pre(fi,2),1);
+            double sa = (bx-ax)*(cy-ay) - (by-ay)*(cx-ax);
+            if (sa > 0) pos_cnt++; else neg_cnt++;
+        }
+        if (neg_cnt > pos_cnt) {
+            // Majority inverted — swap pin x-values and re-solve
+            std::swap(bc_UV(1), bc_UV(3));   // -1.0 ↔ +1.0
+            UVjoint = solve_and_reshape();
+            if (isDebug)
+                fprintf(dc_log(), "[DC1] orientation swap: re-solved with swapped pins\n");
+        }
+    }
 
     // Extract UV_pre and UV_post (top-sheet only)
     UV_pre = UVjoint.topRows(nV);

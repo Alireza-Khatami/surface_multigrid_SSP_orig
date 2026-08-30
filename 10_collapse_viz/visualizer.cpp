@@ -59,6 +59,7 @@ static float gStepDelayMs       = 0.0f;
 static bool  gRunning           = false;
 static bool  gRunToSeam         = false;
 static bool  gRunToBdCase       = false;  // stop at LSCM Case 1 or 2 (one/both endpoints on boundary)
+static bool  gRunToCase1        = false;  // stop at LSCM Case 1 specifically (one endpoint on boundary)
 static bool  gStopAtDC         = false;  // persistent: stop + enter canonical view on every double cover case
 static bool  gStopAtDCAsym    = false;  // persistent: stop when a DC Post UV is not symmetric (sym=0)
 static bool  gStopAtDCFail   = false;  // persistent: stop when DC solve itself failed (sym=-1, NaN UV)
@@ -1588,6 +1589,10 @@ void ui_callback()
                         gRunToBdCase = false;
                         gRunning     = false;
                     }
+                    if (gRunToCase1 && lc.value() == 1) {
+                        gRunToCase1 = false;
+                        gRunning    = false;
+                    }
                 }
             }
             // Stop at DC: fires only when the successful collapse actually used the
@@ -1623,7 +1628,7 @@ void ui_callback()
                 gBreakAtCollapse = -1;
             }
 
-            if (!gRunToSeam && !gRunToBdCase && gRunning)
+            if (!gRunToSeam && !gRunToBdCase && !gRunToCase1 && gRunning)
                 std::this_thread::sleep_for(
                     std::chrono::milliseconds(static_cast<int>(gStepDelayMs)));
         }
@@ -1649,7 +1654,7 @@ void ui_callback()
             int c = gSnap.lscm_case.value();
             static const char* case_label[] = {
                 "Case 0: both interior",
-                "Case 1: one on boundary",
+                "Case 1: one on boundary (DC)",
                 "Case 2: both on boundary (DC)"
             };
             ImVec4 col = (c == 0) ? ImVec4{0.7f,0.7f,0.7f,1.0f}
@@ -1710,6 +1715,7 @@ void ui_callback()
         ImGui::SameLine();
         if (ImGui::Button("Next bd case"))   { gRunToBdCase = true; gRunning = true; }
         ImGui::NewLine();
+        if (ImGui::Button("Next Case 1 (DC)")) { gRunToCase1 = true; gRunning = true; }
         ImGui::Checkbox("Stop at DC", &gStopAtDC);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Halt + switch to canonical view on every double cover (boundary) case");
