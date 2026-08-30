@@ -308,6 +308,205 @@ void joint_lscm_double_cover(
     }
 }
 
+void joint_lscm_case1_dc(
+    const Eigen::MatrixXd & V_pre,
+    const Eigen::MatrixXi & FUV_pre,
+    const Eigen::MatrixXd & V_post,
+    const Eigen::MatrixXi & FUV_post,
+    const int & vi,
+    const int & vj,
+    const Eigen::VectorXi & onBd,
+    const bool isDebug,
+    Eigen::MatrixXd & UV_pre,
+    Eigen::MatrixXd & UV_post,
+    Eigen::MatrixXi & FUV_dc_pre,
+    Eigen::MatrixXi & FUV_dc_post,
+    Eigen::MatrixXd & UV_dc_pre,
+    Eigen::MatrixXd & UV_dc_post,
+    std::vector<int> & out_B_glued,
+    std::vector<int> & out_B_reflected)
+{
+    using namespace Eigen;
+    using namespace std;
+
+    int nV      = V_pre.rows();
+    int nVjoint = nV + 1;  // slot nV = vi's post-collapse 3D position
+
+    int v_bd = (onBd(0) == 1) ? vi : vj;  // the boundary endpoint
+
+    // Build Vjoint: rows 0..nV-1 from V_pre, row nV = vi's post position
+    MatrixXd Vjoint(nVjoint, 3);
+    for (int i = 0; i < nV; i++) Vjoint.row(i) = V_pre.row(i);
+    Vjoint.row(nV) = V_post.row(vi);
+
+    // Remap vi → nV in post face connectivity
+    MatrixXi Fjoint_pre  = FUV_pre;
+    MatrixXi Fjoint_post = FUV_post;
+    for (int r = 0; r < Fjoint_post.rows(); r++)
+        for (int c = 0; c < 3; c++)
+            if (Fjoint_post(r, c) == vi) Fjoint_post(r, c) = nV;
+
+    // Boundary loop of Fjoint_pre
+    // In Case 1, the local patch is an open fan: only v_bd (the boundary endpoint)
+    // appears in the boundary loop. The interior endpoint vi is surrounded by faces
+    // on all sides (in the local patch) and is NOT in the boundary loop.
+    VectorXi bdLoop_eig;
+    igl::boundary_loop(Fjoint_pre, bdLoop_eig);
+    int n_loop = (int)bdLoop_eig.size();
+    vector<int> bdLoop(bdLoop_eig.data(), bdLoop_eig.data() + n_loop);
+
+    auto nan_skip = [&](const char* reason) {
+        fprintf(dc_log(), "[DC1-SKIP] vi=%d vj=%d v_bd=%d nV=%d: %s\n",
+                vi, vj, v_bd, nV, reason);
+        fflush(dc_log());
+        UV_pre  = MatrixXd::Constant(nV, 2, numeric_limits<double>::quiet_NaN());
+        UV_post = UV_pre;
+    };
+
+    // Find v_bd in the boundary loop
+    int vbd_pos = -1;
+    for (int i = 0; i < n_loop; i++)
+        if (bdLoop[i] == v_bd) { vbd_pos = i; break; }
+    if (vbd_pos < 0) { nan_skip("v_bd not in boundary loop"); return; }
+
+    // The two outer ring vertices on either side of v_bd in the loop
+    // become the seam-pin endpoints (B_glued).
+    // B_arc: all boundary loop vertices from (v_bd+1) around to (v_bd-1) — the
+    // "long way", i.e. the entire outer ring excluding v_bd itself.
+    int start_pos = (vbd_pos + 1) % n_loop;         // first vertex after v_bd
+    int end_pos   = (vbd_pos - 1 + n_loop) % n_loop; // last vertex before v_bd
+    vector<int> B_arc;
+    {
+        int cur = start_pos;
+        while (cur != end_pos) {
+            B_arc.push_back(bdLoop[cur]);
+            cur = (cur + 1) % n_loop;
+        }
+        B_arc.push_back(bdLoop[end_pos]);  // include the endpoint
+    }
+
+    if ((int)B_arc.size() < 3) { nan_skip("outer B arc < 3 vertices (need ≥1 middle to reflect)"); return; }
+
+    // B_arc[0] = vertex adjacent to v_bd on the "after" side (→ pin_left)
+    // B_arc.back() = vertex adjacent to v_bd on the "before" side (→ pin_right)
+    // B_arc[1..end-1] = middle outer ring vertices (duplicated to bottom sheet)
+    vector<int> B_glued    = { B_arc.front(), B_arc.back() };
+    vector<int> B_reflected(B_arc.begin() + 1, B_arc.end() - 1);
+    out_B_glued    = B_glued;
+    out_B_reflected = B_reflected;
+
+    if (isDebug) {
+        fprintf(dc_log(), "[DC1] vi=%d vj=%d v_bd=%d  B_arc(%d):",
+                vi, vj, v_bd, (int)B_arc.size());
+        for (int b : B_arc) fprintf(dc_log(), " %d", b);
+        fprintf(dc_log(), "\n[DC1] B_glued: %d %d  |  B_reflected(%d):",
+                B_glued[0], B_glued[1], (int)B_reflected.size());
+        for (int b : B_reflected) fprintf(dc_log(), " %d", b);
+        fprintf(dc_log(), "\n");
+    }
+
+    // UV variable layout:
+    //   slots 0..nVjoint-1            : original joint vertices (top sheet + shared glue)
+    //   slots nVjoint..nVjoint_dc-1   : bottom-sheet copies of B_reflected[k]
+    int nVjoint_dc = nVjoint + (int)B_reflected.size();
+
+    unordered_map<int,int> bot_remap;
+    for (int k = 0; k < (int)B_reflected.size(); k++)
+        bot_remap[B_reflected[k]] = nVjoint + k;
+
+    if (isDebug) {
+        fprintf(dc_log(), "[DC1] bot_remap: ");
+        for (auto& kv : bot_remap) fprintf(dc_log(), "%d->%d  ", kv.first, kv.second);
+        fprintf(dc_log(), "\n[DC1] nVjoint=%d  nVjoint_dc=%d\n", nVjoint, nVjoint_dc);
+    }
+
+    // Build Vjoint_dc: bottom-sheet B_reflected copies have same 3D position;
+    // reversed face winding pulls them to the opposite side of the diamond in UV.
+    MatrixXd Vjoint_dc(nVjoint_dc, 3);
+    Vjoint_dc.topRows(nVjoint) = Vjoint;
+    for (int k = 0; k < (int)B_reflected.size(); k++)
+        Vjoint_dc.row(nVjoint + k) = Vjoint.row(B_reflected[k]);
+
+    // Build DC face matrices
+    auto make_bot_face = [&](int a, int b_v, int c) -> Vector3i {
+        auto remap = [&](int v) -> int {
+            auto it = bot_remap.find(v);
+            return (it != bot_remap.end()) ? it->second : v;
+        };
+        return Vector3i(remap(a), remap(c), remap(b_v));  // reversed winding
+    };
+
+    int nF_pre  = Fjoint_pre.rows();
+    int nF_post = Fjoint_post.rows();
+    MatrixXi Fdc_pre(2*nF_pre, 3), Fdc_post(2*nF_post, 3);
+    Fdc_pre.topRows(nF_pre)   = Fjoint_pre;
+    Fdc_post.topRows(nF_post) = Fjoint_post;
+    for (int r = 0; r < nF_pre; r++)
+        Fdc_pre.row(nF_pre   + r) = make_bot_face(Fjoint_pre(r,0),  Fjoint_pre(r,1),  Fjoint_pre(r,2));
+    for (int r = 0; r < nF_post; r++)
+        Fdc_post.row(nF_post + r) = make_bot_face(Fjoint_post(r,0), Fjoint_post(r,1), Fjoint_post(r,2));
+
+    // Pinning: B_glued endpoints at (-1,0) and (+1,0)
+    int pin_left  = B_glued[0];
+    int pin_right = B_glued[1];
+
+    VectorXi b_UV(4);
+    VectorXd bc_UV(4);
+    b_UV  << pin_left,             nVjoint_dc + pin_left,
+             pin_right,            nVjoint_dc + pin_right;
+    bc_UV << 0.0,                 -1.0,   // pin_left  : col(1)=0, col(0)=-1
+             0.0,                  1.0;   // pin_right : col(1)=0, col(0)=+1
+
+    if (isDebug) {
+        fprintf(dc_log(), "[DC1] pinning: B_glued[0](idx=%d)->(-1,0)  B_glued[1](idx=%d)->(+1,0)\n",
+                pin_left, pin_right);
+    }
+
+    // Solve
+    VectorXd UVjoint_flat;
+    flatten(Vjoint_dc, Fdc_pre, Vjoint_dc, Fdc_post,
+            b_UV, bc_UV, nVjoint_dc, isDebug, UVjoint_flat);
+
+    // Reshape: flatten stores [first-coord; second-coord]; col(1)=first, col(0)=second
+    MatrixXd UVjoint(nVjoint_dc, 2);
+    for (int col = 0; col < 2; col++)
+        UVjoint.col(1 - col) = UVjoint_flat.segment(nVjoint_dc * col, nVjoint_dc);
+
+    // Extract UV_pre and UV_post (top-sheet only)
+    UV_pre = UVjoint.topRows(nV);
+    UV_post = UV_pre;
+    UV_post.row(vi) = UVjoint.row(nV);  // vi's post-collapse UV from slot nV
+
+    // DC visualization output (full double cover, both sheets)
+    FUV_dc_pre  = Fdc_pre;
+    FUV_dc_post = Fdc_post;
+    UV_dc_pre   = UVjoint;
+    UV_dc_post  = UVjoint;
+
+    if (isDebug) {
+        auto pUV = [&](const char* lbl, int idx) {
+            if (idx < (int)UVjoint.rows())
+                fprintf(dc_log(), "  %-22s idx=%-4d UV=(%.4f, %.4f)\n",
+                        lbl, idx, UVjoint(idx,0), UVjoint(idx,1));
+        };
+        fprintf(dc_log(), "[DC1] UV results:\n");
+        pUV("vi",           vi);
+        pUV("vj",           vj);
+        pUV("v_bd",         v_bd);
+        pUV("nV(vi_post)",  nV);
+        pUV("B_glued[0]",   B_glued[0]);
+        pUV("B_glued[1]",   B_glued[1]);
+        for (int k = 0; k < (int)B_reflected.size(); k++) {
+            char lbl[64];
+            snprintf(lbl, sizeof(lbl), "B_ref[%d]_top", k);
+            pUV(lbl, B_reflected[k]);
+            snprintf(lbl, sizeof(lbl), "B_ref[%d]_bot", k);
+            pUV(lbl, nVjoint + k);
+        }
+        fflush(dc_log());
+    }
+}
+
 bool joint_lscm(
   const Eigen::MatrixXd & V_pre,
   const Eigen::MatrixXi & FUV_pre,
@@ -575,10 +774,153 @@ bool joint_lscm(
 			joint_lscm_case0(V_pre,FUV_pre,V_post,FUV_post,vi,vj,bdLoop,verbose,isDebug,onBd,UV_pre,UV_post);
 			break;
 		case 1:
-			// One endpoint on seam boundary, one interior — no double cover needed.
-			// The interior vertex naturally moves to the seam boundary via the joint solve.
-			joint_lscm_case1(V_pre,FUV_pre,V_post,FUV_post,vi,vj,bdLoop,verbose,isDebug,onBd,UV_pre,UV_post);
+		{
+			// -- Original: fixed boundary+interior pin; orientation flips and pre/post boundary mismatch.
+			// joint_lscm_case1(V_pre,FUV_pre,V_post,FUV_post,vi,vj,bdLoop,verbose,isDebug,onBd,UV_pre,UV_post);
+
+			// -- New: Double Cover for Case 1.
+			// Reflects the open fan across the outer arc to form a closed disc.
+			// Pins the two outer ring vertices adjacent to v_bd at (-1,0) and (+1,0).
+			// Eliminates orientation flip and forces the same boundary arc for pre/post UV.
+			const int dc_log_count = collapse_idx;
+			bool is_seam_inj = (!Nsv.empty() && Nsv[0] == -1) ||
+			                   (!Ndv.empty() && Ndv[0] == -1);
+
+			Eigen::MatrixXi dc1_F_pre, dc1_F_post;
+			Eigen::MatrixXd dc1_UV_pre, dc1_UV_post;
+			Eigen::MatrixXd UV_pre_dc, UV_post_dc;
+			std::vector<int> dc1_B_glued, dc1_B_reflected;
+
+			joint_lscm_case1_dc(V_pre, FUV_pre, V_post, FUV_post,
+			                    vi, vj, onBd, isDebug,
+			                    UV_pre_dc, UV_post_dc,
+			                    dc1_F_pre, dc1_F_post, dc1_UV_pre, dc1_UV_post,
+			                    dc1_B_glued, dc1_B_reflected);
+
+			bool dc_ok = check_valid_UV_lscm(V_pre, UV_pre_dc, FUV_pre,
+			                                  V_post, UV_post_dc, FUV_post,
+			                                  vi, vj, Nsv, Ndv);
+
+			if (!dc_ok) {
+				bool has_nan = UV_pre_dc.array().isNaN().any() ||
+				               UV_post_dc.array().isNaN().any();
+				auto signed_area_2d = [](const Eigen::MatrixXd & UV,
+				                         const Eigen::MatrixXi & F, int fi) {
+					double ax = UV(F(fi,0),0), ay = UV(F(fi,0),1);
+					double bx = UV(F(fi,1),0), by = UV(F(fi,1),1);
+					double cx = UV(F(fi,2),0), cy = UV(F(fi,2),1);
+					return (bx-ax)*(cy-ay) - (by-ay)*(cx-ax);
+				};
+				bool pre_flip = false, post_flip = false;
+				for (int fi = 0; fi < FUV_pre.rows() && !pre_flip; fi++) {
+					double sa = signed_area_2d(UV_pre_dc, FUV_pre, fi);
+					if (sa < 1e-10 || std::isnan(sa)) pre_flip = true;
+				}
+				for (int fi = 0; fi < FUV_post.rows() && !post_flip; fi++) {
+					double sa = signed_area_2d(UV_post_dc, FUV_post, fi);
+					if (sa < 1e-10 || std::isnan(sa)) post_flip = true;
+				}
+				fprintf(dc_log(),
+				  "[DC1-FAIL #%d] case=%d seam=%d vi=%d vj=%d nFpre=%d nFpost=%d nV=%d"
+				  "  nan=%d pre_flip=%d post_flip=%d\n",
+				  dc_log_count, whichCase, (int)is_seam_inj, vi, vj,
+				  (int)FUV_pre.rows(), (int)FUV_post.rows(), (int)V_pre.rows(),
+				  (int)has_nan, (int)pre_flip, (int)post_flip);
+				fflush(dc_log());
+			} else {
+				Eigen::VectorXd qce_pre, qce_post;
+				quasi_conformal_error(V_pre, FUV_pre,  UV_pre_dc,  qce_pre);
+				quasi_conformal_error(V_pre, FUV_post, UV_post_dc, qce_post);
+				double max_pre  = qce_pre.maxCoeff(),  mean_pre  = qce_pre.mean();
+				double max_post = qce_post.maxCoeff(), mean_post = qce_post.mean();
+				bool high_dist  = (max_pre > 3.0 || max_post > 3.0);
+
+				fprintf(dc_log(),
+				  "[DC1-%s #%d] case=%d seam=%d vi=%d vj=%d nFpre=%d nFpost=%d nV=%d"
+				  "  B_glued=%d B_ref=%d"
+				  "  QCE_pre(max=%.3f mean=%.3f) QCE_post(max=%.3f mean=%.3f)\n",
+				  high_dist ? "HIGH-DISTORTION" : "PASS",
+				  dc_log_count, whichCase, (int)is_seam_inj, vi, vj,
+				  (int)FUV_pre.rows(), (int)FUV_post.rows(), (int)V_pre.rows(),
+				  (int)dc1_B_glued.size(), (int)dc1_B_reflected.size(),
+				  max_pre, mean_pre, max_post, mean_post);
+
+				// B_arc audit
+				{
+					std::vector<int> b_arc_full;
+					b_arc_full.push_back(dc1_B_glued[0]);
+					for (int k : dc1_B_reflected) b_arc_full.push_back(k);
+					b_arc_full.push_back(dc1_B_glued[1]);
+
+					double total_len = 0.0;
+					fprintf(dc_log(), "[DC1-ARC #%d] B_arc(%d) 3D edge lengths: ",
+					        dc_log_count, (int)b_arc_full.size());
+					for (int k = 0; k + 1 < (int)b_arc_full.size(); k++) {
+						double len = (V_pre.row(b_arc_full[k]) - V_pre.row(b_arc_full[k+1])).norm();
+						total_len += len;
+						fprintf(dc_log(), "%.4f ", len);
+					}
+					fprintf(dc_log(), " total=%.4f\n", total_len);
+
+					int v_bd = (onBd(0) == 1) ? vi : vj;
+					fprintf(dc_log(),
+					  "[DC1-ARC #%d] v_bd(%d) B_glued[0](%d)->(-1,0)  B_glued[1](%d)->(+1,0)"
+					  "  [B_reflected FREE]\n",
+					  dc_log_count, v_bd, dc1_B_glued[0], dc1_B_glued[1]);
+
+					fprintf(dc_log(), "[DC1-ARC #%d] B_arc UV: ", dc_log_count);
+					for (int b : b_arc_full) {
+						if (b < (int)UV_pre_dc.rows())
+							fprintf(dc_log(), "%d=(%.3f,%.3f) ", b, UV_pre_dc(b,0), UV_pre_dc(b,1));
+					}
+					fprintf(dc_log(), "\n");
+					fprintf(dc_log(),
+					  "[DC1-ARC #%d] vi(%d) UV=(%.3f,%.3f)  vj(%d) UV=(%.3f,%.3f)\n",
+					  dc_log_count, vi, UV_pre_dc(vi,0), UV_pre_dc(vi,1),
+					  vj, UV_pre_dc(vj,0), UV_pre_dc(vj,1));
+				}
+				fflush(dc_log());
+			}
+
+			// Always assign (even on failure, so visualizer can inspect the DC)
+			UV_pre  = UV_pre_dc;
+			UV_post = UV_post_dc;
+			if (dc_viz) {
+				dc_viz->has_data    = true;
+				dc_viz->FUV_dc_pre  = dc1_F_pre;
+				dc_viz->FUV_dc_post = dc1_F_post;
+				dc_viz->UV_dc_pre   = dc1_UV_pre;
+				dc_viz->UV_dc_post  = dc1_UV_post;
+				dc_viz->B_glued     = dc1_B_glued;
+				dc_viz->B_reflected = dc1_B_reflected;
+			}
+
+			// DC symmetry check: vi, vj, and each B_reflected top/bot pair must be y≈0 mirrors
+			{
+				double asym_err = std::numeric_limits<double>::infinity();
+				int sym_val;
+				int dc_nVjoint = (int)V_pre.rows() + 1;
+				if (dc1_UV_post.rows() > 0 && !dc1_UV_post.array().isNaN().any()) {
+					sym_val = check_dc_symmetry(dc1_UV_post, dc1_B_reflected, dc_nVjoint,
+					                            vi, vj, 1e-4, asym_err) ? 1 : 0;
+				} else {
+					sym_val  = -1;
+					asym_err = std::numeric_limits<double>::infinity();
+				}
+				fprintf(dc_log(),
+				  "[DC1-SYM #%d] symmetric=%+d max_asym_err=%.6f"
+				  "  vi_y=%.6f  vj_y=%.6f\n",
+				  dc_log_count, sym_val, asym_err,
+				  (vi < (int)dc1_UV_post.rows() && !std::isnan(dc1_UV_post(vi,1)) ? dc1_UV_post(vi,1) : 0.0),
+				  (vj < (int)dc1_UV_post.rows() && !std::isnan(dc1_UV_post(vj,1)) ? dc1_UV_post(vj,1) : 0.0));
+				fflush(dc_log());
+				if (dc_viz) {
+					dc_viz->dc_uv_symmetric    = sym_val;
+					dc_viz->dc_uv_asym_max_err = asym_err;
+				}
+			}
 			break;
+		}
 		case 2:
 		{
 			// Both endpoints on seam boundary — double cover + 2-point pinning.

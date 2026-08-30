@@ -205,9 +205,32 @@ void joint_lscm_case1(
   const Eigen::VectorXi & bdLoop,
   const bool & verbose,
 	const bool & isDebug,
-  const Eigen::VectorXi & onBd, 
+  const Eigen::VectorXi & onBd,
   Eigen::MatrixXd & UV_pre,
   Eigen::MatrixXd & UV_post);
+
+// Double-cover solver for Case 1 (one boundary endpoint).
+// Reflects the open fan across the outer arc to form a closed disc.
+// Pins the two outer ring vertices adjacent to v_bd at (-1,0) and (+1,0).
+// UV_pre/UV_post: top-sheet UV for original faces (same index space as FUV_pre/FUV_post).
+// FUV_dc_*/UV_dc_*: full double cover for visualization.
+void joint_lscm_case1_dc(
+    const Eigen::MatrixXd & V_pre,
+    const Eigen::MatrixXi & FUV_pre,
+    const Eigen::MatrixXd & V_post,
+    const Eigen::MatrixXi & FUV_post,
+    const int & vi,
+    const int & vj,
+    const Eigen::VectorXi & onBd,
+    const bool isDebug,
+    Eigen::MatrixXd & UV_pre,
+    Eigen::MatrixXd & UV_post,
+    Eigen::MatrixXi & FUV_dc_pre,
+    Eigen::MatrixXi & FUV_dc_post,
+    Eigen::MatrixXd & UV_dc_pre,
+    Eigen::MatrixXd & UV_dc_post,
+    std::vector<int> & out_B_glued,
+    std::vector<int> & out_B_reflected);
 
 void joint_lscm_case2(
 	const Eigen::MatrixXd & V_pre,
