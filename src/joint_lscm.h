@@ -222,6 +222,7 @@ void joint_lscm_case1_dc(
     const int & vi,
     const int & vj,
     const Eigen::VectorXi & onBd,
+    const Eigen::VectorXi & bdLoop,   // outer ring from joint_lscm() (seam-aware)
     const bool isDebug,
     Eigen::MatrixXd & UV_pre,
     Eigen::MatrixXd & UV_post,

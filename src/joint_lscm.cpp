@@ -316,6 +316,7 @@ void joint_lscm_case1_dc(
     const int & vi,
     const int & vj,
     const Eigen::VectorXi & onBd,
+    const Eigen::VectorXi & bdLoop_in,   // pre-computed outer ring from joint_lscm()
     const bool isDebug,
     Eigen::MatrixXd & UV_pre,
     Eigen::MatrixXd & UV_post,
@@ -346,15 +347,6 @@ void joint_lscm_case1_dc(
         for (int c = 0; c < 3; c++)
             if (Fjoint_post(r, c) == vi) Fjoint_post(r, c) = nV;
 
-    // Boundary loop of Fjoint_pre
-    // In Case 1, the local patch is an open fan: only v_bd (the boundary endpoint)
-    // appears in the boundary loop. The interior endpoint vi is surrounded by faces
-    // on all sides (in the local patch) and is NOT in the boundary loop.
-    VectorXi bdLoop_eig;
-    igl::boundary_loop(Fjoint_pre, bdLoop_eig);
-    int n_loop = (int)bdLoop_eig.size();
-    vector<int> bdLoop(bdLoop_eig.data(), bdLoop_eig.data() + n_loop);
-
     auto nan_skip = [&](const char* reason) {
         fprintf(dc_log(), "[DC1-SKIP] vi=%d vj=%d v_bd=%d nV=%d: %s\n",
                 vi, vj, v_bd, nV, reason);
@@ -363,29 +355,16 @@ void joint_lscm_case1_dc(
         UV_post = UV_pre;
     };
 
-    // Find v_bd in the boundary loop
-    int vbd_pos = -1;
-    for (int i = 0; i < n_loop; i++)
-        if (bdLoop[i] == v_bd) { vbd_pos = i; break; }
-    if (vbd_pos < 0) { nan_skip("v_bd not in boundary loop"); return; }
+    // B_arc = the outer ring of the Case 1 one-ring, already computed by joint_lscm()
+    // from the Nsv/Ndv neighbor lists (which correctly encode the seam gap via -1 injection).
+    // bdLoop_in[0] and bdLoop_in.back() are the two outer-ring vertices adjacent to
+    // v_bd across the seam gap — these become the DC seam pins (B_glued).
+    // This avoids igl::boundary_loop(FUV_pre), which can fail to find v_bd when the
+    // per-sheet FUV_pre doesn't expose v_bd as a topological boundary vertex.
+    int n_arc = (int)bdLoop_in.size();
+    vector<int> B_arc(bdLoop_in.data(), bdLoop_in.data() + n_arc);
 
-    // The two outer ring vertices on either side of v_bd in the loop
-    // become the seam-pin endpoints (B_glued).
-    // B_arc: all boundary loop vertices from (v_bd+1) around to (v_bd-1) — the
-    // "long way", i.e. the entire outer ring excluding v_bd itself.
-    int start_pos = (vbd_pos + 1) % n_loop;         // first vertex after v_bd
-    int end_pos   = (vbd_pos - 1 + n_loop) % n_loop; // last vertex before v_bd
-    vector<int> B_arc;
-    {
-        int cur = start_pos;
-        while (cur != end_pos) {
-            B_arc.push_back(bdLoop[cur]);
-            cur = (cur + 1) % n_loop;
-        }
-        B_arc.push_back(bdLoop[end_pos]);  // include the endpoint
-    }
-
-    if ((int)B_arc.size() < 3) { nan_skip("outer B arc < 3 vertices (need ≥1 middle to reflect)"); return; }
+    if (n_arc < 3) { nan_skip("outer B arc < 3 vertices (need ≥1 middle to reflect)"); return; }
 
     // B_arc[0] = vertex adjacent to v_bd on the "after" side (→ pin_left)
     // B_arc.back() = vertex adjacent to v_bd on the "before" side (→ pin_right)
@@ -819,7 +798,7 @@ bool joint_lscm(
 			std::vector<int> dc1_B_glued, dc1_B_reflected;
 
 			joint_lscm_case1_dc(V_pre, FUV_pre, V_post, FUV_post,
-			                    vi, vj, onBd, isDebug,
+			                    vi, vj, onBd, bdLoop, isDebug,
 			                    UV_pre_dc, UV_post_dc,
 			                    dc1_F_pre, dc1_F_post, dc1_UV_pre, dc1_UV_post,
 			                    dc1_B_glued, dc1_B_reflected);
