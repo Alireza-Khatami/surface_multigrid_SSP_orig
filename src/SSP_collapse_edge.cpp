@@ -465,6 +465,7 @@ bool SSP_collapse_edge(
   bool    any_sheet_ok = false;
   set<int> FIdx_combined;
   data.sheets.clear();
+  SSP_clear_dc_fail_snap();  // clear previous collapse's fail snap before this collapse runs
 
   for (int sid : active_sheets) {
     const vector<int> & Nsf_si = sheets_Nsf[sid];

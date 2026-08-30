@@ -317,6 +317,8 @@ void joint_lscm_case1_dc(
     const int & vj,
     const Eigen::VectorXi & onBd,
     const Eigen::VectorXi & bdLoop_in,   // pre-computed outer ring from joint_lscm()
+    const std::vector<int> & Nsv,        // vi's (or E(e,0)'s) ordered neighbor list
+    const std::vector<int> & Ndv,        // vj's (or E(e,1)'s) ordered neighbor list
     const bool isDebug,
     Eigen::MatrixXd & UV_pre,
     Eigen::MatrixXd & UV_post,
@@ -333,7 +335,7 @@ void joint_lscm_case1_dc(
     int nV      = V_pre.rows();
     int nVjoint = nV + 1;  // slot nV = vi's post-collapse 3D position
 
-    int v_bd = (onBd(0) == 1) ? vi : vj;  // the boundary endpoint
+    int v_bd = vj;  // vj is always the seam (boundary) vertex in Case 1; vi always collapses into it
 
     // Build Vjoint: rows 0..nV-1 from V_pre, row nV = vi's post position
     MatrixXd Vjoint(nVjoint, 3);
@@ -355,22 +357,103 @@ void joint_lscm_case1_dc(
         UV_post = UV_pre;
     };
 
-    // B_arc = the outer ring of the Case 1 one-ring, already computed by joint_lscm()
-    // from the Nsv/Ndv neighbor lists (which correctly encode the seam gap via -1 injection).
-    // bdLoop_in[0] and bdLoop_in.back() are the two outer-ring vertices adjacent to
-    // v_bd across the seam gap — these become the DC seam pins (B_glued).
-    // This avoids igl::boundary_loop(FUV_pre), which can fail to find v_bd when the
-    // per-sheet FUV_pre doesn't expose v_bd as a topological boundary vertex.
-    int n_arc = (int)bdLoop_in.size();
-    vector<int> B_arc(bdLoop_in.data(), bdLoop_in.data() + n_arc);
+    // --- Find T_after / T_before from vj's neighbor list directly ---
+    // vj is always the seam vertex; its neighbor list has -1 at the gap.
+    // The vertices flanking -1 are the two seam endpoints T_after and T_before.
+    // We cannot rely on bdLoop_in alone because:
+    //   (a) it replaces -1 with vi/vj (gap marker that may or may not be present), and
+    //   (b) the junction vertex (Ndv[size-2] / Nsv[0]) is systematically skipped from
+    //       bdLoop yet is often one of the seam gap endpoints.
+    const int infVIdx = -1;
+    // Pick whichever of Nsv/Ndv actually contains the seam gap marker (-1).
+    // vj is the seam vertex so its list (Ndv) should have -1; but verify rather than assume,
+    // since the SSP neighbor-list ordering can put -1 in Nsv when the seam edge is Nsv's last edge.
+    bool nsv_has_gap = false, ndv_has_gap = false;
+    for (int x : Nsv) if (x == infVIdx) { nsv_has_gap = true; break; }
+    for (int x : Ndv) if (x == infVIdx) { ndv_has_gap = true; break; }
+    bool used_Nsv;
+    if (ndv_has_gap && !nsv_has_gap)      used_Nsv = false;  // normal: vj's list has gap
+    else if (nsv_has_gap && !ndv_has_gap) used_Nsv = true;   // inverted: vi's list has gap
+    else if (ndv_has_gap && nsv_has_gap)  used_Nsv = false;  // both have gap → prefer Ndv (vj's list)
+    else { nan_skip("seam marker -1 not found in either neighbor list"); return; }
+    const vector<int>& vj_list = used_Nsv ? Nsv : Ndv;
 
-    if (n_arc < 3) { nan_skip("outer B arc < 3 vertices (need ≥1 middle to reflect)"); return; }
+    // Log the neighbor lists for debugging T1/T2 selection
+    {
+        FILE* lg = dc_log();
+        fprintf(lg, "[DC1-DBG] vi=%d vj=%d  used_%s as vj_list (size=%d): [",
+                vi, vj, used_Nsv ? "Nsv" : "Ndv", (int)vj_list.size());
+        for (int k = 0; k < (int)vj_list.size(); k++)
+            fprintf(lg, "%s%d", k?",":"", vj_list[k]);
+        fprintf(lg, "]\n");
+        fprintf(lg, "[DC1-DBG] Nsv (size=%d): [", (int)Nsv.size());
+        for (int k = 0; k < (int)Nsv.size(); k++)
+            fprintf(lg, "%s%d", k?",":"", Nsv[k]);
+        fprintf(lg, "]\n");
+        fprintf(lg, "[DC1-DBG] Ndv (size=%d): [", (int)Ndv.size());
+        for (int k = 0; k < (int)Ndv.size(); k++)
+            fprintf(lg, "%s%d", k?",":"", Ndv[k]);
+        fprintf(lg, "]\n");
+        fprintf(lg, "[DC1-DBG] bdLoop_in (size=%d): [", (int)bdLoop_in.size());
+        for (int k = 0; k < (int)bdLoop_in.size(); k++)
+            fprintf(lg, "%s%d", k?",":"", bdLoop_in[k]);
+        fprintf(lg, "]\n");
+        fflush(lg);
+    }
 
-    // B_arc[0] = vertex adjacent to v_bd on the "after" side (→ pin_left)
-    // B_arc.back() = vertex adjacent to v_bd on the "before" side (→ pin_right)
-    // B_arc[1..end-1] = middle outer ring vertices (duplicated to bottom sheet)
+    int gap_k = -1;
+    for (int k = 0; k < (int)vj_list.size(); k++)
+        if (vj_list[k] == infVIdx) { gap_k = k; break; }
+    if (gap_k < 0) { nan_skip("seam marker -1 not found in vj neighbor list"); return; }
+
+    // --- Build B_arc directly from vj_list ---
+    // vj_list is stored as a LINEAR open list: [X0, ..., X_{gap_k-1}, -1, X_{gap_k+1}, ..., X_{n-1}]
+    // The fan arc (non-gap side) goes from T_after = X_{gap_k+1} around to T_before = X_{gap_k-1}.
+    // When gap_k==0 the gap is at the start: T_before wraps to the last element (vj_list.back()),
+    // T_after = vj_list[1].  B_arc = vj_list[1..n-1] (all elements after the -1 at index 0).
+    // In all cases: B_arc = vj_list[gap_k+1 .. n-1]  ++  vj_list[0 .. gap_k-1]
+    //                      = elements after -1, then elements before -1.
+    int n_list = (int)vj_list.size();
+    // T_after and T_before from the circular neighbor list
+    int T_after  = vj_list[(gap_k + 1) % n_list];
+    int T_before = vj_list[(gap_k - 1 + n_list) % n_list];
+
+    fprintf(dc_log(), "[DC1-DBG] gap_k=%d  T_after=%d  T_before=%d  list_last=%d\n",
+            gap_k, T_after, T_before, vj_list.back());
+    fflush(dc_log());
+
+    // Arc: all non-gap elements in order starting from T_after, ending at T_before.
+    vector<int> B_arc;
+    B_arc.reserve(n_list - 1);  // all elements except the -1
+    for (int k = 1; k < n_list; k++)              // elements after -1
+        B_arc.push_back(vj_list[(gap_k + k) % n_list]);
+    // B_arc[0] = T_after, B_arc.back() = T_before
+
+    int n_arc = (int)B_arc.size();
+    // B_arc[0]     = T_after  → pin_left  (-1, 0)
+    // B_arc.back() = T_before → pin_right (+1, 0)
+    // B_arc[1..end-1] = middle outer ring vertices (reflected to bottom sheet)
+
+    if (n_arc < 3) { nan_skip("B arc < 3 vertices (need ≥1 middle vertex to reflect)"); return; }
+
     vector<int> B_glued    = { B_arc.front(), B_arc.back() };
     vector<int> B_reflected(B_arc.begin() + 1, B_arc.end() - 1);
+
+    // Push any extra outer-ring vertices from the joint bdLoop that aren't already
+    // in B_glued or B_reflected (e.g. vertices from vj's closed fan not in vi's Nsv arc).
+    // Without this, those vertices share the same UV slot in both DC sheets, creating
+    // an asymmetric Laplacian coupling that breaks y=0 symmetry.
+    {
+        set<int> already(B_glued.begin(), B_glued.end());
+        already.insert(B_reflected.begin(), B_reflected.end());
+        for (int i = 0; i < (int)bdLoop_in.size(); i++) {
+            int v = bdLoop_in(i);
+            if (v != vi && v != vj && !already.count(v)) {
+                B_reflected.push_back(v);
+                already.insert(v);
+            }
+        }
+    }
     out_B_glued    = B_glued;
     out_B_reflected = B_reflected;
 
@@ -798,7 +881,7 @@ bool joint_lscm(
 			std::vector<int> dc1_B_glued, dc1_B_reflected;
 
 			joint_lscm_case1_dc(V_pre, FUV_pre, V_post, FUV_post,
-			                    vi, vj, onBd, bdLoop, isDebug,
+			                    vi, vj, onBd, bdLoop, Nsv, Ndv, isDebug,
 			                    UV_pre_dc, UV_post_dc,
 			                    dc1_F_pre, dc1_F_post, dc1_UV_pre, dc1_UV_post,
 			                    dc1_B_glued, dc1_B_reflected);

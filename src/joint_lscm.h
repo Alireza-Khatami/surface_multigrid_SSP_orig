@@ -223,6 +223,8 @@ void joint_lscm_case1_dc(
     const int & vj,
     const Eigen::VectorXi & onBd,
     const Eigen::VectorXi & bdLoop,   // outer ring from joint_lscm() (seam-aware)
+    const std::vector<int> & Nsv,     // vi's (E(e,0)'s) ordered neighbor list
+    const std::vector<int> & Ndv,     // vj's (E(e,1)'s) ordered neighbor list
     const bool isDebug,
     Eigen::MatrixXd & UV_pre,
     Eigen::MatrixXd & UV_post,

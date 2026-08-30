@@ -1569,7 +1569,9 @@ void ui_callback()
             update_display();
             ring_post_c2f_diagnostic();
 
-            bool hitSeam = !gDecInfo.empty() && gDecInfo.back().sheets.size() > 1;
+            bool hitSeam = !gDecInfo.empty() &&
+                           (gDecInfo.back().sheets.size() > 1 ||       // Case 2: multi-sheet seam edge
+                            (gSnap.lscm_case.has_value() && gSnap.lscm_case.value() == 1));  // Case 1: one seam endpoint
             if (gRunToSeam && hitSeam) {
                 gRunToSeam = false;
                 gRunning   = false;
