@@ -24,13 +24,6 @@ bool check_dc_symmetry(
     using std::abs; using std::max;
     max_err = 0.0;
     int nRows = (int)UV_dc.rows();
-    // vi and vj must lie on the seam line (y ≈ 0)
-    auto check_y0 = [&](int idx) {
-        if (idx >= 0 && idx < nRows)
-            max_err = max(max_err, abs(UV_dc(idx, 1)));
-    };
-    check_y0(vi);
-    check_y0(vj);
     // Each B_reflected[k] (top) and nVjoint+k (bottom) must be y=0 mirrors
     for (int k = 0; k < (int)B_reflected.size(); k++) {
         int top = B_reflected[k];

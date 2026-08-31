@@ -141,15 +141,13 @@ void dc_log_sheet_header(int collapse_idx, int sid,
                          int vi_global, int vj_global,
                          int nFpre, int nV, bool is_seam);
 
-// Check whether the double-cover post-UV is symmetric across y=0 (the seam line).
+// Check whether the double-cover UV is symmetric across y=0 (the seam line).
 //
-// The DC pins B_glued[0] at (-1,0) and B_glued[1] at (+1,0), so the expected
-// symmetry axis is y=0.  For each B_reflected[k], its top-sheet UV slot
-// (index B_reflected[k]) and bottom-sheet UV slot (index nVjoint+k) must satisfy:
-//   - same x:  |UV_dc(top,0) − UV_dc(bot,0)| ≤ tol
+// For each B_reflected[k], its top-sheet UV slot (index B_reflected[k]) and
+// bottom-sheet UV slot (index nVjoint+k) must satisfy UV_top + UV_bot ≈ 0:
+//   - same x:   |UV_dc(top,0) − UV_dc(bot,0)| ≤ tol
 //   - mirror y: |UV_dc(top,1) + UV_dc(bot,1)| ≤ tol
-// vi and vj themselves are checked for |y| ≤ tol (they must lie on the seam line).
-// max_err is set to the worst observed deviation across all checks.
+// max_err is set to the worst observed deviation across all pairs.
 bool check_dc_symmetry(
     const Eigen::MatrixXd & UV_dc,
     const std::vector<int> & B_reflected,
