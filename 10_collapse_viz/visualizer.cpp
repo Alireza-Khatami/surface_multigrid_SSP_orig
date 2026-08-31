@@ -658,15 +658,104 @@ static void register_ring_geometry(const DisplayGeometry & g)
                 polyscope::registerPointCloud("uv_case1_bd_pin", dummy)->setEnabled(false);
             }
         }
+
+        // (4) B_arc chain in 3D one-ring space, grouped under "B_arc_chain".
+        // Order: B_glued[0](start) → B_reflected[0..n-1] → B_glued[1](end)
+        // Red   point = arc start (B_glued[0], pinned at -1,0 in UV)
+        // Green point = arc end   (B_glued[1], pinned at +1,0 in UV)
+        // Yellow pts  = B_reflected middle vertices (duplicated to bottom sheet)
+        // Yellow line = full arc chain
+        {
+            Eigen::MatrixXd dV(1,3); dV.setZero();
+            Eigen::MatrixXi dE(0,2);
+            polyscope::Group* arcGrp = nullptr;
+            try { arcGrp = polyscope::createGroup("B_arc_chain"); }
+            catch (...) { arcGrp = polyscope::getGroup("B_arc_chain"); }
+            if (gSnap.has_dc && (int)gSnap.dc_B_glued.size() >= 2) {
+                std::vector<int> b_arc;
+                b_arc.push_back(gSnap.dc_B_glued[0]);
+                for (int k : gSnap.dc_B_reflected) b_arc.push_back(k);
+                b_arc.push_back(gSnap.dc_B_glued[1]);
+
+                int nA = (int)b_arc.size();
+                Eigen::MatrixXd arcV(nA, 3);
+                Eigen::MatrixXi arcE(nA - 1, 2);
+                for (int i = 0; i < nA; i++) {
+                    int v = b_arc[i];
+                    if (v >= 0 && v < (int)g.V_ring.rows())
+                        arcV.row(i) = g.V_ring.row(v);
+                    else
+                        arcV.row(i).setZero();
+                }
+                for (int i = 0; i < nA - 1; i++) arcE.row(i) << i, i + 1;
+
+                polyscope::registerCurveNetwork("ring_case1_B_arc", arcV, arcE)
+                    ->setRadius(0.0025f, true)->setColor({1.0f, 0.85f, 0.0f})
+                    ->setEnabled(true)->addToGroup(*arcGrp);
+
+                // Arc start point (B_glued[0])
+                {
+                    Eigen::MatrixXd pt(1, 3);
+                    pt.row(0) = g.V_ring.row(gSnap.dc_B_glued[0]);
+                    polyscope::registerPointCloud("ring_case1_B_arc_start", pt)
+                        ->setPointColor({1.0f, 0.15f, 0.15f})->setPointRadius(.03f, true)
+                        ->setEnabled(true)->addToGroup(*arcGrp);
+                }
+                // Arc end point (B_glued[1])
+                {
+                    Eigen::MatrixXd pt(1, 3);
+                    pt.row(0) = g.V_ring.row(gSnap.dc_B_glued[1]);
+                    polyscope::registerPointCloud("ring_case1_B_arc_end", pt)
+                        ->setPointColor({0.15f, 0.85f, 0.15f})->setPointRadius(.03f, true)
+                        ->setEnabled(true)->addToGroup(*arcGrp);
+                }
+                // Middle B_reflected vertices
+                if (!gSnap.dc_B_reflected.empty()) {
+                    Eigen::MatrixXd refPts((int)gSnap.dc_B_reflected.size(), 3);
+                    for (int k = 0; k < (int)gSnap.dc_B_reflected.size(); k++) {
+                        int v = gSnap.dc_B_reflected[k];
+                        if (v >= 0 && v < (int)g.V_ring.rows())
+                            refPts.row(k) = g.V_ring.row(v);
+                        else
+                            refPts.row(k).setZero();
+                    }
+                    polyscope::registerPointCloud("ring_case1_B_reflected", refPts)
+                        ->setPointColor({1.0f, 1.0f, 0.0f})->setPointRadius(.03f, true)
+                        ->setEnabled(true)->addToGroup(*arcGrp);
+                } else {
+                    polyscope::registerPointCloud("ring_case1_B_reflected", dV)
+                        ->setEnabled(false)->addToGroup(*arcGrp);
+                }
+            } else {
+                polyscope::registerCurveNetwork("ring_case1_B_arc", dV, dE)
+                    ->setEnabled(false)->addToGroup(*arcGrp);
+                polyscope::registerPointCloud("ring_case1_B_arc_start", dV)
+                    ->setEnabled(false)->addToGroup(*arcGrp);
+                polyscope::registerPointCloud("ring_case1_B_arc_end", dV)
+                    ->setEnabled(false)->addToGroup(*arcGrp);
+                polyscope::registerPointCloud("ring_case1_B_reflected", dV)
+                    ->setEnabled(false)->addToGroup(*arcGrp);
+            }
+        }
     } else {
         // Not Case 1 or missing data — register empty objects so update_display can always find them
         Eigen::MatrixXd dV(1,3); dV.setZero();
         Eigen::MatrixXi dE(0,2);
         polyscope::registerCurveNetwork("uv_case1_arc", dV, dE)->setEnabled(false);
-        Eigen::MatrixXd dummy(0,3);
-        polyscope::registerPointCloud("uv_case1_vi_pin", dummy)->setEnabled(false);
-        polyscope::registerPointCloud("uv_case1_vj_pin", dummy)->setEnabled(false);
-        polyscope::registerPointCloud("uv_case1_bd_pin", dummy)->setEnabled(false);
+        polyscope::Group* arcGrp = nullptr;
+        try { arcGrp = polyscope::createGroup("B_arc_chain"); }
+        catch (...) { arcGrp = polyscope::getGroup("B_arc_chain"); }
+        polyscope::registerCurveNetwork("ring_case1_B_arc", dV, dE)
+            ->setEnabled(false)->addToGroup(*arcGrp);
+        polyscope::registerPointCloud("uv_case1_vi_pin", dV)->setEnabled(false);
+        polyscope::registerPointCloud("uv_case1_vj_pin", dV)->setEnabled(false);
+        polyscope::registerPointCloud("uv_case1_bd_pin", dV)->setEnabled(false);
+        polyscope::registerPointCloud("ring_case1_B_arc_start", dV)
+            ->setEnabled(false)->addToGroup(*arcGrp);
+        polyscope::registerPointCloud("ring_case1_B_arc_end", dV)
+            ->setEnabled(false)->addToGroup(*arcGrp);
+        polyscope::registerPointCloud("ring_case1_B_reflected", dV)
+            ->setEnabled(false)->addToGroup(*arcGrp);
     }
 
 }
