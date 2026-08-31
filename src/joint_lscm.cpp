@@ -22,15 +22,30 @@ bool check_dc_symmetry(
     double & max_err)
 {
     using std::abs; using std::max;
+    (void)vi; (void)vj;  // covered by the full top-sheet loop below
     max_err = 0.0;
     int nRows = (int)UV_dc.rows();
-    // Each B_reflected[k] (top) and nVjoint+k (bottom) must be y=0 mirrors
+
+    // Build O(1) lookup for reflected vertices.
+    std::set<int> reflected_set(B_reflected.begin(), B_reflected.end());
+
+    // Every top-sheet vertex (rows 0..nVjoint-1) falls into one of two classes:
+    //   Glued     — appears in both sheets at the SAME UV slot.
+    //               For DC symmetry it must lie on the seam line: |y| ≤ tol.
+    //   Reflected — B_reflected[k]: has a separate bottom-sheet copy at row nVjoint+k.
+    //               The pair must satisfy UV_top + UV_bot ≈ 0:
+    //                 same x:   |x_top − x_bot| ≤ tol
+    //                 mirror y: |y_top + y_bot| ≤ tol
+    for (int i = 0; i < nVjoint && i < nRows; i++) {
+        if (reflected_set.count(i)) continue;   // handled as a pair below
+        max_err = max(max_err, abs(UV_dc(i, 1)));
+    }
     for (int k = 0; k < (int)B_reflected.size(); k++) {
         int top = B_reflected[k];
         int bot = nVjoint + k;
         if (top < 0 || top >= nRows || bot < 0 || bot >= nRows) continue;
-        double dx = abs(UV_dc(top, 0) - UV_dc(bot, 0));   // x must match
-        double dy = abs(UV_dc(top, 1) + UV_dc(bot, 1));   // y must be opposite
+        double dx = abs(UV_dc(top, 0) - UV_dc(bot, 0));
+        double dy = abs(UV_dc(top, 1) + UV_dc(bot, 1));
         max_err = max(max_err, max(dx, dy));
     }
     return max_err <= tol;

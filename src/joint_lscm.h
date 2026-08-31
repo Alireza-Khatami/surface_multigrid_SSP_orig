@@ -143,11 +143,11 @@ void dc_log_sheet_header(int collapse_idx, int sid,
 
 // Check whether the double-cover UV is symmetric across y=0 (the seam line).
 //
-// For each B_reflected[k], its top-sheet UV slot (index B_reflected[k]) and
-// bottom-sheet UV slot (index nVjoint+k) must satisfy UV_top + UV_bot ≈ 0:
-//   - same x:   |UV_dc(top,0) − UV_dc(bot,0)| ≤ tol
-//   - mirror y: |UV_dc(top,1) + UV_dc(bot,1)| ≤ tol
-// max_err is set to the worst observed deviation across all pairs.
+// Every top-sheet vertex (rows 0..nVjoint-1) is either:
+//   Glued     — same UV slot in both sheets → must lie on the seam: |y| ≤ tol.
+//   Reflected — B_reflected[k] with bottom copy at row nVjoint+k:
+//               UV_top + UV_bot ≈ 0  (same x, mirrored y).
+// max_err is the worst deviation seen across all vertices.
 bool check_dc_symmetry(
     const Eigen::MatrixXd & UV_dc,
     const std::vector<int> & B_reflected,
