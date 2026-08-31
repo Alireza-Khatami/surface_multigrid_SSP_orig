@@ -694,8 +694,26 @@ static void export_canonical_meshes()
                     path.c_str(), (int)V.rows(), (int)F.rows());
     };
 
-    if (gExportUVPre)    save_ply("UV_Pre",       gLastCanonGeom.uv_pre_3d,   gSnap.FUV_pre);
-    if (gExportUVPost)   save_ply("UV_Post",      gLastCanonGeom.uv_post_3d,  gSnap.FUV_post);
+    // Lift UV to 3D as (u, v, 0) — raw solver output, no transform applied.
+    auto uv_to_3d = [](const MatrixXd & UV) {
+        MatrixXd V(UV.rows(), 3);
+        V.col(0) = UV.col(0);
+        V.col(1) = UV.col(1);
+        V.col(2).setZero();
+        return V;
+    };
+
+    // For DC cases export the full double-cover UV (B_top + B_bottom together).
+    // For non-DC cases fall back to the regular top-sheet UV.
+    const bool use_dc = gSnap.has_dc && gSnap.UV_dc_pre.rows() > 0;
+    if (gExportUVPre)
+        save_ply("UV_Pre",
+                 uv_to_3d(use_dc ? gSnap.UV_dc_pre  : gSnap.UV_pre),
+                 use_dc ? gSnap.FUV_dc_pre  : gSnap.FUV_pre);
+    if (gExportUVPost)
+        save_ply("UV_Post",
+                 uv_to_3d(use_dc ? gSnap.UV_dc_post : gSnap.UV_post),
+                 use_dc ? gSnap.FUV_dc_post : gSnap.FUV_post);
     if (gExportRingPre)  save_ply("OneRing_Pre",  gLastCanonGeom.V_ring,      gSnap.FUV_pre);
     if (gExportRingPost) save_ply("OneRing_Post", gLastCanonGeom.V_ring_post, gSnap.FUV_post);
 }
