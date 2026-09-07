@@ -204,7 +204,8 @@ void SSP_seam_log_close();
 
 void SSP_rej_log_open(const char * path);
 void SSP_rej_log_close();
-FILE * SSP_rej_log_file();  // shared by SSP_collapse_edge and qslim callbacks
+FILE * SSP_rej_log_file();          // shared by SSP_collapse_edge and qslim callbacks
+FILE * SSP_rej_log_swap(FILE * f);  // replace log pointer, return old one (for temporary redirect)
 
 // Enable/disable all paper validity checks (UV face flip, UV angle sum,
 // Euclidean face flip, skinny triangle).  Default: enabled.

@@ -38,6 +38,7 @@ void SSP_rej_log_close() {
   if (s_rej_log) { fclose(s_rej_log); s_rej_log = nullptr; }
 }
 FILE * SSP_rej_log_file() { return s_rej_log; }
+FILE * SSP_rej_log_swap(FILE * f) { FILE * old = s_rej_log; s_rej_log = f; return old; }
 #define SEAM_LOG(fmt, ...) fprintf(s_seam_log ? s_seam_log : stderr, fmt, __VA_ARGS__)
 
 // ---- DC-fail snapshot (last sheet whose DC solve failed) ----

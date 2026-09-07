@@ -524,6 +524,37 @@ bool do_next_step()
                       << "  collapses=" << gCollapseCount
                       << "  seam_attempts=" << gSeamAttemptCount
                       << "  seam_collapses=" << gSeamCollapseCount << "\n";
+
+            // Re-cost every live edge and log rejection reasons to a dedicated file.
+            // "Live" = both endpoints have finite positions (not the infinity cap vertex).
+            {
+                const std::string eq_path = gOutDir + "exhausted_queue_rejections.log";
+                FILE* eq_log = fopen(eq_path.c_str(), "w");
+                if (eq_log) {
+                    FILE* orig = SSP_rej_log_swap(eq_log);
+                    fprintf(eq_log,
+                        "# Exhaustion diagnostic — re-costing all live edges\n"
+                        "# collapses=%d  live_faces=%d  target=%d\n",
+                        gCollapseCount, count_live_faces(), gTargetFaces);
+                    int n_live = 0, n_inf = 0, n_finite = 0;
+                    for (int e = 0; e < gE.rows(); ++e) {
+                        const int u = gE(e, 0), v = gE(e, 1);
+                        if (u < 0 || v < 0) continue;
+                        if (std::isinf(gV(u, 0)) || std::isinf(gV(v, 0))) continue;
+                        ++n_live;
+                        double cost; Eigen::RowVectorXd p;
+                        gCostFn(e, gV, gF, gE, gEMAP, gEF, gEI, cost, p);
+                        if (std::isinf(cost)) ++n_inf; else ++n_finite;
+                    }
+                    fprintf(eq_log,
+                        "[EXHAUSTION-SUMMARY] live_edges=%d  inf=%d  finite=%d\n",
+                        n_live, n_inf, n_finite);
+                    SSP_rej_log_swap(orig);
+                    fclose(eq_log);
+                    fprintf(stderr, "[EXHAUSTION] diagnostic written to %s\n", eq_path.c_str());
+                }
+            }
+
             return false;
         }
         int e, e1, e2, f1, f2;
