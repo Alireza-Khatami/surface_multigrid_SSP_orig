@@ -1,4 +1,5 @@
 #include "visualizer.h"
+#include "stale_chains.h"
 #include "sheet_seam_viz.h"
 #include "coarse_fine_viz.h"
 #include "face_sample_tracker.h"
@@ -48,8 +49,6 @@ extern bool     gFinished;
 extern int      gDecType;   // 0=midpoint, 1=qslim, 2=meshlab
 extern std::vector<single_collapse_data> gDecInfo;
 extern std::vector<std::set<int>> gVertexStructIDs;
-extern std::vector<std::vector<int>> gStaleChains;
-
 bool do_next_step();  // defined in main.cpp
 
 // ---- display-only state ----
@@ -1537,53 +1536,6 @@ static void face_flip_tracker_show_viz()
         polyscope::registerCurveNetwork(kNames[i], nodes, edges)
             ->setColor({kColors[i][0], kColors[i][1], kColors[i][2]})
             ->setRadius(0.003, true);
-    }
-}
-
-// ---- stale chain visualization ----
-static std::vector<uint8_t> gStaleChainVisible;  // uint8_t avoids vector<bool> proxy issues
-static bool                 gStaleChainShowAll = true;
-
-static std::array<float,3> stale_hsv_rgb(float h, float s, float v)
-{
-    float c = v*s, x = c*(1.f - std::fabs(std::fmod(h*6.f, 2.f) - 1.f)), m = v-c;
-    float r,g,b;
-    switch ((int)(h*6.f) % 6) {
-        case 0: r=c;g=x;b=0;break; case 1:r=x;g=c;b=0;break;
-        case 2: r=0;g=c;b=x;break; case 3:r=0;g=x;b=c;break;
-        case 4: r=x;g=0;b=c;break; default:r=c;g=0;b=x;break;
-    }
-    return {r+m, g+m, b+m};
-}
-
-static void update_stale_chains_display()
-{
-    if (gStaleChains.empty()) return;
-    int nC = (int)gStaleChains.size();
-    if ((int)gStaleChainVisible.size() != nC)
-        gStaleChainVisible.assign(nC, 1);
-
-    for (int ci = 0; ci < nC; ci++) {
-        const auto & chain = gStaleChains[ci];
-        int nV = (int)chain.size();
-        if (nV < 2) continue;
-
-        MatrixXd Vc(nV, 3);
-        for (int k = 0; k < nV; k++) {
-            int vid = chain[k];
-            if (vid < (int)gVO.rows()) Vc.row(k) = gVO.row(vid);
-            else                       Vc.row(k).setZero();
-        }
-        int nEdges = nV - 1;
-        MatrixXi Ec(nEdges, 2);
-        for (int k = 0; k < nEdges; k++) Ec.row(k) << k, k+1;
-
-        auto col = stale_hsv_rgb((float)ci / (float)std::max(1, nC), 0.85f, 0.95f);
-        char nm[64]; snprintf(nm, sizeof(nm), "stale_chain_%d", ci);
-        polyscope::registerCurveNetwork(nm, Vc, Ec)
-            ->setRadius(0.003, true)
-            ->setColor({col[0], col[1], col[2]})
-            ->setEnabled(gStaleChainShowAll && gStaleChainVisible[ci]);
     }
 }
 

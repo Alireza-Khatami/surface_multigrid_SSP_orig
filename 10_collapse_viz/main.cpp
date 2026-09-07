@@ -1,4 +1,5 @@
 #include "orient_faces_consistently.h"
+#include "stale_chains.h"
 
 #include <igl/read_triangle_mesh.h>
 #include <igl/remove_unreferenced.h>
@@ -40,6 +41,7 @@
 #include <cstdint>
 #include <fstream>
 #include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 #include <filesystem>
 
@@ -81,10 +83,6 @@ FILE* gStructGateLog = nullptr;               // dedicated log file for struct-I
 std::vector<std::pair<int,int>> gSeamEdgeList;  // vertex pairs of seam (non-manifold) edges
 std::vector<double> gInitCosts;               // initial cost per edge (index = gE row)
 
-// Stale chains: naked l-element edges in the fine mesh that SSP must not touch.
-// Populated by detect_stale_chains() inside init_ssp, before any collapse.
-std::vector<std::vector<int>> gStaleChains;    // each chain = ordered vertex ID sequence
-std::unordered_set<int>       gStaleVertexSet; // fast lookup used by the pre-collapse lock
 
 int gTargetFaces  = 100;
 int gCollapseCount = 0;
@@ -105,183 +103,6 @@ static MeshlabQEMConfig gMlCfg;
 static decimate_cost_and_placement_func gCostFn;
 static decimate_pre_collapse_func       gPreFn;
 static decimate_post_collapse_func      gPostFn;
-
-// ---- stale chain detection ----
-// Loads an OBJ file in a single pass, extracting vertex positions (V), triangle
-// faces (F), and raw line-element edges (l_edges, 0-based).  This replaces the
-// igl::read_triangle_mesh call so that 'l' elements are never seen by libigl's
-// parser (which would print a warning for every such line).
-static bool load_obj_vfl(
-    const std::string & path,
-    MatrixXd & V,
-    MatrixXi & F,
-    std::vector<std::pair<int,int>> & l_edges)
-{
-    std::ifstream fh(path);
-    if (!fh.is_open()) {
-        fprintf(stderr, "[OBJ] cannot open '%s'\n", path.c_str());
-        return false;
-    }
-    std::vector<std::array<double,3>> verts;
-    std::vector<std::array<int,3>>   faces;
-    std::string line;
-    while (std::getline(fh, line)) {
-        if (line.empty()) continue;
-        // strip leading whitespace
-        size_t s = line.find_first_not_of(" \t\r");
-        if (s == std::string::npos || line[s] == '#') continue;
-        char token = line[s];
-        if (token == 'v' && (s+1 < line.size()) && std::isspace((unsigned char)line[s+1])) {
-            std::istringstream ss(line.substr(s+1));
-            double x, y, z; ss >> x >> y >> z;
-            verts.push_back({x, y, z});
-        } else if (token == 'f' && (s+1 < line.size()) && std::isspace((unsigned char)line[s+1])) {
-            std::istringstream ss(line.substr(s+1));
-            std::array<int,3> tri;
-            for (int k = 0; k < 3; k++) {
-                std::string tok; ss >> tok;
-                // handle v, v/vt, v/vt/vn, v//vn
-                tri[k] = std::stoi(tok) - 1;  // 1-based → 0-based
-            }
-            faces.push_back(tri);
-        } else if (token == 'l' && (s+1 < line.size()) && std::isspace((unsigned char)line[s+1])) {
-            std::istringstream ss(line.substr(s+1));
-            std::vector<int> vs;
-            int vi;
-            while (ss >> vi) vs.push_back(vi - 1);
-            for (int i = 0; i + 1 < (int)vs.size(); i++)
-                l_edges.push_back({vs[i], vs[i+1]});
-        }
-        // 'vn', 'vt', 'usemtl', etc. are silently skipped — we don't need them
-    }
-    V.resize((int)verts.size(), 3);
-    for (int i = 0; i < (int)verts.size(); i++)
-        V.row(i) << verts[i][0], verts[i][1], verts[i][2];
-    F.resize((int)faces.size(), 3);
-    for (int i = 0; i < (int)faces.size(); i++)
-        F.row(i) << faces[i][0], faces[i][1], faces[i][2];
-    return true;
-}
-
-// Filters raw l-element edges to keep only those that appear in no triangle face,
-// then builds a maximal chain decomposition of those naked edges.
-// Populates gStaleChains and gStaleVertexSet.
-static void detect_stale_chains(
-    const std::vector<std::pair<int,int>> & l_edges_raw,
-    const MatrixXi & FO)
-{
-    // 1. Already have l-edges from the OBJ parse; nothing to re-read.
-    std::vector<std::pair<int,int>> raw_edges = l_edges_raw;
-    if (raw_edges.empty()) {
-        std::cout << "[STALE] no l-elements found — no stale chains\n";
-        return;
-    }
-    std::cout << "[STALE] " << raw_edges.size() << " l-edges parsed\n";
-
-    // 2. Build a set of all face edges so we can exclude them.
-    //    A true naked/stale edge must NOT appear in any triangle face.
-    std::set<std::pair<int,int>> face_edges;
-    for (int f = 0; f < FO.rows(); f++)
-        for (int c = 0; c < 3; c++) {
-            int u = FO(f, c), v = FO(f, (c + 1) % 3);
-            face_edges.insert({std::min(u, v), std::max(u, v)});
-        }
-
-    {
-        std::vector<std::pair<int,int>> naked;
-        naked.reserve(raw_edges.size());
-        int n_face = 0;
-        for (auto & e : raw_edges) {
-            auto key = std::make_pair(std::min(e.first, e.second),
-                                      std::max(e.first, e.second));
-            if (face_edges.count(key)) { n_face++; continue; }
-            naked.push_back(e);
-        }
-        if (n_face)
-            std::cout << "[STALE] " << n_face << " l-edges skipped (also a face edge)\n";
-        raw_edges = std::move(naked);
-    }
-
-    if (raw_edges.empty()) {
-        std::cout << "[STALE] all l-edges were face edges — no stale chains\n";
-        return;
-    }
-    std::cout << "[STALE] " << raw_edges.size() << " naked l-edges remain\n";
-
-    // 3. Build adjacency from naked edges (deduplicated)
-    std::map<int, std::vector<int>> adj;
-    for (auto & e : raw_edges) {
-        adj[e.first].push_back(e.second);
-        adj[e.second].push_back(e.first);
-    }
-    for (auto & kv : adj) {
-        auto & nb = kv.second;
-        std::sort(nb.begin(), nb.end());
-        nb.erase(std::unique(nb.begin(), nb.end()), nb.end());
-    }
-
-    // 4. Build maximal chains (same algorithm as visualize_naked_edge_chains.py)
-    std::set<std::pair<int,int>> visited;
-    auto mark_edge = [&](int u, int v) {
-        visited.insert({std::min(u,v), std::max(u,v)});
-    };
-    auto edge_visited = [&](int u, int v) -> bool {
-        return visited.count({std::min(u,v), std::max(u,v)}) > 0;
-    };
-
-    // Trace one chain starting from 'start' stepping first to 'nxt'
-    auto trace = [&](int start, int nxt) -> std::vector<int> {
-        std::vector<int> chain = {start};
-        int prev = start, cur = nxt;
-        while (true) {
-            chain.push_back(cur);
-            mark_edge(prev, cur);
-            const auto & nbrs = adj[cur];
-            if ((int)nbrs.size() != 2) break;   // endpoint or junction — stop
-            int next_v = (nbrs[0] != prev) ? nbrs[0] : nbrs[1];
-            if (edge_visited(cur, next_v)) break; // loop closed — stop
-            prev = cur; cur = next_v;
-        }
-        return chain;
-    };
-
-    // Pass 0: endpoints (degree 1), Pass 1: junctions (degree > 2)
-    for (int pass = 0; pass < 2; pass++) {
-        for (auto & kv : adj) {
-            int v   = kv.first;
-            int deg = (int)kv.second.size();
-            if (pass == 0 ? deg != 1 : deg <= 2) continue;
-            for (int nb : kv.second)
-                if (!edge_visited(v, nb))
-                    gStaleChains.push_back(trace(v, nb));
-        }
-    }
-
-    // Pass 2: closed loops — unvisited edges among degree-2 vertices
-    for (auto & kv : adj) {
-        if ((int)kv.second.size() != 2) continue;
-        int v = kv.first;
-        for (int nb : kv.second) {
-            if (!edge_visited(v, nb)) {
-                auto chain = trace(v, nb);
-                if (chain.front() != chain.back())
-                    chain.push_back(chain.front()); // close the loop
-                gStaleChains.push_back(chain);
-                break;
-            }
-        }
-    }
-
-    // 5. Populate vertex set
-    for (const auto & chain : gStaleChains)
-        for (int vid : chain)
-            gStaleVertexSet.insert(vid);
-
-    std::cout << "[STALE] " << gStaleChains.size() << " chains  ("
-              << gStaleVertexSet.size() << " unique vertices protected)\n";
-    for (int i = 0; i < (int)gStaleChains.size(); i++)
-        printf("[STALE]   chain[%d]: %d vertices\n", i, (int)gStaleChains[i].size());
-}
 
 // ---- init ----
 static void init_ssp(const std::string & mesh_path, int tarF, const std::string & out_dir)
@@ -502,30 +323,176 @@ static void print_seam_edge_costs(const std::string & out_path = "seam_edge_cost
             (int)gSeamEdgeList.size(), out_path.c_str());
 }
 
-// ---- export simplified mesh ----
+// ---- export simplified mesh (OBJ + l-elements, and PLY with edge elements) ----
+// path = full path including ".obj" suffix; PLY is written alongside at the same stem.
 static void save_simplified_mesh(const std::string & path)
 {
-    // Collect live faces: not dead, not incident to the infinity cap vertex
-    std::vector<std::array<int,3>> rows;
+    // Collect live faces: not dead, not incident to the infinity cap vertex.
+    std::vector<std::array<int,3>> face_rows;
     for (int f = 0; f < gF.rows(); f++) {
         if (is_face_dead(gF, f)) continue;
         int v0 = gF(f,0), v1 = gF(f,1), v2 = gF(f,2);
         if (std::isinf(gV(v0,0)) || std::isinf(gV(v1,0)) || std::isinf(gV(v2,0))) continue;
-        rows.push_back({v0, v1, v2});
+        face_rows.push_back({v0, v1, v2});
     }
-    MatrixXi Flive((int)rows.size(), 3);
-    for (int i = 0; i < (int)rows.size(); i++)
-        Flive.row(i) << rows[i][0], rows[i][1], rows[i][2];
+    MatrixXi Flive((int)face_rows.size(), 3);
+    for (int i = 0; i < (int)face_rows.size(); i++)
+        Flive.row(i) << face_rows[i][0], face_rows[i][1], face_rows[i][2];
 
-    // Strip the infinity cap vertex and compact vertex indices
-    MatrixXd Vout; MatrixXi Fout; VectorXi I, J;
-    igl::remove_unreferenced(gV.leftCols(3), Flive, Vout, Fout, I, J);
+    // Compact, removing unreferenced vertices.
+    // I[new] = old,  J[old] = new (-1 if dropped).
+    // NOTE: stale chain vertices are naked (not in any triangle face), so
+    // remove_unreferenced drops them and J(vid) == -1 for all of them.
+    MatrixXd Vbase; MatrixXi Fout; VectorXi I, J;
+    igl::remove_unreferenced(gV.leftCols(3), Flive, Vbase, Fout, I, J);
 
-    if (!igl::writeOBJ(path, Vout, Fout))
+    // Extend Vbase with the stale chain vertices that were dropped.
+    // Build old→new supplemental map for them.
+    std::unordered_map<int,int> stale_ext; // old vertex ID → row in extended Vout
+    {
+        int base = (int)Vbase.rows();
+        for (const auto & chain : gStaleChains)
+            for (int vid : chain) {
+                if (vid < J.size() && J(vid) >= 0) continue; // already kept by Flive
+                if (stale_ext.count(vid))           continue; // already queued
+                stale_ext[vid] = base++;
+            }
+        if (!stale_ext.empty()) {
+            MatrixXd Vext(base, 3);
+            Vext.topRows(Vbase.rows()) = Vbase;
+            for (auto & [old_vid, new_row] : stale_ext)
+                Vext.row(new_row) = gV.row(old_vid).leftCols(3);
+            Vbase = std::move(Vext);
+        }
+    }
+    const MatrixXd & Vout = Vbase; // alias for clarity below
+
+    // Helper: map an original vertex ID to its compacted index (-1 on failure).
+    auto remap = [&](int vid) -> int {
+        if (vid < J.size() && J(vid) >= 0) return J(vid);
+        auto it = stale_ext.find(vid);
+        return (it != stale_ext.end()) ? it->second : -1;
+    };
+
+    // ---- OBJ with l-elements ----
+    if (!igl::writeOBJ(path, Vout, Fout)) {
         fprintf(stderr, "[SAVE-MESH] writeOBJ failed: %s\n", path.c_str());
-    else
+    } else {
         fprintf(stderr, "[SAVE-MESH] wrote %d faces  %d verts  → %s\n",
             (int)Fout.rows(), (int)Vout.rows(), path.c_str());
+
+        if (!gStaleChains.empty()) {
+            std::ofstream ofs(path, std::ios::app);
+            if (ofs.is_open()) {
+                int written = 0;
+                for (const auto & chain : gStaleChains) {
+                    std::vector<int> remapped;
+                    remapped.reserve(chain.size());
+                    bool ok = true;
+                    for (int vid : chain) {
+                        int nid = remap(vid);
+                        if (nid < 0) { ok = false; break; }
+                        remapped.push_back(nid + 1); // OBJ is 1-based
+                    }
+                    if (!ok || remapped.empty()) continue;
+                    ofs << "l";
+                    for (int idx : remapped) ofs << " " << idx;
+                    ofs << "\n";
+                    written++;
+                }
+                fprintf(stderr, "[SAVE-MESH] appended %d l-element chain(s) → %s\n",
+                        written, path.c_str());
+            } else {
+                fprintf(stderr, "[SAVE-MESH] could not reopen OBJ to append l-elements: %s\n",
+                        path.c_str());
+            }
+        }
+    }
+
+    // ---- PLY with face triangles + stale chain edges ----
+    // PLY supports an "edge" element, so we include the chain geometry there too.
+    {
+        std::string ply_path = path;
+        { size_t dot = ply_path.rfind('.'); if (dot != std::string::npos) ply_path.resize(dot); }
+        ply_path += ".ply";
+
+        // Collect edges from stale chains (consecutive vertex pairs in each chain).
+        std::vector<std::pair<int,int>> chain_edges;
+        for (const auto & chain : gStaleChains) {
+            for (int k = 0; k + 1 < (int)chain.size(); k++) {
+                int a = remap(chain[k]), b = remap(chain[k+1]);
+                if (a >= 0 && b >= 0)
+                    chain_edges.push_back({a, b});
+            }
+        }
+
+        std::ofstream ply(ply_path);
+        if (!ply.is_open()) {
+            fprintf(stderr, "[SAVE-MESH] writePLY failed (cannot open): %s\n", ply_path.c_str());
+        } else {
+            const int nV = (int)Vout.rows();
+            const int nF = (int)Fout.rows();
+            const int nE = (int)chain_edges.size();
+            // Header
+            ply << "ply\nformat ascii 1.0\n";
+            ply << "element vertex " << nV << "\n";
+            ply << "property float x\nproperty float y\nproperty float z\n";
+            ply << "element face " << nF << "\n";
+            ply << "property list uchar int vertex_indices\n";
+            if (nE > 0) {
+                ply << "element edge " << nE << "\n";
+                ply << "property int vertex1\nproperty int vertex2\n";
+            }
+            ply << "end_header\n";
+            // Vertices
+            for (int i = 0; i < nV; i++)
+                ply << Vout(i,0) << " " << Vout(i,1) << " " << Vout(i,2) << "\n";
+            // Faces
+            for (int i = 0; i < nF; i++)
+                ply << "3 " << Fout(i,0) << " " << Fout(i,1) << " " << Fout(i,2) << "\n";
+            // Edges
+            for (auto & [a, b] : chain_edges)
+                ply << a << " " << b << "\n";
+
+            fprintf(stderr, "[SAVE-MESH] wrote PLY %d verts  %d faces  %d chain edges  → %s\n",
+                    nV, nF, nE, ply_path.c_str());
+        }
+    }
+
+    // ---- Separate stale-chains OBJ (MeshLab-visible edges) ----
+    // MeshLab doesn't render PLY edge elements visually; a standalone OBJ with
+    // only v + l lines is the reliable way to see the chains in MeshLab.
+    if (!gStaleChains.empty()) {
+        std::string chains_path = path;
+        { size_t dot = chains_path.rfind('.'); if (dot != std::string::npos) chains_path.resize(dot); }
+        chains_path += "_stale_chains.obj";
+
+        std::ofstream cofs(chains_path);
+        if (!cofs.is_open()) {
+            fprintf(stderr, "[SAVE-MESH] stale chains OBJ failed (cannot open): %s\n", chains_path.c_str());
+        } else {
+            // Collect the unique stale chain vertices and assign local 1-based indices.
+            std::unordered_map<int,int> local_idx; // old vid → 1-based local index
+            for (const auto & chain : gStaleChains)
+                for (int vid : chain)
+                    if (!local_idx.count(vid)) {
+                        int li = (int)local_idx.size() + 1;
+                        local_idx[vid] = li;
+                        RowVector3d pos = gV.row(vid).leftCols(3);
+                        cofs << "v " << pos(0) << " " << pos(1) << " " << pos(2) << "\n";
+                    }
+            // Write one l-line per chain.
+            int written = 0;
+            for (const auto & chain : gStaleChains) {
+                cofs << "l";
+                for (int vid : chain) cofs << " " << local_idx[vid];
+                cofs << "\n";
+                written++;
+            }
+            fprintf(stderr, "[SAVE-MESH] wrote stale chains OBJ %d chains  %d verts  → %s\n",
+                    written, (int)local_idx.size(), chains_path.c_str());
+        }
+    }
 }
 
 // ---- live face count (mirrors save_simplified_mesh: excludes dead + all-inf cap faces) ----
