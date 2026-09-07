@@ -693,6 +693,10 @@ int main(int argc, char * argv[])
             printf("[OUT] output dir: %s\n", out_dir.c_str());
     }
 
+    // Open rejection log before init_ssp so [QSLIM-INF] entries from the
+    // initial cost pass (where degenerate-quadric edges first become ∞) are captured.
+    SSP_rej_log_open((out_dir + "collapse_rejections_" + stem + ".txt").c_str());
+
     init_ssp(meshPath.c_str(), targetFaces, out_dir);
 
     // Load per-vertex struct IDs from .ma_struct file (optional).
@@ -839,9 +843,9 @@ int main(int argc, char * argv[])
         face_flip_tracker_init(trackFaceFlip);
 
     print_seam_edge_costs(out_dir + "seam_edge_costs_" + stem + ".txt");
-    SSP_seam_log_open((out_dir + "seam_diag_"         + stem + ".txt").c_str());
-    SSP_rej_log_open ((out_dir + "collapse_rejections_" + stem + ".txt").c_str());
-    dc_log_open      ((out_dir + "dc_log_"             + stem + ".txt").c_str());
+    SSP_seam_log_open((out_dir + "seam_diag_" + stem + ".txt").c_str());
+    // SSP_rej_log_open already called before init_ssp (to capture initial cost-pass [QSLIM-INF]).
+    dc_log_open((out_dir + "dc_log_" + stem + ".txt").c_str());
 
 #ifdef C2F_VIZ_DIAGNOSTIC
     polyscope::init();
