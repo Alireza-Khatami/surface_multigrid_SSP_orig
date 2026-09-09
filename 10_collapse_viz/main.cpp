@@ -527,28 +527,50 @@ bool do_next_step()
 
             // Re-cost every live edge and log rejection reasons to a dedicated file.
             // "Live" = both endpoints have finite positions (not the infinity cap vertex).
+            // For each edge we run:
+            //   1. gPreFn  — catches struct gate / stale lock / seam lock blocks
+            //   2. gCostFn — catches degenerate-quadric [QSLIM-INF] and validity-check [QSLIM-REJECT]
+            // UV rejections (joint_lscm) are not captured as they require mutating the mesh.
             {
                 const std::string eq_path = gOutDir + "exhausted_queue_rejections.log";
                 FILE* eq_log = fopen(eq_path.c_str(), "w");
                 if (eq_log) {
                     FILE* orig = SSP_rej_log_swap(eq_log);
                     fprintf(eq_log,
-                        "# Exhaustion diagnostic — re-costing all live edges\n"
+                        "# Exhaustion diagnostic — re-running pre_collapse + cost_and_placement on all live edges\n"
                         "# collapses=%d  live_faces=%d  target=%d\n",
                         gCollapseCount, count_live_faces(), gTargetFaces);
-                    int n_live = 0, n_inf = 0, n_finite = 0;
+                    int n_live = 0, n_pre_blocked = 0, n_inf = 0, n_finite = 0;
                     for (int e = 0; e < gE.rows(); ++e) {
                         const int u = gE(e, 0), v = gE(e, 1);
                         if (u < 0 || v < 0) continue;
                         if (std::isinf(gV(u, 0)) || std::isinf(gV(v, 0))) continue;
                         ++n_live;
+
+                        // 1. pre_collapse gate (struct / stale / seam)
+                        if (gPreFn && !gPreFn(gV, gF, gE, gEMAP, gEF, gEI, gQ, gEQ, gC, e)) {
+                            ++n_pre_blocked;
+                            fprintf(eq_log,
+                                "[EXHAUSTION-PRE-BLOCK] e=%d  v=(%d,%d)"
+                                "  va=(%.4g,%.4g,%.4g)  vb=(%.4g,%.4g,%.4g)\n",
+                                e, u, v,
+                                gV(u,0), gV(u,1), gV(u,2),
+                                gV(v,0), gV(v,1), gV(v,2));
+                            continue;
+                        }
+
+                        // 2. cost_and_placement — [QSLIM-INF] / [QSLIM-REJECT] written internally.
+                        // Both degenerate-quadric and validity-check rejections return ∞ cost.
+                        // A finite cost means the edge passed all cost-function checks
+                        // (UV checks are not testable here without running joint_lscm).
                         double cost; Eigen::RowVectorXd p;
                         gCostFn(e, gV, gF, gE, gEMAP, gEF, gEI, cost, p);
                         if (std::isinf(cost)) ++n_inf; else ++n_finite;
                     }
                     fprintf(eq_log,
-                        "[EXHAUSTION-SUMMARY] live_edges=%d  inf=%d  finite=%d\n",
-                        n_live, n_inf, n_finite);
+                        "[EXHAUSTION-SUMMARY] live_edges=%d  pre_blocked=%d  inf=%d"
+                        "  finite_cost(uv_pending)=%d\n",
+                        n_live, n_pre_blocked, n_inf, n_finite);
                     SSP_rej_log_swap(orig);
                     fclose(eq_log);
                     fprintf(stderr, "[EXHAUSTION] diagnostic written to %s\n", eq_path.c_str());
