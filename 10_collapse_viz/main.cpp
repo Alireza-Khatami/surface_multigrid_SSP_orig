@@ -24,6 +24,7 @@
 #endif
 
 #include <SSP_collapse_edge.h>
+#include <SSP_rejection_detail.h>
 #include <single_collapse_data.h>
 #include <partition_into_sheets.h>
 #include <min_heap.h>
@@ -589,6 +590,7 @@ bool do_next_step()
 
         if (ok) {
             gCollapseCount++;
+            SSP_rej_set_collapse_num(gCollapseCount);
             if (gLastCollapseWasSeam) gSeamCollapseCount++;
             // s = survivor (lower vertex index, kept + repositioned)
             // d = absorbed  (higher index, all face refs remapped to s, then gone)

@@ -6,8 +6,9 @@
 // v. 2.0. If a copy of the MPL was not distributed with this file, You can
 // obtain one at http://mozilla.org/MPL/2.0/.
 #include "SSP_qslim_optimal_collapse_edge_callbacks.h"
-#include "SSP_collapse_edge.h"  // SSP_rej_log_file()
-#include <igl/collapse_edge.h>  // IGL_COLLAPSE_EDGE_NULL
+#include "SSP_collapse_edge.h"       // SSP_rej_log_file()
+#include "SSP_rejection_detail.h"    // QslimRejDetail, SSP_rej_get_collapse_num
+#include <igl/collapse_edge.h>       // IGL_COLLAPSE_EDGE_NULL
 #include <Eigen/LU>
 #include <cstdio>
 #include <cmath>
@@ -169,16 +170,72 @@ void SSP_qslim_optimal_collapse_edge_callbacks(
         if (reject_was_flip) ++s_flip_rej_n; else ++s_qual_rej_n;
         FILE* lf = SSP_rej_log_file();
         const int total_rej = s_flip_rej_n + s_qual_rej_n;
-        if (lf && total_rej <= 200)  // cap file entries
+
+        // Short summary line (always written, capped at 500)
+        if (lf && total_rej <= 500)
           fprintf(lf, "[QSLIM-REJECT] reason=%-10s  e=%d  va=%d  vb=%d  fi=%d"
                   "  dot=%.4f  q=%.4f  cost_before=%.6g\n",
                   reject_was_flip ? "face_flip" : "quality",
                   e, va, vb, reject_fi, reject_dot, reject_q, cost);
-        if (total_rej <= 10)  // first 10 also to stderr
+        if (total_rej <= 10)
           fprintf(stderr, "[QSLIM-REJECT] reason=%-10s  e=%d  va=%d  vb=%d  fi=%d"
                   "  dot=%.4f  q=%.4f\n",
                   reject_was_flip ? "face_flip" : "quality",
                   e, va, vb, reject_fi, reject_dot, reject_q);
+
+        // Detailed struct (capped at 200 to file; first 5 also to stderr)
+        if (lf && total_rej <= 200)
+        {
+          // Recover the rejecting face's geometry — all vars are still in scope
+          // from the loop above (fv0,fv1,fv2, nPre, nPost, reject_fi).
+          // We need to re-find the face's vertex indices; reject_fi is valid.
+          const int fv0 = F(reject_fi,0), fv1 = F(reject_fi,1), fv2 = F(reject_fi,2);
+
+          QslimRejDetail d;
+          d.collapse_num  = SSP_rej_get_collapse_num();
+          d.edge          = e;
+          d.va            = va; d.vb = vb;
+          d.pos_va        = V.row(va);
+          d.pos_vb        = V.row(vb);
+          d.pos_opt       = p;   // still holds optPos (or zero if we set constant below)
+          // Note: pos_opt filled BEFORE p.setConstant(0) below — order matters
+          d.cost          = cost;
+          d.used_midpoint = used_midpoint;
+          d.is_flip       = reject_was_flip;
+          d.reject_fi     = reject_fi;
+          d.dot           = reject_dot;
+          d.q             = reject_q;
+          d.fv0 = fv0; d.fv1 = fv1; d.fv2 = fv2;
+          d.fv0_3d = V.row(fv0);
+          d.fv1_3d = V.row(fv1);
+          d.fv2_3d = V.row(fv2);
+
+          // Re-compute normals for the rejecting face so they're in the detail
+          {
+            Eigen::Vector3d o0(V(fv0,0),V(fv0,1),V(fv0,2));
+            Eigen::Vector3d o1(V(fv1,0),V(fv1,1),V(fv1,2));
+            Eigen::Vector3d o2(V(fv2,0),V(fv2,1),V(fv2,2));
+            d.n_pre = (o1-o0).cross(o2-o0);
+            // Post: replace mv with optPos
+            auto pt = [&](int v) -> Eigen::Vector3d {
+              return (v == va || v == vb)
+                ? Eigen::Vector3d(p(0), p(1), p(2))
+                : Eigen::Vector3d(V(v,0), V(v,1), V(v,2));
+            };
+            Eigen::Vector3d q0=pt(fv0), q1=pt(fv1), q2=pt(fv2);
+            d.n_post = (q1-q0).cross(q2-q0);
+          }
+
+          // One-ring (raw face lists — includes dead/degenerate faces; reader can filter)
+          if (va < (int)VF.size())
+            for (int fi : VF[va]) d.ring_va.push_back(fi);
+          if (vb < (int)VF.size())
+            for (int fi : VF[vb]) d.ring_vb.push_back(fi);
+
+          d.write(lf);
+          if (total_rej <= 5) d.write(stderr);
+        }
+
         cost = std::numeric_limits<double>::infinity();
         p.setConstant(0);
       }

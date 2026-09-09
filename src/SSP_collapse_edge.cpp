@@ -1,4 +1,5 @@
 #include "SSP_collapse_edge.h"
+#include "SSP_rejection_detail.h"   // UvFlipRejDetail, UvAngleRejDetail
 #include <igl/edge_collapse_is_valid.h>
 #include <always_try_never_care.h>
 #include <vector>
@@ -846,18 +847,68 @@ bool SSP_collapse_edge(
     // Reject if any post-collapse UV face has non-positive signed area.
     {
       bool uv_flip = false;
+      int  flip_fi = -1;
+      int  flip_ua = -1, flip_ub = -1, flip_uc = -1;
+      double flip_area_post = 0.0;
       for (int fi = 0; fi < FUV_post_si.rows() && !uv_flip; ++fi) {
         const int ua = FUV_post_si(fi,0), ub = FUV_post_si(fi,1), uc = FUV_post_si(fi,2);
         const double ax = UV_post_si(ua,0), ay = UV_post_si(ua,1);
         const double bx = UV_post_si(ub,0), by = UV_post_si(ub,1);
         const double cx = UV_post_si(uc,0), cy = UV_post_si(uc,1);
-        if ((bx-ax)*(cy-ay) - (cx-ax)*(by-ay) <= 0.0) uv_flip = true;
+        double area = (bx-ax)*(cy-ay) - (cx-ax)*(by-ay);
+        if (area <= 0.0) {
+          uv_flip = true;
+          flip_fi = fi; flip_ua = ua; flip_ub = ub; flip_uc = uc;
+          flip_area_post = area;
+        }
       }
       if (uv_flip) {
-        fprintf(stderr, "[UV-REJECT] uv_face_flip  sid=%d  e=(%d,%d)\n",
-                sid, E(e,0), E(e,1));
+        static int s_uv_flip_rej = 0;
+        ++s_uv_flip_rej;
+        // Short summary
+        fprintf(stderr, "[UV-REJECT] uv_face_flip  sid=%d  e=(%d,%d)  (reject#%d)\n",
+                sid, E(e,0), E(e,1), s_uv_flip_rej);
         if (FILE* lf = SSP_rej_log_file())
-          fprintf(lf, "[UV-REJECT] uv_face_flip  sid=%d  e=(%d,%d)\n", sid, E(e,0), E(e,1));
+          fprintf(lf, "[UV-REJECT] uv_face_flip  sid=%d  e=(%d,%d)  (reject#%d)\n",
+                  sid, E(e,0), E(e,1), s_uv_flip_rej);
+
+        // Detailed struct (capped at 200 to file, first 5 also to stderr)
+        if (s_uv_flip_rej <= 200) {
+          UvFlipRejDetail d;
+          d.collapse_num   = SSP_rej_get_collapse_num();
+          d.sid = sid; d.eu = E(e,0); d.ev = E(e,1);
+          d.reject_fi      = flip_fi;
+          d.uv_a = flip_ua; d.uv_b = flip_ub; d.uv_c = flip_uc;
+
+          // Pre-collapse UV for the same face indices (FUV_pre_si may differ in size)
+          // We use the same UV vertex indices — valid because FUV_pre and FUV_post share
+          // the same UV parameterisation topology for the kept faces.
+          if (flip_ua < UV_pre_si.rows()) d.uv_a_pre = UV_pre_si.row(flip_ua);
+          if (flip_ub < UV_pre_si.rows()) d.uv_b_pre = UV_pre_si.row(flip_ub);
+          if (flip_uc < UV_pre_si.rows()) d.uv_c_pre = UV_pre_si.row(flip_uc);
+          {
+            const double ax=d.uv_a_pre(0), ay=d.uv_a_pre(1);
+            const double bx=d.uv_b_pre(0), by=d.uv_b_pre(1);
+            const double cx=d.uv_c_pre(0), cy=d.uv_c_pre(1);
+            d.signed_area_pre = (bx-ax)*(cy-ay)-(cx-ax)*(by-ay);
+          }
+          d.uv_a_post       = UV_post_si.row(flip_ua);
+          d.uv_b_post       = UV_post_si.row(flip_ub);
+          d.uv_c_post       = UV_post_si.row(flip_uc);
+          d.signed_area_post = flip_area_post;
+
+          // Full post-collapse UV one-ring
+          for (int fi = 0; fi < FUV_post_si.rows(); ++fi) {
+            const int ua=FUV_post_si(fi,0), ub=FUV_post_si(fi,1), uc=FUV_post_si(fi,2);
+            d.ring_faces.push_back({ua, ub, uc});
+            d.ring_uvs_post.push_back({UV_post_si.row(ua),
+                                       UV_post_si.row(ub),
+                                       UV_post_si.row(uc)});
+          }
+
+          if (FILE* lf = SSP_rej_log_file()) d.write(lf);
+          if (s_uv_flip_rej <= 5) d.write(stderr);
+        }
         return false;
       }
     }
@@ -920,6 +971,7 @@ bool SSP_collapse_edge(
       if (bad_angle) {
         static int s_angle_rej = 0;
         ++s_angle_rej;
+        // Short summary
         if (s_angle_rej <= 50) {
           fprintf(stderr,
             "[UV-REJECT] uv_angle_sum  sid=%d  e=(%d,%d)"
@@ -936,6 +988,36 @@ bool SSP_collapse_edge(
               sid, E(e,0), E(e,1),
               bad_angle_v, bad_angle_sum, bad_angle_sum - kTwoPi,
               n_interior, nUV, nFuv, bad_angle_nfaces);
+        }
+
+        // Detailed struct (capped at 200 to file, first 5 also to stderr)
+        if (s_angle_rej <= 200) {
+          UvAngleRejDetail d;
+          d.collapse_num       = SSP_rej_get_collapse_num();
+          d.sid = sid; d.eu = E(e,0); d.ev = E(e,1);
+          d.bad_uv_v           = bad_angle_v;
+          d.angle_sum          = bad_angle_sum;
+          d.diff_from_2pi      = bad_angle_sum - kTwoPi;
+          d.n_interior         = n_interior;
+          d.n_uv               = nUV;
+          d.n_fuv              = nFuv;
+          d.n_faces_for_bad_v  = bad_angle_nfaces;
+          d.degenerate         = (bad_angle_nfaces > 0 && bad_angle_sum == 0.0);
+          if (bad_angle_v >= 0 && bad_angle_v < (int)UV_post_si.rows())
+            d.bad_v_uv_post = UV_post_si.row(bad_angle_v);
+
+          // Collect all post-collapse UV faces that contain bad_angle_v
+          for (int fi = 0; fi < nFuv; ++fi) {
+            const int a=FUV_post_si(fi,0), b=FUV_post_si(fi,1), c=FUV_post_si(fi,2);
+            if (a != bad_angle_v && b != bad_angle_v && c != bad_angle_v) continue;
+            d.bad_v_faces.push_back({a, b, c});
+            d.bad_v_face_uvs.push_back({UV_post_si.row(a),
+                                        UV_post_si.row(b),
+                                        UV_post_si.row(c)});
+          }
+
+          if (FILE* lf = SSP_rej_log_file()) d.write(lf);
+          if (s_angle_rej <= 5) d.write(stderr);
         }
         return false;
       }

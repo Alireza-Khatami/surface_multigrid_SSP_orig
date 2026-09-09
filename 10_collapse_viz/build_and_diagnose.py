@@ -30,7 +30,7 @@ BEAR_ARGS = [
     "--trace_vertices", "trace_vids.txt",
 ]
 
-# ── helpers ──────────────────────────────────────────────────────────────────
+# -- helpers ------------------------------------------------------------------
 
 def run(cmd, cwd=None, label=""):
     print(f"\n{'='*60}")
@@ -59,11 +59,11 @@ def head(lines, n=10):
     return lines[:n] + (["  ..."] if len(lines) > n else [])
 
 def section(title):
-    print(f"\n{'─'*60}")
+    print(f"\n{'-'*60}")
     print(f"  {title}")
-    print(f"{'─'*60}")
+    print(f"{'-'*60}")
 
-# ── build ─────────────────────────────────────────────────────────────────────
+# -- build ---------------------------------------------------------------------
 
 skip_build = "--skip-build" in sys.argv
 
@@ -79,12 +79,12 @@ if not BINARY.exists():
     print(f"ERROR: binary not found: {BINARY}", file=sys.stderr)
     sys.exit(1)
 
-# ── run ───────────────────────────────────────────────────────────────────────
+# -- run -----------------------------------------------------------------------
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 run(BEAR_ARGS, cwd=WORKSPACE, label="collapse_viz_bin (bear / qslim / release)")
 
-# ── diagnose ──────────────────────────────────────────────────────────────────
+# -- diagnose ------------------------------------------------------------------
 
 LOG_REJECTIONS  = OUTPUT_DIR / "collapse_rejections_bear_simplified.txt"
 LOG_EXHAUSTION  = OUTPUT_DIR / "exhausted_queue_rejections.log"
@@ -98,7 +98,7 @@ for f in [LOG_REJECTIONS, LOG_EXHAUSTION, LOG_STRUCT_GATE, LOG_SEAM]:
     status  = f"EXISTS  ({size} bytes)" if exists else "MISSING"
     print(f"  {'OK' if exists and size>0 else ('EMPTY' if exists else 'MISS'):5s}  {f.name}  — {status}")
 
-# ── collapse_rejections ───────────────────────────────────────────────────────
+# -- collapse_rejections -------------------------------------------------------
 
 section("collapse_rejections_bear_simplified.txt")
 n_inf,  inf_lines  = count_lines_matching(LOG_REJECTIONS, r"\[QSLIM-INF\]")
@@ -115,7 +115,7 @@ elif n_inf > 0:
     print("\n  First [QSLIM-INF] entries:")
     for l in head(inf_lines): print(f"    {l}")
 
-# ── exhausted_queue_rejections ────────────────────────────────────────────────
+# -- exhausted_queue_rejections ------------------------------------------------
 
 section("exhausted_queue_rejections.log")
 if LOG_EXHAUSTION.exists() and LOG_EXHAUSTION.stat().st_size > 0:
@@ -139,7 +139,7 @@ else:
     print("  *** exhausted_queue_rejections.log is MISSING or EMPTY ***")
     print("  → queue exhaustion branch was never reached, OR binary is stale (needs rebuild)")
 
-# ── struct gate ───────────────────────────────────────────────────────────────
+# -- struct gate ---------------------------------------------------------------
 
 section("struct_gate_log.txt")
 if LOG_STRUCT_GATE.exists() and LOG_STRUCT_GATE.stat().st_size > 0:
@@ -155,7 +155,7 @@ if LOG_STRUCT_GATE.exists() and LOG_STRUCT_GATE.stat().st_size > 0:
 else:
     print("  struct_gate_log.txt MISSING or EMPTY  (--mat_struct_check active?)")
 
-# ── overall verdict ───────────────────────────────────────────────────────────
+# -- overall verdict -----------------------------------------------------------
 
 section("VERDICT")
 
