@@ -24,6 +24,12 @@ static int s_finite_n    = 0;  // calls where cost was finite before validity ch
 static int s_flip_rej_n  = 0;  // rejected by Euclidean face flip
 static int s_qual_rej_n  = 0;  // rejected by skinny triangle quality
 static int s_passed_n    = 0;  // passed all checks (finite cost kept)
+static int s_inf_logged  = 0;  // degenerate-quadric edges logged (file-scope for reset)
+
+// Reset all counters so the exhaustion-full-diagnostic pass starts with fresh caps.
+void SSP_qslim_reset_counters() {
+    s_cost_n = s_finite_n = s_flip_rej_n = s_qual_rej_n = s_passed_n = s_inf_logged = 0;
+}
 
 void SSP_qslim_optimal_collapse_edge_callbacks(
   Eigen::MatrixXi & E,
@@ -78,7 +84,6 @@ void SSP_qslim_optimal_collapse_edge_callbacks(
 // [QSLIM-INF] — always active (not gated on s_qslim_log_enabled) so it fires
 // during the initial cost pass too, where degenerate-quadric edges first become ∞.
     {
-      static int s_inf_logged = 0;
       Eigen::RowVectorXd va = V.row(E(e,0));
       Eigen::RowVectorXd vb = V.row(E(e,1));
       if (std::isinf(cost) && !std::isinf(va(0)) && !std::isinf(vb(0)))

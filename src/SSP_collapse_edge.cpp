@@ -42,6 +42,11 @@ FILE * SSP_rej_log_file() { return s_rej_log; }
 FILE * SSP_rej_log_swap(FILE * f) { FILE * old = s_rej_log; s_rej_log = f; return old; }
 #define SEAM_LOG(fmt, ...) fprintf(s_seam_log ? s_seam_log : stderr, fmt, __VA_ARGS__)
 
+// ---- UV rejection counters (file-scope so SSP_reset_uv_rej_caps() can reset them) ----
+static int s_uv_flip_rej_count = 0;
+static int s_angle_rej_count   = 0;
+void SSP_reset_uv_rej_caps() { s_uv_flip_rej_count = 0; s_angle_rej_count = 0; }
+
 // ---- DC-fail snapshot (last sheet whose DC solve failed) ----
 static DCFailSnap s_dc_fail_snap;
 const DCFailSnap & SSP_get_dc_fail_snap()  { return s_dc_fail_snap; }
@@ -863,7 +868,7 @@ bool SSP_collapse_edge(
         }
       }
       if (uv_flip) {
-        static int s_uv_flip_rej = 0;
+        int & s_uv_flip_rej = s_uv_flip_rej_count;
         ++s_uv_flip_rej;
         // Short summary
         fprintf(stderr, "[UV-REJECT] uv_face_flip  sid=%d  e=(%d,%d)  (reject#%d)\n",
@@ -969,7 +974,7 @@ bool SSP_collapse_edge(
         { bad_angle = true; bad_angle_v = v; bad_angle_sum = angle_sum; bad_angle_nfaces = nfaces_v; }
       }
       if (bad_angle) {
-        static int s_angle_rej = 0;
+        int & s_angle_rej = s_angle_rej_count;
         ++s_angle_rej;
         // Short summary
         if (s_angle_rej <= 50) {

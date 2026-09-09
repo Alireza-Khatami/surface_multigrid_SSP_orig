@@ -25,6 +25,7 @@
 
 #include <SSP_collapse_edge.h>
 #include <SSP_rejection_detail.h>
+#include <SSP_exhaustion_full_diagnostic.h>
 #include <single_collapse_data.h>
 #include <partition_into_sheets.h>
 #include <min_heap.h>
@@ -576,6 +577,20 @@ bool do_next_step()
                     fclose(eq_log);
                     fprintf(stderr, "[EXHAUSTION] diagnostic written to %s\n", eq_path.c_str());
                 }
+            }
+
+            // Full collapse diagnostic — runs the complete SSP_collapse_edge pipeline
+            // (including joint_lscm UV validity checks) on a deep copy of the mesh,
+            // capturing UV face-flip and angle-sum rejections.
+            // Struct gate is intentionally skipped so ALL live edges are probed.
+            if (gDecType == 1) {  // qslim only — diagnostic requires qslim quadrics
+                SSP_exhaustion_full_diagnostic(
+                    gV, gF, gE, gEMAP, gEF, gEI,
+                    gC, gEQ,
+                    gQuadrics,
+                    gFaceSheetID,
+                    gOutDir,
+                    gCollapseCount);
             }
 
             return false;

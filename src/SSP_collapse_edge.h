@@ -213,6 +213,9 @@ FILE * SSP_rej_log_swap(FILE * f);  // replace log pointer, return old one (for 
 void SSP_validity_checks_enable(bool enable);
 bool SSP_validity_checks_enabled();
 
+// Reset UV rejection log caps so the exhaustion diagnostic starts fresh.
+void SSP_reset_uv_rej_caps();
+
 bool SSP_collapse_edge(
     const decimate_cost_and_placement_func & cost_and_placement,
     const decimate_pre_collapse_func       & pre_collapse,

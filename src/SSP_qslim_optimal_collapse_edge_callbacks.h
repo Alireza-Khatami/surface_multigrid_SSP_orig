@@ -32,6 +32,8 @@
   // Disabled by default so the initial cost-computation pass in init_ssp is silent.
   // Call SSP_qslim_enable_log(true) after init_ssp to turn on collapse-time logging.
   void SSP_qslim_enable_log(bool enable);
+  // Reset all logging counters/caps — call before the exhaustion diagnostic pass.
+  void SSP_qslim_reset_counters();
 
   void SSP_qslim_optimal_collapse_edge_callbacks(
     Eigen::MatrixXi & E,
