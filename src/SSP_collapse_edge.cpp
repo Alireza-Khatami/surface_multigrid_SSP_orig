@@ -53,7 +53,7 @@ void SSP_reset_uv_rej_caps() { s_uv_flip_rej_count = 0; s_angle_rej_count = 0; }
 // PLY saves are capped at kMaxLscmPly to avoid flooding disk.
 static std::string s_lscm_fail_dir;
 static int s_lscm_ply_count = 0;
-static constexpr int kMaxLscmPly = 500;
+static constexpr int kMaxLscmPly = 60000;
 void SSP_lscm_fail_dir_set(const std::string & dir) {
     s_lscm_fail_dir = dir;
     s_lscm_ply_count = 0;
