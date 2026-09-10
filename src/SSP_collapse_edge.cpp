@@ -120,8 +120,12 @@ bool SSP_collapse_edge(
     if (_sh <= 2) {
       vector<int> Nsv_alec = Nsv;
       vector<int> Ndv_alec = Ndv;
-      if (!igl::edge_collapse_is_valid(Nsv_alec, Ndv_alec))
+      if (!igl::edge_collapse_is_valid(Nsv_alec, Ndv_alec)) {
+        if (FILE* lf = SSP_rej_log_file())
+          fprintf(lf, "[LINK-FAIL] collapse=#%d  e=(%d,%d)  vi=%d  vj=%d\n",
+                  SSP_rej_get_collapse_num(), E(e,0), E(e,1), vi, vj);
         return false;
+      }
     }
     // _sh > 2: seam edge — skip link condition, proceed to per-sheet loop.
   }
@@ -832,6 +836,9 @@ bool SSP_collapse_edge(
         "[LSCM-FAIL] after_collapse=%zu  e=(%d,%d)  sid=%d  vi=%d vj=%d\n",
         decInfo.size(), E(e,0), E(e,1), sid, vi, vj);
 #endif
+      if (FILE* lf = SSP_rej_log_file())
+        fprintf(lf, "[LSCM-FAIL] collapse=#%d  sid=%d  e=(%d,%d)  vi=%d  vj=%d\n",
+                SSP_rej_get_collapse_num(), sid, E(e,0), E(e,1), vi, vj);
       if (dc_viz_si.has_data) {
         // DC was attempted but failed — snapshot this sheet's 3D geometry
         // so the visualizer can render it as a red mesh.
