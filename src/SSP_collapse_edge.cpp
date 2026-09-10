@@ -59,6 +59,84 @@ void SSP_lscm_fail_dir_set(const std::string & dir) {
     s_lscm_ply_count = 0;
 }
 
+void SSP_lscm_write_readme() {
+    if (s_lscm_fail_dir.empty()) return;
+    std::error_code ec;
+    if (!std::filesystem::is_directory(s_lscm_fail_dir, ec)) return;
+
+    const std::string path = s_lscm_fail_dir + "/README.txt";
+    FILE* f = fopen(path.c_str(), "w");
+    if (!f) return;
+
+    fprintf(f,
+"joint_lscm/  --  LSCM failure diagnostic patches\n"
+"==================================================\n"
+"\n"
+"Each .ply file is the pre-collapse 3D one-ring patch that caused\n"
+"joint_lscm() to return false for that edge.\n"
+"\n"
+"File naming:  collapse_<N>_case_<C>.ply\n"
+"\n"
+"  N  --  Collapse number: the most recent SUCCESSFUL collapse in the run\n"
+"         at the moment this failure occurred.\n"
+"         N = -1 means the failure happened before ANY successful collapse\n"
+"         (counter not yet set; these are very early-run failures).\n"
+"\n"
+"  C  --  LSCM case that was attempted when joint_lscm returned false:\n"
+"\n"
+"    case = -1   Failed BEFORE the case switch was reached.\n"
+"                joint_lscm never chose a UV strategy.\n"
+"                Sub-reasons (see [LSCM-DIAG] in the rejection log):\n"
+"                  BAD_3D_QUAL        Post-collapse 3D triangles too degenerate\n"
+"                                     (quality < 0.3). Collapse creates a sliver.\n"
+"                  ISFLAP_OR_EARLY_FAIL  Edge is a geometric flap -- both endpoints\n"
+"                                     are on the boundary but topology prevents a\n"
+"                                     valid collapse (isFlap check in joint_lscm).\n"
+"\n"
+"    case =  0   Both edge endpoints are INTERIOR vertices.\n"
+"                Standard LSCM solve on the local one-ring patch.\n"
+"\n"
+"    case =  1   One endpoint is on the UV/seam BOUNDARY.\n"
+"                Uses a double-cover reflection to handle the boundary.\n"
+"\n"
+"    case =  2   Both endpoints are on the UV/seam BOUNDARY (seam collapse).\n"
+"                Uses a double-cover with the seam as the mirror axis.\n"
+"\n"
+"After-UV-solve failure reasons (case = 0 / 1 / 2)\n"
+"Logged as [LSCM-DIAG] lines in the rejection log:\n"
+"\n"
+"  NAN_UV                      UV solver produced NaN (singular linear system;\n"
+"                              common in case 2 double-cover solves).\n"
+"  PRE_UV_FLIP                 Pre-collapse UV face has negative signed area\n"
+"                              (< 1e-10). The patch was already flipped.\n"
+"  POST_UV_FLIP                Post-collapse UV face has negative signed area.\n"
+"                              The collapse would introduce a UV inversion.\n"
+"  PRE_UV_FOLD(angle_sum>2pi)  Vertex angle sum in pre-collapse UV exceeds 2*pi\n"
+"                              -- there is already a fold-over in the patch.\n"
+"  POST_UV_FOLD(angle_sum>2pi) Same check on the post-collapse UV patch.\n"
+"  PRE_UV_QUAL(<0.01)          Pre-collapse UV triangle quality < 0.01 (sliver).\n"
+"  POST_UV_QUAL(<0.01)         Post-collapse UV triangle quality < 0.01.\n"
+"  UNKNOWN                     None of the above checks triggered.\n"
+"                              Inspect the DC log for this collapse number.\n"
+"\n"
+"Run statistics\n"
+"--------------\n"
+"  PLY files saved : %d  (cap per run: %d)\n"
+"  Failures beyond the cap are still logged in [LSCM-FAIL] / [LSCM-DIAG]\n"
+"  lines in the rejection log -- only the PLY save is skipped.\n"
+"\n"
+"Related output files (same output directory)\n"
+"  collapse_rejections_<mesh>.txt          Per-failure rejection log.\n"
+"  dc_log_<mesh>.txt                       Double-cover solver diagnostics.\n"
+"  exhausted_queue_full_rejections.log     Post-exhaustion diagnostic run.\n"
+"\n"
+"Statistical breakdown:\n"
+"  python analyze_rejection_log.py collapse_rejections_<mesh>.txt\n",
+        s_lscm_ply_count, kMaxLscmPly);
+
+    fclose(f);
+}
+
 // ---- DC-fail snapshot (last sheet whose DC solve failed) ----
 static DCFailSnap s_dc_fail_snap;
 const DCFailSnap & SSP_get_dc_fail_snap()  { return s_dc_fail_snap; }

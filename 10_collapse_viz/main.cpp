@@ -951,6 +951,7 @@ int main(int argc, char * argv[])
     SSP_seam_log_close();
     SSP_rej_log_close();
     dc_log_close();
+    SSP_lscm_write_readme();
 
     // Export the simplified mesh regardless of how many collapses happened.
     save_simplified_mesh(out_dir + "simplified_" + stem + ".obj");

@@ -221,6 +221,10 @@ void SSP_reset_uv_rej_caps();
 // An empty string (default) disables PLY saving.
 void SSP_lscm_fail_dir_set(const std::string & dir);
 
+// Write README.txt into the joint_lscm/ folder explaining the file naming convention.
+// Call once at program end (after all collapses). No-op if the folder was never created.
+void SSP_lscm_write_readme();
+
 bool SSP_collapse_edge(
     const decimate_cost_and_placement_func & cost_and_placement,
     const decimate_pre_collapse_func       & pre_collapse,
