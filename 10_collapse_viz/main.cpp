@@ -766,6 +766,7 @@ int main(int argc, char * argv[])
     // Open rejection log before init_ssp so [QSLIM-INF] entries from the
     // initial cost pass (where degenerate-quadric edges first become ∞) are captured.
     SSP_rej_log_open((out_dir + "collapse_rejections_" + stem + ".txt").c_str());
+    SSP_lscm_fail_dir_set(out_dir + "joint_lscm");
 
     init_ssp(meshPath.c_str(), targetFaces, out_dir);
 

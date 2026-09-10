@@ -216,6 +216,11 @@ bool SSP_validity_checks_enabled();
 // Reset UV rejection log caps so the exhaustion diagnostic starts fresh.
 void SSP_reset_uv_rej_caps();
 
+// Set the directory where per-failure PLY patches are saved on LSCM failure.
+// Call once from main after out_dir is known: SSP_lscm_fail_dir_set(out_dir + "joint_lscm").
+// An empty string (default) disables PLY saving.
+void SSP_lscm_fail_dir_set(const std::string & dir);
+
 bool SSP_collapse_edge(
     const decimate_cost_and_placement_func & cost_and_placement,
     const decimate_pre_collapse_func       & pre_collapse,

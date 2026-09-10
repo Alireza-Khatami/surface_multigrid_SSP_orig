@@ -9,6 +9,7 @@
 #include <sstream>
 #include <cstdio>
 #include <cmath>
+#include <filesystem>
 
 // ---- Seam-edge diagnostic log ----
 // Call SSP_seam_log_open(path) once from main; all [SEAM-*] lines go there.
@@ -46,6 +47,17 @@ FILE * SSP_rej_log_swap(FILE * f) { FILE * old = s_rej_log; s_rej_log = f; retur
 static int s_uv_flip_rej_count = 0;
 static int s_angle_rej_count   = 0;
 void SSP_reset_uv_rej_caps() { s_uv_flip_rej_count = 0; s_angle_rej_count = 0; }
+
+// ---- LSCM failure debug output directory ----
+// Set once from main via SSP_lscm_fail_dir_set(out_dir + "joint_lscm").
+// PLY saves are capped at kMaxLscmPly to avoid flooding disk.
+static std::string s_lscm_fail_dir;
+static int s_lscm_ply_count = 0;
+static constexpr int kMaxLscmPly = 500;
+void SSP_lscm_fail_dir_set(const std::string & dir) {
+    s_lscm_fail_dir = dir;
+    s_lscm_ply_count = 0;
+}
 
 // ---- DC-fail snapshot (last sheet whose DC solve failed) ----
 static DCFailSnap s_dc_fail_snap;
@@ -836,9 +848,134 @@ bool SSP_collapse_edge(
         "[LSCM-FAIL] after_collapse=%zu  e=(%d,%d)  sid=%d  vi=%d vj=%d\n",
         decInfo.size(), E(e,0), E(e,1), sid, vi, vj);
 #endif
+
+      // 1. Log with LSCM case number (-1 if joint_lscm failed before case selection)
+      const int lscm_case_num = lscm_case_out.has_value() ? lscm_case_out.value() : -1;
       if (FILE* lf = SSP_rej_log_file())
-        fprintf(lf, "[LSCM-FAIL] collapse=#%d  sid=%d  e=(%d,%d)  vi=%d  vj=%d\n",
-                SSP_rej_get_collapse_num(), sid, E(e,0), E(e,1), vi, vj);
+        fprintf(lf, "[LSCM-FAIL] collapse=#%d  sid=%d  e=(%d,%d)  vi=%d  vj=%d  case=%d\n",
+                SSP_rej_get_collapse_num(), sid, E(e,0), E(e,1), vi, vj, lscm_case_num);
+
+      // 2. Save pre-collapse one-ring as ASCII PLY (capped at kMaxLscmPly)
+      if (!s_lscm_fail_dir.empty() && s_lscm_ply_count < kMaxLscmPly) {
+        std::error_code fs_ec;
+        std::filesystem::create_directories(s_lscm_fail_dir, fs_ec);
+        if (!fs_ec) {
+          const std::string ply_path =
+              s_lscm_fail_dir + "/collapse_" + std::to_string(SSP_rej_get_collapse_num()) +
+              "_case_" + std::to_string(lscm_case_num) + ".ply";
+          if (FILE* pf = fopen(ply_path.c_str(), "w")) {
+            fprintf(pf, "ply\nformat ascii 1.0\n");
+            fprintf(pf, "element vertex %d\n", (int)V_pre_si.rows());
+            fprintf(pf, "property float x\nproperty float y\nproperty float z\n");
+            fprintf(pf, "element face %d\n", (int)FUV_pre_si.rows());
+            fprintf(pf, "property list uchar int vertex_indices\n");
+            fprintf(pf, "end_header\n");
+            for (int pvi = 0; pvi < (int)V_pre_si.rows(); ++pvi)
+              fprintf(pf, "%.8f %.8f %.8f\n",
+                      V_pre_si(pvi,0), V_pre_si(pvi,1), V_pre_si(pvi,2));
+            for (int pfi = 0; pfi < (int)FUV_pre_si.rows(); ++pfi)
+              fprintf(pf, "3 %d %d %d\n",
+                      FUV_pre_si(pfi,0), FUV_pre_si(pfi,1), FUV_pre_si(pfi,2));
+            fclose(pf);
+            ++s_lscm_ply_count;
+          }
+        }
+      }
+
+      // 3. Diagnostic: classify why joint_lscm returned false (read-only — no lscm logic touched)
+      if (FILE* lf = SSP_rej_log_file()) {
+        const bool uv_empty = (UV_pre_si.rows() == 0);
+        if (uv_empty) {
+          // joint_lscm failed before the UV solve (isFlap check or bad post-collapse 3D quality)
+          bool bad_3d = false;
+          for (int pfi = 0; pfi < (int)FUV_post_si.rows() && !bad_3d; ++pfi) {
+            const auto a = V_post_si.row(FUV_post_si(pfi,0));
+            const auto b = V_post_si.row(FUV_post_si(pfi,1));
+            const auto c = V_post_si.row(FUV_post_si(pfi,2));
+            const Eigen::RowVector3d e1d = b - a, e2d = c - a, e3d = c - b;
+            const double area2 = e1d.cross(e2d).norm();
+            const double denom = e1d.squaredNorm() + e2d.squaredNorm() + e3d.squaredNorm();
+            const double q = (denom > 0.0) ? (2.0 * std::sqrt(3.0) * area2 / denom) : 0.0;
+            if (q < 0.3 || std::isnan(q)) bad_3d = true;
+          }
+          fprintf(lf, "[LSCM-DIAG] collapse=#%d  case=%d  uv_empty=1  reason=%s\n",
+                  SSP_rej_get_collapse_num(), lscm_case_num,
+                  bad_3d ? "BAD_3D_QUAL(post_tri_q<0.3)" : "ISFLAP_OR_EARLY_FAIL");
+        } else {
+          // UV was computed — diagnose post-solve failure
+          const bool nan_uv = UV_pre_si.array().isNaN().any() || UV_post_si.array().isNaN().any();
+
+          // UV face flip: signed area < 1e-10 (matching joint_lscm threshold in check_valid_UV_lscm)
+          bool pre_flip = false, post_flip = false;
+          if (!nan_uv) {
+            for (int pfi = 0; pfi < (int)FUV_pre_si.rows() && !pre_flip; ++pfi) {
+              const int ua = FUV_pre_si(pfi,0), ub = FUV_pre_si(pfi,1), uc = FUV_pre_si(pfi,2);
+              const double sa = (UV_pre_si(ub,0)-UV_pre_si(ua,0))*(UV_pre_si(uc,1)-UV_pre_si(ua,1))
+                              - (UV_pre_si(ub,1)-UV_pre_si(ua,1))*(UV_pre_si(uc,0)-UV_pre_si(ua,0));
+              if (sa < 1e-10) pre_flip = true;
+            }
+            for (int pfi = 0; pfi < (int)FUV_post_si.rows() && !post_flip; ++pfi) {
+              const int ua = FUV_post_si(pfi,0), ub = FUV_post_si(pfi,1), uc = FUV_post_si(pfi,2);
+              const double sa = (UV_post_si(ub,0)-UV_post_si(ua,0))*(UV_post_si(uc,1)-UV_post_si(ua,1))
+                              - (UV_post_si(ub,1)-UV_post_si(ua,1))*(UV_post_si(uc,0)-UV_post_si(ua,0));
+              if (sa < 1e-10) post_flip = true;
+            }
+          }
+
+          // UV fold-over: per-vertex angle sum > 2π+1e-10 (matching joint_lscm threshold)
+          auto check_uv_fold = [](const Eigen::MatrixXd& UV, const Eigen::MatrixXi& FUV) -> bool {
+            std::unordered_map<int,double> asum;
+            for (int pfi = 0; pfi < (int)FUV.rows(); ++pfi) {
+              for (int c = 0; c < 3; ++c) {
+                const int v0 = FUV(pfi, c), v1 = FUV(pfi,(c+1)%3), v2 = FUV(pfi,(c+2)%3);
+                const Eigen::RowVector2d ed1 = (UV.row(v1)-UV.row(v0)).normalized();
+                const Eigen::RowVector2d ed2 = (UV.row(v2)-UV.row(v0)).normalized();
+                asum[v0] += std::acos(std::max(-1.0, std::min(1.0, (double)ed1.dot(ed2))));
+              }
+            }
+            for (const auto& kv : asum)
+              if (kv.second > 2.0*M_PI + 1e-10) return true;
+            return false;
+          };
+
+          // UV triangle quality < 0.01 (matching joint_lscm threshold)
+          auto check_uv_qual = [](const Eigen::MatrixXd& UV, const Eigen::MatrixXi& FUV) -> bool {
+            for (int pfi = 0; pfi < (int)FUV.rows(); ++pfi) {
+              const Eigen::RowVector2d a = UV.row(FUV(pfi,0));
+              const Eigen::RowVector2d b = UV.row(FUV(pfi,1));
+              const Eigen::RowVector2d c = UV.row(FUV(pfi,2));
+              const Eigen::RowVector2d ed1=b-a, ed2=c-a, ed3=c-b;
+              const double area2 = std::abs(ed1(0)*ed2(1) - ed1(1)*ed2(0));
+              const double denom = ed1.squaredNorm()+ed2.squaredNorm()+ed3.squaredNorm();
+              const double q = (denom > 0.0) ? (2.0*std::sqrt(3.0)*area2/denom) : 0.0;
+              if (q < 0.01 || std::isnan(q)) return true;
+            }
+            return false;
+          };
+
+          bool pre_fold = false, post_fold = false, pre_qual = false, post_qual = false;
+          if (!nan_uv && !pre_flip && !post_flip) {
+            pre_fold  = check_uv_fold(UV_pre_si,  FUV_pre_si);
+            post_fold = check_uv_fold(UV_post_si, FUV_post_si);
+          }
+          if (!nan_uv && !pre_flip && !post_flip && !pre_fold && !post_fold) {
+            pre_qual  = check_uv_qual(UV_pre_si,  FUV_pre_si);
+            post_qual = check_uv_qual(UV_post_si, FUV_post_si);
+          }
+
+          const char* reason = nan_uv    ? "NAN_UV"
+                             : pre_flip  ? "PRE_UV_FLIP"
+                             : post_flip ? "POST_UV_FLIP"
+                             : pre_fold  ? "PRE_UV_FOLD(angle_sum>2pi)"
+                             : post_fold ? "POST_UV_FOLD(angle_sum>2pi)"
+                             : pre_qual  ? "PRE_UV_QUAL(<0.01)"
+                             : post_qual ? "POST_UV_QUAL(<0.01)"
+                             :             "UNKNOWN";
+          fprintf(lf, "[LSCM-DIAG] collapse=#%d  case=%d  uv_empty=0  reason=%s\n",
+                  SSP_rej_get_collapse_num(), lscm_case_num, reason);
+        }
+      }
+
       if (dc_viz_si.has_data) {
         // DC was attempted but failed — snapshot this sheet's 3D geometry
         // so the visualizer can render it as a red mesh.
