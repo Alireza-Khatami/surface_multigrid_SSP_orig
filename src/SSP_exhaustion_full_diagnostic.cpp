@@ -50,15 +50,19 @@ void SSP_exhaustion_full_diagnostic(
         return;
     }
 
-    fprintf(stderr, "[EXHFULL] starting full-collapse diagnostic on mesh copy -> %s\n",
-            log_path.c_str());
+    const bool was_validity = SSP_validity_checks_enabled();
+    fprintf(stderr, "[EXHFULL] starting full-collapse diagnostic on mesh copy"
+            "  (main_validity_checks=%s) -> %s\n",
+            was_validity ? "ON" : "OFF", log_path.c_str());
     fprintf(log,
         "# Exhaustion full-collapse diagnostic\n"
         "# Runs the complete SSP_collapse_edge pipeline (including joint_lscm)\n"
-        "# on a DEEP COPY of the mesh — original is unchanged.\n"
+        "# on a DEEP COPY of the mesh -- original is unchanged.\n"
         "# Struct-gate (--mat_struct_check) is NOT applied here; all live edges are tested.\n"
-        "# collapses_in_main_run=%d\n",
-        collapse_count);
+        "# Validity checks are forced ON for this pass (regardless of --validity-checks flag)\n"
+        "#   so that UV and Euclidean rejection reasons are always captured.\n"
+        "# main_run_validity_checks=%s  collapses_in_main_run=%d\n",
+        was_validity ? "ON" : "OFF", collapse_count);
 
     // ── 1. Deep copy mesh state ───────────────────────────────────────────────
     Eigen::MatrixXd              V2    = V_orig;
@@ -103,14 +107,21 @@ void SSP_exhaustion_full_diagnostic(
     }
     EQ2 = Eigen::VectorXi::Zero(E2.rows());
 
-    // ── 5. Reset rejection caps so diagnostic output isn't silenced ──────────
+    // ── 5. Force validity checks ON for this pass ────────────────────────────
+    // The main run may have been launched without --validity-checks, which would
+    // make the UV and Euclidean gates globally disabled.  The diagnostic always
+    // needs them enabled so joint_lscm failures produce [UV-REJECT] log entries.
+    // was_validity was captured above (before the log header) for the restore.
+    SSP_validity_checks_enable(true);
+
+    // ── 6. Reset rejection caps so diagnostic output isn't silenced ──────────
     SSP_reset_uv_rej_caps();
     SSP_qslim_reset_counters();
 
-    // ── 6. Redirect SSP_rej_log to the diagnostic log file ───────────────────
+    // ── 7. Redirect SSP_rej_log to the diagnostic log file ───────────────────
     FILE* orig_log = SSP_rej_log_swap(log);
 
-    // ── 7. Run full collapse loop on the copy ─────────────────────────────────
+    // ── 8. Run full collapse loop on the copy ─────────────────────────────────
     std::vector<single_collapse_data> decInfo2;
     std::vector<std::vector<int>>     decIM2(F2.rows());
 
@@ -156,7 +167,8 @@ void SSP_exhaustion_full_diagnostic(
         "[EXHFULL] done: attempted=%d  collapsed=%d  rejected=%d  inf_remaining=%d  -> %s\n",
         n_attempted, n_collapsed, n_rejected, n_inf_top, log_path.c_str());
 
-    // ── 8. Restore original rej log ───────────────────────────────────────────
+    // ── 9. Restore original state ─────────────────────────────────────────────
+    SSP_validity_checks_enable(was_validity);
     SSP_rej_log_swap(orig_log);
     fclose(log);
 }
