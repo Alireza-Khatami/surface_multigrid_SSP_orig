@@ -1,5 +1,6 @@
 #include "simp_viz_tracker.h"
 #include "../face_dead.h"
+#include "../coarse_mesh_compaction.h"
 
 #ifdef C2F_VIZ_DIAGNOSTIC
 #include <polyscope/polyscope.h>
@@ -11,6 +12,7 @@
 #include <Eigen/Dense>
 
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <array>
@@ -241,25 +243,18 @@ void simp_viz_tracker_on_collapse(int s, int d)
 
 void simp_viz_tracker_write_json(const std::string& path)
 {
-    // Collect live vertices (appear in live, finite faces) in a stable order
-    std::vector<int> live_verts;
-    {
-        std::unordered_set<int> seen;
-        for (int f = 0; f < gF.rows(); ++f) {
-            if (is_face_dead(gF, f)) continue;
-            for (int c = 0; c < 3; ++c) {
-                int v = gF(f, c);
-                if (std::isinf(gV(v, 0))) continue;
-                if (seen.insert(v).second) live_verts.push_back(v);
-            }
-        }
-    }
+    // Live vertices in the SAME order as simplified_*.obj's v-lines and the
+    // .c2f bundle's coarseV, so vertices[i] here is the same physical point
+    // as coarseV[i] / the i-th OBJ vertex for i < NC.
+    CoarseMeshCompaction cmc = build_compact_coarse_mesh(gV, gF);
+    const std::vector<int> live_verts(cmc.newToOld.data(), cmc.newToOld.data() + cmc.newToOld.size());
 
     std::ofstream out(path);
     if (!out) {
         fprintf(stderr, "[simp_viz] cannot open for writing: %s\n", path.c_str());
         return;
     }
+    out << std::setprecision(17);
 
     // ---- legends ----
     out << "{\n  \"legends\": {\n    \"topo_types\": [\n";

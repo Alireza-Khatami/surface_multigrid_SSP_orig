@@ -1,5 +1,6 @@
 #include "orient_faces_consistently.h"
 #include "stale_chains.h"
+#include "coarse_mesh_compaction.h"
 
 #include <igl/read_triangle_mesh.h>
 #include <igl/remove_unreferenced.h>
@@ -330,24 +331,17 @@ static void print_seam_edge_costs(const std::string & out_path = "seam_edge_cost
 // path = full path including ".obj" suffix; PLY is written alongside at the same stem.
 static void save_simplified_mesh(const std::string & path)
 {
-    // Collect live faces: not dead, not incident to the infinity cap vertex.
-    std::vector<std::array<int,3>> face_rows;
-    for (int f = 0; f < gF.rows(); f++) {
-        if (is_face_dead(gF, f)) continue;
-        int v0 = gF(f,0), v1 = gF(f,1), v2 = gF(f,2);
-        if (std::isinf(gV(v0,0)) || std::isinf(gV(v1,0)) || std::isinf(gV(v2,0))) continue;
-        face_rows.push_back({v0, v1, v2});
-    }
-    MatrixXi Flive((int)face_rows.size(), 3);
-    for (int i = 0; i < (int)face_rows.size(); i++)
-        Flive.row(i) << face_rows[i][0], face_rows[i][1], face_rows[i][2];
-
-    // Compact, removing unreferenced vertices.
-    // I[new] = old,  J[old] = new (-1 if dropped).
-    // NOTE: stale chain vertices are naked (not in any triangle face), so
-    // remove_unreferenced drops them and J(vid) == -1 for all of them.
-    MatrixXd Vbase; MatrixXi Fout; VectorXi I, J;
-    igl::remove_unreferenced(gV.leftCols(3), Flive, Vbase, Fout, I, J);
+    // Shared coarse-mesh compaction — the .c2f bundle (coarse_fine_save_bundle)
+    // and *_simp_visualize_info.json (simp_viz_tracker_write_json) build their
+    // vertex numbering from this exact same call, so vertex index i means the
+    // same physical point in all three files for i < NC (Vbase.rows()).
+    // NOTE: stale chain vertices are naked (not in any triangle face), so this
+    // compaction drops them and oldToNew(vid) == -1 for all of them; they're
+    // appended below.
+    CoarseMeshCompaction cmc = build_compact_coarse_mesh(gV, gF);
+    MatrixXd Vbase = cmc.Vbase;
+    MatrixXi Fout  = cmc.Fout;
+    VectorXi J     = cmc.oldToNew; // J[old] = new (-1 if dropped)
 
     // Extend Vbase with the stale chain vertices that were dropped.
     // Build old→new supplemental map for them.

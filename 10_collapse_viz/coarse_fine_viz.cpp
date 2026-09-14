@@ -12,6 +12,7 @@
 #include <igl/collapse_edge.h>       // IGL_COLLAPSE_EDGE_NULL
 #include <igl/writeOBJ.h>
 #include "face_dead.h"
+#include "coarse_mesh_compaction.h"
 
 #include <query_coarse_to_fine.h>
 #include <single_collapse_data.h>
@@ -602,31 +603,14 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
         hasCorr[vi] = true;
     }
 
-    // Build compact coarse mesh (same logic as load_and_show).
-    // Also track original (global) face indices for the SSP query data.
-    MatrixXi tmpF(nFO, 3);
-    std::vector<int> fullFOrigIdx;   // compact face idx → global face idx
-    fullFOrigIdx.reserve(512);
-    int nLive = 0;
-    for (int f = 0; f < nFO; f++) {
-        if (is_face_dead(gF, f)) continue;
-        bool has_inf = false;
-        for (int c = 0; c < 3; c++)
-            if (std::isinf(gV(gF(f, c), 0))) { has_inf = true; break; }
-        if (has_inf) continue;
-        tmpF.row(nLive++) = gF.row(f);
-        fullFOrigIdx.push_back(f);
-    }
-    MatrixXi fullF = tmpF.topRows(nLive);
-
-    std::vector<int> oldToNew(nV, -1);
-    std::vector<int> newToOld;
-    newToOld.reserve(512);
-    for (int f = 0; f < fullF.rows(); f++)
-        for (int c = 0; c < 3; c++) {
-            int v = fullF(f, c);
-            if (oldToNew[v] < 0) { oldToNew[v] = (int)newToOld.size(); newToOld.push_back(v); }
-        }
+    // Build compact coarse mesh via the shared helper — this is the SAME
+    // vertex/face compaction save_simplified_mesh() and
+    // simp_viz_tracker_write_json() use, so coarseV[i] agrees with
+    // simplified_*.obj's i-th vertex and the JSON's vertices[i] for i < NC.
+    CoarseMeshCompaction cmc = build_compact_coarse_mesh(gV, gF);
+    const MatrixXi & fullF = cmc.Fout;               // FC x 3, already in compact-index space (matches coarseV)
+    const std::vector<int> newToOld(cmc.newToOld.data(), cmc.newToOld.data() + cmc.newToOld.size());
+    const std::vector<int> fullFOrigIdx(cmc.faceOrigIdx.data(), cmc.faceOrigIdx.data() + cmc.faceOrigIdx.size());
 
     const uint32_t NC = (uint32_t)newToOld.size();
     const uint32_t FC = (uint32_t)fullF.rows();
@@ -648,9 +632,11 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
         out.write((const char*)xyz, 24);
     }
     for (int f = 0; f < (int)FC; f++) {
-        uint32_t tri[3] = { (uint32_t)oldToNew[fullF(f,0)],
-                            (uint32_t)oldToNew[fullF(f,1)],
-                            (uint32_t)oldToNew[fullF(f,2)] };
+        // fullF (= cmc.Fout) is igl::remove_unreferenced's NF output, already
+        // renumbered to compact indices matching coarseV — no oldToNew lookup needed.
+        uint32_t tri[3] = { (uint32_t)fullF(f,0),
+                            (uint32_t)fullF(f,1),
+                            (uint32_t)fullF(f,2) };
         out.write((const char*)tri, 12);
     }
     for (uint32_t i = 0; i < NF; i++) {
@@ -834,9 +820,10 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
         MatrixXd Vc(NC, 3);
         for (uint32_t i = 0; i < NC; i++)
             Vc.row(i) << gV(newToOld[i],0), gV(newToOld[i],1), gV(newToOld[i],2);
+        // fullF is already in compact-index space (see coarseF write above) — use directly.
         MatrixXi Fc(FC, 3);
         for (int f = 0; f < (int)FC; f++)
-            Fc.row(f) << oldToNew[fullF(f,0)], oldToNew[fullF(f,1)], oldToNew[fullF(f,2)];
+            Fc.row(f) << fullF(f,0), fullF(f,1), fullF(f,2);
 
         if (!igl::writeOBJ(objPath, Vc, Fc))
             std::cerr << "[bundle] writeOBJ failed: " << objPath << "\n";
