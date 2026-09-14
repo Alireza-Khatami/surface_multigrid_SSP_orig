@@ -1,6 +1,7 @@
 #include "orient_faces_consistently.h"
 #include "stale_chains.h"
 #include "coarse_mesh_compaction.h"
+#include "coarse_mesh_sanity_check.h"
 
 #include <igl/read_triangle_mesh.h>
 #include <igl/remove_unreferenced.h>
@@ -964,11 +965,13 @@ int main(int argc, char * argv[])
     SSP_lscm_write_readme();
 
     // Export the simplified mesh regardless of how many collapses happened.
-    save_simplified_mesh(out_dir + "simplified_" + stem + ".obj");
+    const std::string simplified_obj_path = out_dir + "simplified_" + stem + ".obj";
+    save_simplified_mesh(simplified_obj_path);
 
     // Auto-save on exit regardless of C2F_VIZ_DIAGNOSTIC and regardless of
     // whether decimation reached the target face count.
-    if (!gDecInfo.empty()) {
+    const bool wrote_bundle = !gDecInfo.empty();
+    if (wrote_bundle) {
         coarse_fine_compute_and_save(c2f_path);
         coarse_fine_save_bundle(c2f_path, bundle_path);
     }
@@ -976,7 +979,20 @@ int main(int argc, char * argv[])
     sample_tracker_save(samples_fine_path, samples_coarse_path, samples_vertices_path);
     sample_tracker_export_deformed_mesh(out_dir + "deformed_fine_mesh_" + stem + ".obj");
 
-    simp_viz_tracker_write_json(out_dir + stem + "_simp_visualize_info.json");
+    const std::string simp_viz_json_path = out_dir + stem + "_simp_visualize_info.json";
+    simp_viz_tracker_write_json(simp_viz_json_path);
+
+    // Cross-check that simplified_*.obj, the .c2f bundle, *_simp_visualize_info.json,
+    // and the coarse<->fine correspondence file all agree on the coarse-mesh vertex
+    // ordering. This is the safety net that would have caught the index-space bugs
+    // fixed in this file immediately, instead of them surfacing downstream in the
+    // Python training pipeline as scrambled chain data.
+    if (wrote_bundle) {
+        if (!verify_coarse_mesh_outputs(simplified_obj_path, bundle_path, simp_viz_json_path, c2f_path)) {
+            fprintf(stderr, "[SANITY] coarse-mesh output verification FAILED — see [SANITY] MISMATCH lines above.\n");
+            return 1;
+        }
+    }
 
     return 0;
 }

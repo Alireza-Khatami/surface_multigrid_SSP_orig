@@ -21,10 +21,8 @@ CoarseMeshCompaction build_compact_coarse_mesh(const MatrixXd & gV, const Matrix
     face_rows.reserve(gF.rows());
     face_orig_idx.reserve(gF.rows());
     for (int f = 0; f < gF.rows(); f++) {
-        if (is_face_dead(gF, f)) continue;
-        int v0 = gF(f,0), v1 = gF(f,1), v2 = gF(f,2);
-        if (std::isinf(gV(v0,0)) || std::isinf(gV(v1,0)) || std::isinf(gV(v2,0))) continue;
-        face_rows.push_back({v0, v1, v2});
+        if (!is_face_live(gF, gV, f)) continue;
+        face_rows.push_back({gF(f,0), gF(f,1), gF(f,2)});
         face_orig_idx.push_back(f);
     }
     MatrixXi Flive((int)face_rows.size(), 3);

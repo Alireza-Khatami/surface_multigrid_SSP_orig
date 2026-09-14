@@ -445,8 +445,7 @@ void coarse_fine_compute_and_save(const std::string & path)
         if (std::isinf(gV(v, 0))) continue;
         for (int f : gVF[v]) {
             if (f >= nFO) continue;
-            if (is_face_dead(gF, f)) continue;
-            if (std::isinf(gV(gF(f, 0), 0))) continue;
+            if (!is_face_live(gF, gV, f)) continue;
             coarseVerts.push_back(v);
             break;
         }
@@ -466,8 +465,7 @@ void coarse_fine_compute_and_save(const std::string & path)
         int fi = -1;
         for (int f : gVF[vi]) {
             if (f >= nFO) continue;
-            if (is_face_dead(gF, f)) continue;
-            if (std::isinf(gV(gF(f, 0), 0))) continue;
+            if (!is_face_live(gF, gV, f)) continue;
             fi = f; break;
         }
         if (fi < 0) {

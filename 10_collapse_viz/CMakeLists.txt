@@ -29,6 +29,7 @@ set(APP_SRCS
     stale_chains.cpp
     load_matstruct.cpp
     coarse_mesh_compaction.cpp
+    coarse_mesh_sanity_check.cpp
     coarse_fine_viz.cpp
     face_sample_tracker.cpp
     orient_faces_consistently.cpp
