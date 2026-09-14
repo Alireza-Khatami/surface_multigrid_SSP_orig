@@ -33,6 +33,7 @@ set(APP_SRCS
     orient_faces_consistently.cpp
     meshlab_qslim_callbacks.cpp
     meshlab_qslim_config.cpp
+    collapse_structure_tracker/simp_viz_tracker.cpp
 )
 
 # SSP library sources — glob is fine here; all files belong to the shared library

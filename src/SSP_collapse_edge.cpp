@@ -169,6 +169,13 @@ static BDSnap s_bd_snap;
 const BDSnap & SSP_get_bd_snap()  { return s_bd_snap; }
 void           SSP_clear_bd_snap() { s_bd_snap = BDSnap{}; }
 
+// Last collapse survivor (smaller index) and absorbed (larger index) —
+// set in the outer overload before kill_edge(e) destroys gE(e,*).
+static int s_last_sv = -1;
+static int s_last_dv = -1;
+int SSP_last_collapse_sv() { return s_last_sv; }
+int SSP_last_collapse_dv() { return s_last_dv; }
+
 // ============================================================
 // Inner overload
 // Performs per-sheet UV computation and VF-based topology update.
@@ -967,18 +974,74 @@ bool SSP_collapse_edge(
               "_vi_" + std::to_string(vi) + "_vj_" + std::to_string(vj) +
               "_case_" + std::to_string(lscm_case_num) + ".ply";
           if (FILE* pf = fopen(ply_path.c_str(), "w")) {
+            // ── Cylinder between vi and vj (red) ──────────────────────
+            const int N_cyl = 10;
+            const Eigen::RowVector3d vi_pos = V.row(vi);
+            const Eigen::RowVector3d vj_pos = V.row(vj);
+            const Eigen::RowVector3d ax_vec = vj_pos - vi_pos;
+            const double edge_len = ax_vec.norm();
+            const double cyl_r = std::max(edge_len * 0.07, 1e-8);
+            const Eigen::RowVector3d ax =
+                (edge_len > 1e-10) ? (ax_vec / edge_len)
+                                   : Eigen::RowVector3d(0, 0, 1);
+            const Eigen::RowVector3d tmp =
+                (std::abs(ax(1)) < 0.9) ? Eigen::RowVector3d(0, 1, 0)
+                                        : Eigen::RowVector3d(1, 0, 0);
+            const Eigen::RowVector3d cu = ax.cross(tmp).normalized();
+            const Eigen::RowVector3d cv = ax.cross(cu).normalized();
+
+            // ring0 at vi, ring1 at vj
+            std::vector<Eigen::RowVector3d> cyl_v;
+            cyl_v.reserve(2 * N_cyl);
+            for (int ci = 0; ci < N_cyl; ++ci) {
+              const double a = 2.0 * M_PI * ci / N_cyl;
+              const Eigen::RowVector3d off = cyl_r*(std::cos(a)*cu + std::sin(a)*cv);
+              cyl_v.push_back(vi_pos + off);
+            }
+            for (int ci = 0; ci < N_cyl; ++ci) {
+              const double a = 2.0 * M_PI * ci / N_cyl;
+              const Eigen::RowVector3d off = cyl_r*(std::cos(a)*cu + std::sin(a)*cv);
+              cyl_v.push_back(vj_pos + off);
+            }
+            // 2 triangles per segment (side quads)
+            std::vector<std::array<int,3>> cyl_f;
+            cyl_f.reserve(2 * N_cyl);
+            const int base = (int)V_pre_si.rows();
+            for (int ci = 0; ci < N_cyl; ++ci) {
+              const int a0 = base + ci,            a1 = base + (ci+1)%N_cyl;
+              const int b0 = base + N_cyl + ci,    b1 = base + N_cyl + (ci+1)%N_cyl;
+              cyl_f.push_back({a0, b0, a1});
+              cyl_f.push_back({a1, b0, b1});
+            }
+
+            // ── Write PLY with per-vertex RGB ─────────────────────────
+            const int tot_v = (int)V_pre_si.rows() + (int)cyl_v.size();
+            const int tot_f = (int)FUV_pre_si.rows() + (int)cyl_f.size();
             fprintf(pf, "ply\nformat ascii 1.0\n");
-            fprintf(pf, "element vertex %d\n", (int)V_pre_si.rows());
+            fprintf(pf, "element vertex %d\n", tot_v);
             fprintf(pf, "property float x\nproperty float y\nproperty float z\n");
-            fprintf(pf, "element face %d\n", (int)FUV_pre_si.rows());
+            fprintf(pf, "property uchar red\nproperty uchar green\nproperty uchar blue\n");
+            fprintf(pf, "element face %d\n", tot_f);
             fprintf(pf, "property list uchar int vertex_indices\n");
             fprintf(pf, "end_header\n");
+            // patch vertices — light gray
             for (int pvi = 0; pvi < (int)V_pre_si.rows(); ++pvi)
-              fprintf(pf, "%.8f %.8f %.8f\n",
+              fprintf(pf, "%.8f %.8f %.8f 180 180 180\n",
                       V_pre_si(pvi,0), V_pre_si(pvi,1), V_pre_si(pvi,2));
+            // cylinder vertices — red (ring0 = bright red, ring1 = dark red)
+            for (int ci = 0; ci < N_cyl; ++ci)
+              fprintf(pf, "%.8f %.8f %.8f 255 60 60\n",
+                      cyl_v[ci](0), cyl_v[ci](1), cyl_v[ci](2));
+            for (int ci = 0; ci < N_cyl; ++ci)
+              fprintf(pf, "%.8f %.8f %.8f 180 20 20\n",
+                      cyl_v[N_cyl+ci](0), cyl_v[N_cyl+ci](1), cyl_v[N_cyl+ci](2));
+            // patch faces
             for (int pfi = 0; pfi < (int)FUV_pre_si.rows(); ++pfi)
               fprintf(pf, "3 %d %d %d\n",
                       FUV_pre_si(pfi,0), FUV_pre_si(pfi,1), FUV_pre_si(pfi,2));
+            // cylinder faces
+            for (const auto& cf : cyl_f)
+              fprintf(pf, "3 %d %d %d\n", cf[0], cf[1], cf[2]);
             fclose(pf);
             ++s_lscm_ply_count;
           }
@@ -1635,6 +1698,8 @@ bool SSP_collapse_edge(
   // Capture s/d before inner overload calls kill_edge(e)
   const int sv = (E(e,0) < E(e,1)) ? E(e,0) : E(e,1);
   const int dv = (E(e,0) < E(e,1)) ? E(e,1) : E(e,0);
+  s_last_sv = sv;
+  s_last_dv = dv;
 
   // Collect one-rings via VF (real + infinity faces; order is unimportant here)
   vector<int> Nsf, Nsv_verts;   // faces and neighbour vertices of E(e,1)

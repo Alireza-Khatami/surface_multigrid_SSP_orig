@@ -57,6 +57,7 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
 
 #include "face_sample_tracker.h"
 #include "load_matstruct.h"
+#include "collapse_structure_tracker/simp_viz_tracker.h"
 
 using namespace Eigen;
 
@@ -607,12 +608,15 @@ bool do_next_step()
             gCollapseCount++;
             SSP_rej_set_collapse_num(gCollapseCount);
             if (gLastCollapseWasSeam) gSeamCollapseCount++;
+            // SSP_collapse_edge kills gE(e,*) via kill_edge(e), so read sv/dv
+            // from the accessors that captured them before the kill.
+            simp_viz_tracker_on_collapse(SSP_last_collapse_sv(), SSP_last_collapse_dv());
             // s = survivor (lower vertex index, kept + repositioned)
             // d = absorbed  (higher index, all face refs remapped to s, then gone)
             // f1, f2 = the two flap faces NULLed out by this collapse
             // gV.row(s) is already at the new placement position at this point
-            int s = std::min(gE(e,0), gE(e,1));
-            int d = std::max(gE(e,0), gE(e,1));
+            int s = SSP_last_collapse_sv();
+            int d = SSP_last_collapse_dv();
             if (gStructGateLog) {
                 const int nS = (int)gVertexStructIDs.size();
                 auto sids = [&](int v) -> std::string {
@@ -787,6 +791,9 @@ int main(int argc, char * argv[])
             }
         }
     }
+    // Initialize simplification visualization tracker (topo types, struct IDs, ancestors).
+    // Works with or without a .ma_struct file (topo types will be -1 if none provided).
+    simp_viz_tracker_init(matstructPath, (int)gVO.rows());
 
     // Helper: format a std::set<int> as "{1,2,3}" for logging.
     auto struct_ids_str = [](const std::set<int>& s) -> std::string {
@@ -830,15 +837,24 @@ int main(int argc, char * argv[])
             const int u = E(e,0), v = E(e,1);
             const int nStruct = (int)gVertexStructIDs.size();
             if (u >= nStruct || v >= nStruct) return true;  // infinity cap vertex — always allow
-            bool ok = (gVertexStructIDs[u] == gVertexStructIDs[v]);
+            // Block any collapse where either endpoint is MS_Unknown (empty struct ID set).
+            // Two unknown vertices both have {} so {} == {} would be true without this guard.
+            const bool u_unknown = gVertexStructIDs[u].empty();
+            const bool v_unknown = gVertexStructIDs[v].empty();
+            const bool ok = !u_unknown && !v_unknown &&
+                            (gVertexStructIDs[u] == gVertexStructIDs[v]);
             if (gStructGateLog) {
+                const char* reason = u_unknown ? "BLOCK-UNKNOWN-U"
+                                   : v_unknown ? "BLOCK-UNKNOWN-V"
+                                   : ok        ? "PASS"
+                                               : "BLOCK";
                 fprintf(gStructGateLog,
                     "[GATE] collapse=#%d  e=%d  u=%d ids=%s  v=%d ids=%s  %s\n",
                     gCollapseCount + 1, e, u,
                     struct_ids_str(gVertexStructIDs[u]).c_str(),
                     v,
                     struct_ids_str(gVertexStructIDs[v]).c_str(),
-                    ok ? "PASS" : "BLOCK");
+                    reason);
                 fflush(gStructGateLog);
             }
             return ok;
@@ -965,6 +981,8 @@ int main(int argc, char * argv[])
 
     sample_tracker_save(samples_fine_path, samples_coarse_path, samples_vertices_path);
     sample_tracker_export_deformed_mesh(out_dir + "deformed_fine_mesh_" + stem + ".obj");
+
+    simp_viz_tracker_write_json(out_dir + stem + "_simp_visualize_info.json");
 
     return 0;
 }

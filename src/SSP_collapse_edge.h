@@ -199,6 +199,12 @@ bool SSP_collapse_edge(
 //     Eigen::VectorXi & EQ,
 //     Eigen::MatrixXd & C);
 
+// Returns the survivor (smaller) and absorbed (larger) global vertex indices
+// of the most recently successful SSP_collapse_edge call.
+// Valid immediately after SSP_collapse_edge returns true.
+int SSP_last_collapse_sv();
+int SSP_last_collapse_dv();
+
 void SSP_seam_log_open(const char * path);
 void SSP_seam_log_close();
 

@@ -3,6 +3,7 @@
 #include "sheet_seam_viz.h"
 #include "coarse_fine_viz.h"
 #include "face_sample_tracker.h"
+#include "collapse_structure_tracker/simp_viz_tracker.h"
 
 #include <polyscope/polyscope.h>
 #include <polyscope/surface_mesh.h>
@@ -1604,6 +1605,8 @@ void update_display()
     sample_tracker_show_vertices();
     face_flip_tracker_show_viz();
 
+    simp_viz_tracker_update_display();
+
     if (!gSnap.valid) return;
 
     if (gCanonicalView) {
@@ -1619,6 +1622,7 @@ void ui_callback()
 {
     sheet_seam_pick_check();
     coarse_fine_pick_check();
+    simp_viz_tracker_pick_check();
 
     // Drive continuous decimation
     if (gRunning && !gFinished) {
@@ -2013,6 +2017,8 @@ void ui_callback()
 
     ImGui::Separator();
     coarse_fine_imgui_section();
+
+    simp_viz_tracker_imgui_section();
 
     ImGui::Separator();
     ImGui::Text("Export (latest_snapshot.obj):");
