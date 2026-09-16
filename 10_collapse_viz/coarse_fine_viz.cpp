@@ -13,6 +13,7 @@
 #include <igl/writeOBJ.h>
 #include "face_dead.h"
 #include "coarse_mesh_compaction.h"
+#include "stale_chains.h"
 
 #include <query_coarse_to_fine.h>
 #include <single_collapse_data.h>
@@ -605,12 +606,17 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
     // vertex/face compaction save_simplified_mesh() and
     // simp_viz_tracker_write_json() use, so coarseV[i] agrees with
     // simplified_*.obj's i-th vertex and the JSON's vertices[i] for i < NC.
+    // extend_with_stale_chains() then appends the naked stale-chain vertices
+    // past NC, using the same deterministic assignment save_simplified_mesh
+    // uses, so coarseV[NC..NCE-1] also agrees with the OBJ's appended verts.
     CoarseMeshCompaction cmc = build_compact_coarse_mesh(gV, gF);
+    std::vector<std::vector<int>> staleChainsCompact = extend_with_stale_chains(cmc, gV, gStaleChains);
     const MatrixXi & fullF = cmc.Fout;               // FC x 3, already in compact-index space (matches coarseV)
-    const std::vector<int> newToOld(cmc.newToOld.data(), cmc.newToOld.data() + cmc.newToOld.size());
+    const std::vector<int> newToOld(cmc.newToOld.data(), cmc.newToOld.data() + cmc.newToOld.size()); // size NCE
     const std::vector<int> fullFOrigIdx(cmc.faceOrigIdx.data(), cmc.faceOrigIdx.data() + cmc.faceOrigIdx.size());
 
-    const uint32_t NC = (uint32_t)newToOld.size();
+    const uint32_t NC  = (uint32_t)cmc.NC;            // face-referenced coarse vertex count
+    const uint32_t NCE = (uint32_t)cmc.Vbase.rows();  // NC + naked stale-chain vertices
     const uint32_t FC = (uint32_t)fullF.rows();
     const uint32_t NF = (uint32_t)gVO.rows();
     const uint32_t FF = (uint32_t)gFO.rows();
@@ -618,14 +624,18 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
     std::ofstream out(bundlePath, std::ios::binary);
     if (!out) { std::cerr << "[bundle] Cannot write " << bundlePath << "\n"; return; }
 
-    const uint32_t magic = 0xC2F50006;  // v6: adds DC UV data (UV_dc_pre/post, FUV_dc_pre/post) per sheet
+    // v7: coarseV/compact->global map extended to NCE (adds naked stale-chain
+    // vertices past NC) and a trailing stale-chain section (chain topology,
+    // as compact indices) is appended after the v6 payload.
+    const uint32_t magic = 0xC2F50007;
     out.write((const char*)&magic, 4);
     out.write((const char*)&NC, 4);
     out.write((const char*)&FC, 4);
     out.write((const char*)&NF, 4);
     out.write((const char*)&FF, 4);
+    out.write((const char*)&NCE, 4);
 
-    for (uint32_t i = 0; i < NC; i++) {
+    for (uint32_t i = 0; i < NCE; i++) {
         double xyz[3] = { gV(newToOld[i],0), gV(newToOld[i],1), gV(newToOld[i],2) };
         out.write((const char*)xyz, 24);
     }
@@ -664,10 +674,29 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
     out.write((const char*)&nF_decIM, 4);
     out.write((const char*)&nFO_u,    4);
 
-    // compact→global vertex map (NC int32s)
-    for (uint32_t i = 0; i < NC; i++) {
+    // compact→global vertex map (NCE int32s — covers stale-chain vertices too)
+    for (uint32_t i = 0; i < NCE; i++) {
         int32_t gv = (int32_t)newToOld[i];
         out.write((const char*)&gv, 4);
+    }
+
+    // ---- stale-chain section (v7): chain topology as compact indices into
+    // coarseV[NC..NCE-1] (and occasionally < NC, for a chain vertex that's
+    // also face-referenced). Mirrors the l-elements simplified_*.obj writes,
+    // in the same index space as this bundle's coarseV. Placed here (fixed-size
+    // metadata) rather than after the variable-length gDecIM/gDecInfo blob
+    // below, so a reader can find it without parsing that structure first.
+    {
+        const uint32_t nStale = (uint32_t)staleChainsCompact.size();
+        out.write((const char*)&nStale, 4);
+        for (const auto & chain : staleChainsCompact) {
+            const uint32_t chainLen = (uint32_t)chain.size();
+            out.write((const char*)&chainLen, 4);
+            for (int idx : chain) {
+                uint32_t v = (uint32_t)idx;
+                out.write((const char*)&v, 4);
+            }
+        }
     }
 
     // compact→global face map (FC int32s)
@@ -804,29 +833,43 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
         }
     }
 
-    std::cerr << "[bundle] Saved NC=" << NC << " FC=" << FC
+    std::cerr << "[bundle] Saved NC=" << NC << " NCE=" << NCE << " FC=" << FC
               << " NF=" << NF << " FF=" << FF
-              << " nDec=" << nDec << " → " << bundlePath << "\n";
+              << " nDec=" << nDec << " nStaleChains=" << staleChainsCompact.size()
+              << " → " << bundlePath << "\n";
 
-    // Export the coarse mesh as OBJ alongside the bundle.
+    // Export the coarse mesh as OBJ alongside the bundle — same shape as
+    // simplified_*.obj: NC face-referenced verts + faces, then the naked
+    // stale-chain verts (NC..NCE-1) with l-elements, no face references.
     {
         std::string objPath = bundlePath;
         size_t dot = objPath.rfind('.');
         if (dot != std::string::npos) objPath = objPath.substr(0, dot);
         objPath += ".obj";
 
-        MatrixXd Vc(NC, 3);
-        for (uint32_t i = 0; i < NC; i++)
+        MatrixXd Vc(NCE, 3);
+        for (uint32_t i = 0; i < NCE; i++)
             Vc.row(i) << gV(newToOld[i],0), gV(newToOld[i],1), gV(newToOld[i],2);
         // fullF is already in compact-index space (see coarseF write above) — use directly.
         MatrixXi Fc(FC, 3);
         for (int f = 0; f < (int)FC; f++)
             Fc.row(f) << fullF(f,0), fullF(f,1), fullF(f,2);
 
-        if (!igl::writeOBJ(objPath, Vc, Fc))
+        if (!igl::writeOBJ(objPath, Vc, Fc)) {
             std::cerr << "[bundle] writeOBJ failed: " << objPath << "\n";
-        else
+        } else {
             std::cerr << "[bundle] coarse mesh OBJ → " << objPath << "\n";
+            if (!staleChainsCompact.empty()) {
+                std::ofstream ofs(objPath, std::ios::app);
+                if (ofs.is_open()) {
+                    for (const auto & chain : staleChainsCompact) {
+                        ofs << "l";
+                        for (int idx : chain) ofs << " " << (idx + 1); // OBJ is 1-based
+                        ofs << "\n";
+                    }
+                }
+            }
+        }
     }
 }
 

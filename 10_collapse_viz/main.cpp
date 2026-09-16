@@ -335,41 +335,19 @@ static void save_simplified_mesh(const std::string & path)
     // Shared coarse-mesh compaction — the .c2f bundle (coarse_fine_save_bundle)
     // and *_simp_visualize_info.json (simp_viz_tracker_write_json) build their
     // vertex numbering from this exact same call, so vertex index i means the
-    // same physical point in all three files for i < NC (Vbase.rows()).
-    // NOTE: stale chain vertices are naked (not in any triangle face), so this
-    // compaction drops them and oldToNew(vid) == -1 for all of them; they're
-    // appended below.
+    // same physical point in all three files for i < cmc.NC (the face-referenced
+    // coarse mesh). extend_with_stale_chains() appends the naked stale-chain
+    // vertices past cmc.NC using the same deterministic assignment the bundle
+    // now also uses, so those indices agree across files too.
     CoarseMeshCompaction cmc = build_compact_coarse_mesh(gV, gF);
-    MatrixXd Vbase = cmc.Vbase;
-    MatrixXi Fout  = cmc.Fout;
-    VectorXi J     = cmc.oldToNew; // J[old] = new (-1 if dropped)
-
-    // Extend Vbase with the stale chain vertices that were dropped.
-    // Build old→new supplemental map for them.
-    std::unordered_map<int,int> stale_ext; // old vertex ID → row in extended Vout
-    {
-        int base = (int)Vbase.rows();
-        for (const auto & chain : gStaleChains)
-            for (int vid : chain) {
-                if (vid < J.size() && J(vid) >= 0) continue; // already kept by Flive
-                if (stale_ext.count(vid))           continue; // already queued
-                stale_ext[vid] = base++;
-            }
-        if (!stale_ext.empty()) {
-            MatrixXd Vext(base, 3);
-            Vext.topRows(Vbase.rows()) = Vbase;
-            for (auto & [old_vid, new_row] : stale_ext)
-                Vext.row(new_row) = gV.row(old_vid).leftCols(3);
-            Vbase = std::move(Vext);
-        }
-    }
-    const MatrixXd & Vout = Vbase; // alias for clarity below
+    extend_with_stale_chains(cmc, gV, gStaleChains);
+    const MatrixXd & Vout = cmc.Vbase;
+    const MatrixXi & Fout = cmc.Fout;
 
     // Helper: map an original vertex ID to its compacted index (-1 on failure).
     auto remap = [&](int vid) -> int {
-        if (vid < J.size() && J(vid) >= 0) return J(vid);
-        auto it = stale_ext.find(vid);
-        return (it != stale_ext.end()) ? it->second : -1;
+        if (vid < 0 || vid >= cmc.oldToNew.size()) return -1;
+        return cmc.oldToNew(vid);
     };
 
     // ---- OBJ with l-elements ----

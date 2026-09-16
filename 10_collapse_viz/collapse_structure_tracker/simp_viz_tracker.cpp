@@ -1,6 +1,7 @@
 #include "simp_viz_tracker.h"
 #include "../face_dead.h"
 #include "../coarse_mesh_compaction.h"
+#include "../stale_chains.h"
 
 #ifdef C2F_VIZ_DIAGNOSTIC
 #include <polyscope/polyscope.h>
@@ -35,9 +36,10 @@ static constexpr int MS_Sheet_Boundary    = 4;
 static constexpr int MS_Seam_Boundary     = 5;
 static constexpr int MS_Junction_Boundary = 6;
 static constexpr int MS_Unknown           = 7;  // vertex not covered by any struct element
-static constexpr int TOPO_COUNT           = 8;
+static constexpr int MS_StaleChain        = 8;  // naked stale-chain vertex (locked feature curve, not simplification-tracked)
+static constexpr int TOPO_COUNT           = 9;
 
-static constexpr std::array<std::array<uint8_t,3>,8> TOPO_RGB = {{
+static constexpr std::array<std::array<uint8_t,3>,TOPO_COUNT> TOPO_RGB = {{
     {100,149,237}, // MS_Sheet
     {255,165,  0}, // MS_Seam
     {220, 20, 60}, // MS_Boundary
@@ -46,12 +48,13 @@ static constexpr std::array<std::array<uint8_t,3>,8> TOPO_RGB = {{
     {255,215,  0}, // MS_Seam_Boundary
     {255, 69,  0}, // MS_Junction_Boundary
     {160,160,160}, // MS_Unknown  (grey)
+    {  0,255,255}, // MS_StaleChain  (cyan)
 }};
 
-static const char* TOPO_NAME[8] = {
+static const char* TOPO_NAME[TOPO_COUNT] = {
     "MS_Sheet","MS_Seam","MS_Boundary","MS_Junction",
     "MS_Sheet_Boundary","MS_Seam_Boundary","MS_Junction_Boundary",
-    "MS_Unknown"
+    "MS_Unknown","MS_StaleChain"
 };
 
 // ---- externs from main.cpp ----
@@ -59,6 +62,7 @@ extern MatrixXd gV;
 extern MatrixXd gVO;
 extern MatrixXi gF;
 extern std::vector<std::set<int>> gVertexStructIDs;
+extern std::vector<std::vector<int>> gStaleChains;
 
 // ---- module state ----
 static int gNumInitial = 0;
@@ -245,8 +249,12 @@ void simp_viz_tracker_write_json(const std::string& path)
 {
     // Live vertices in the SAME order as simplified_*.obj's v-lines and the
     // .c2f bundle's coarseV, so vertices[i] here is the same physical point
-    // as coarseV[i] / the i-th OBJ vertex for i < NC.
+    // as coarseV[i] / the i-th OBJ vertex for i < NC. extend_with_stale_chains()
+    // then appends the naked stale-chain vertices past NC, using the same
+    // deterministic assignment the OBJ and bundle now also use.
     CoarseMeshCompaction cmc = build_compact_coarse_mesh(gV, gF);
+    extend_with_stale_chains(cmc, gV, gStaleChains);
+    const int NC = cmc.NC;
     const std::vector<int> live_verts(cmc.newToOld.data(), cmc.newToOld.data() + cmc.newToOld.size());
 
     std::ofstream out(path);
@@ -274,14 +282,16 @@ void simp_viz_tracker_write_json(const std::string& path)
     int nL = (int)live_verts.size();
     for (int i = 0; i < nL; ++i) {
         int gv = live_verts[i];
-        int tt = (gv < (int)gTopoType.size()) ? gTopoType[gv] : MS_Unknown;
+        const bool isStale = (i >= NC);
+        int tt = isStale ? MS_StaleChain
+                          : ((gv < (int)gTopoType.size()) ? gTopoType[gv] : MS_Unknown);
         if (tt < 0) tt = MS_Unknown;
 
         // position (current gV position after collapse placement)
         out << "    { \"position\": ["
             << gV(gv, 0) << ", " << gV(gv, 1) << ", " << gV(gv, 2)
             << "], \"topo_type\": " << tt << ", \"struct_ids\": [";
-        if (gv < (int)gStructIds.size()) {
+        if (!isStale && gv < (int)gStructIds.size()) {
             bool first = true;
             for (int id : gStructIds[gv]) {
                 if (!first) out << ", ";
@@ -290,7 +300,7 @@ void simp_viz_tracker_write_json(const std::string& path)
             }
         }
         out << "], \"original_ancestors\": [";
-        if (gv < (int)gAncestors.size()) {
+        if (!isStale && gv < (int)gAncestors.size()) {
             bool first = true;
             for (int a : gAncestors[gv]) {
                 if (!first) out << ", ";

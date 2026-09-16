@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <utility>
 #include <vector>
 
 using namespace Eigen;
@@ -42,5 +43,61 @@ CoarseMeshCompaction build_compact_coarse_mesh(const MatrixXd & gV, const Matrix
     // remove_unreferenced doesn't reorder faces, so Fout row i still corresponds
     // to face_rows[i] / face_orig_idx[i].
     out.faceOrigIdx = Map<VectorXi>(face_orig_idx.data(), (int)face_orig_idx.size());
+    out.NC = (int)out.Vbase.rows();
     return out;
+}
+
+std::vector<std::vector<int>> extend_with_stale_chains(
+    CoarseMeshCompaction & cmc,
+    const MatrixXd & gV,
+    const std::vector<std::vector<int>> & gStaleChains)
+{
+    // Assign a new compact index to every chain vertex not already covered
+    // by the coarse mesh, in a fixed order (walk gStaleChains in order,
+    // first-seen-gets-next-index) — this is the ONE place that ordering is
+    // decided, so every caller that runs this against the same gStaleChains
+    // gets identical indices.
+    std::vector<int> new_old_ids; // old (gV) ids of the newly-appended vertices, in assignment order
+    for (const auto & chain : gStaleChains) {
+        for (int vid : chain) {
+            if (vid < 0 || vid >= cmc.oldToNew.size()) continue; // out-of-range guard, shouldn't happen
+            if (cmc.oldToNew(vid) >= 0) continue;                // already covered by the coarse mesh
+            cmc.oldToNew(vid) = cmc.NC + (int)new_old_ids.size();
+            new_old_ids.push_back(vid);
+        }
+    }
+
+    if (!new_old_ids.empty()) {
+        const int oldRows = (int)cmc.Vbase.rows();
+        const int addRows = (int)new_old_ids.size();
+        MatrixXd Vext(oldRows + addRows, 3);
+        Vext.topRows(oldRows) = cmc.Vbase;
+        for (int i = 0; i < addRows; i++)
+            Vext.row(oldRows + i) = gV.row(new_old_ids[i]).leftCols(3);
+        cmc.Vbase = std::move(Vext);
+
+        VectorXi newToOldExt(oldRows + addRows);
+        newToOldExt.head(oldRows) = cmc.newToOld;
+        for (int i = 0; i < addRows; i++)
+            newToOldExt(oldRows + i) = new_old_ids[i];
+        cmc.newToOld = std::move(newToOldExt);
+    }
+
+    // Re-express each chain as compact indices via the now-extended oldToNew.
+    std::vector<std::vector<int>> chainsCompact;
+    chainsCompact.reserve(gStaleChains.size());
+    for (const auto & chain : gStaleChains) {
+        std::vector<int> compact;
+        compact.reserve(chain.size());
+        bool ok = true;
+        for (int vid : chain) {
+            if (vid < 0 || vid >= cmc.oldToNew.size() || cmc.oldToNew(vid) < 0) { ok = false; break; }
+            compact.push_back(cmc.oldToNew(vid));
+        }
+        if (ok && !compact.empty())
+            chainsCompact.push_back(std::move(compact));
+        else
+            fprintf(stderr, "[cmc] WARNING: dropped a stale chain that could not be fully remapped\n");
+    }
+    return chainsCompact;
 }
