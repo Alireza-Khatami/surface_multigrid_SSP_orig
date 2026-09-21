@@ -1,6 +1,9 @@
 #include "SSP_collapse_edge.h"
 #include "SSP_rejection_detail.h"   // UvFlipRejDetail, UvAngleRejDetail
 #include <igl/edge_collapse_is_valid.h>
+#ifdef SSP_SEAM_UV_PINNING
+#include "joint_lscm_pinned.h"   // 10_collapse_viz-only; see md_files/seam_uv_pinning_fix.md
+#endif
 #include <always_try_never_care.h>
 #include <vector>
 #include <map>
@@ -944,16 +947,36 @@ bool SSP_collapse_edge(
                         is_seam_collapse);
 
     // joint_lscm — boundary cases (1/2) use double cover + 2-point pinning.
+    // Seam collapses (is_seam_collapse) are always Case 2 (SSP_collapse_edge
+    // forces onBd.sum()==2 via -1 injection above), so they're forwarded to
+    // the seam UV-pinning fix instead: vi/vj/vk are additionally hard-pinned
+    // to fixed shared targets so every active sheet agrees, rather than
+    // solved as free LSCM variables (see md_files/seam_uv_pinning_fix.md).
+    // Non-seam collapses are unaffected — still the original joint_lscm().
     MatrixXd UV_pre_si, UV_post_si;
     DCVizData dc_viz_si;
     std::optional<int> lscm_case_out;
-    bool isValid = joint_lscm(
-        V_pre_si, FUV_pre_si, V_post_si, FUV_post_si,
-        b_si(0), b_si(1), Nsv_local, Ndv_local,
-        UV_pre_si, UV_post_si,
-        &lscm_case_out,
-        &dc_viz_si,
-        (int)decInfo.size());
+    bool isValid;
+#ifdef SSP_SEAM_UV_PINNING
+    if (is_seam_collapse) {
+      isValid = joint_lscm_seam_pinned(
+          V_pre_si, FUV_pre_si, V_post_si, FUV_post_si,
+          b_si(0), b_si(1), Nsv_local, Ndv_local,
+          UV_pre_si, UV_post_si,
+          &lscm_case_out,
+          &dc_viz_si,
+          (int)decInfo.size());
+    } else
+#endif
+    {
+      isValid = joint_lscm(
+          V_pre_si, FUV_pre_si, V_post_si, FUV_post_si,
+          b_si(0), b_si(1), Nsv_local, Ndv_local,
+          UV_pre_si, UV_post_si,
+          &lscm_case_out,
+          &dc_viz_si,
+          (int)decInfo.size());
+    }
     if (!any_sheet_ok && lscm_case_out.has_value())
         data.lscm_case = lscm_case_out;
     if (s_bd_snap.valid && s_bd_snap.collapse_idx == (int)decInfo.size()

@@ -176,8 +176,99 @@ are now hard-pinned identically across every sheet. Also compare
 distortion-vs-consistency tradeoff from §2, and confirm the final sanity
 check (`[SANITY] OK: ...`) still passes.
 
-## Status
+## Implementation (as built)
 
-Investigation complete, plan written. Not yet implemented — awaiting
-confirmation before writing `joint_lscm_pinned.h`/`.cpp` and the
-`SSP_collapse_edge.cpp` call-site change.
+- `10_collapse_viz/joint_lscm_pinned.h` / `.cpp` — `joint_lscm_double_cover_pinned`
+  (5-pin variant of `joint_lscm_double_cover`) and `joint_lscm_seam_pinned`
+  (top-level entry point, mirrors `joint_lscm()`'s signature). Case 1 deferred
+  (not implemented — see note in `joint_lscm_pinned.h`; never fires for a
+  real seam collapse under current code).
+- `10_collapse_viz/CMakeLists.txt` — new `SSP_SEAM_UV_PINNING` option
+  (default ON), gates `target_compile_definitions`, adds
+  `joint_lscm_pinned.cpp` to sources, and adds
+  `target_include_directories(... PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})` so
+  `src/SSP_collapse_edge.cpp` can find the new header when compiled as part
+  of this app. `08_subdiv_remesh`/`11_correspond_viz` never define the
+  macro, so they're unaffected (confirmed by inspection of their
+  `CMakeLists.txt` — both glob `src/*.cpp` independently and don't have
+  `10_collapse_viz/` on their include path).
+- `src/SSP_collapse_edge.cpp` — `#include "joint_lscm_pinned.h"` and the
+  call-site branch (`is_seam_collapse ? joint_lscm_seam_pinned(...) :
+  joint_lscm(...)`) both wrapped in `#ifdef SSP_SEAM_UV_PINNING`.
+- `10_collapse_viz/main.cpp` — opens/closes
+  `seam_uv_pinned_<stem>.txt` (this file's own `[SEAM-PIN-*]` log,
+  separate from `dc_log()` which is `static`/private to `joint_lscm.cpp`).
+
+Pin-value convention was re-derived directly from the original code's own
+inline comments (`"pin_left : y=0, x=-1"` next to `bc_UV << 0.0, -1.0`), not
+assumed: for a pinned row index `idx`, `(b_UV, bc_UV) = {(idx, y_target),
+(nVjoint_dc+idx, x_target)}`. Verified `flatten()`/`mqwf_dense_precompute`/
+`mqwf_dense_solve` (`src/mqwf_dense.cpp`) are fully generic over the pin
+count — no hidden assumption of exactly 2 pins, so extending 4 `b_UV`
+entries to 10 was mechanically safe. Verified `vi`/`vj`/the post-collapse
+slot (`nV`) are always index-disjoint from `B_glued`/`B_reflected` by
+construction (`B_arc` is built from the boundary loop strictly *excluding*
+`vi`/`vj`), so none of the 5 pins can ever collide.
+
+## First verification run — negative result, investigated further
+
+Ran the headless build (`build/headless_verify`) on the same test mesh used
+for [[seam_uv_consistency_findings]]. Result: **1290/1290 `SEAM-PIN-FAIL`,
+0 `SEAM-PIN-PASS`** — every single seam-collapse sheet failed
+`check_valid_UV_lscm`. The `seam_uv_consistency` log showed 0 mismatches,
+but only because no seam collapse succeeded at all, not because the fix
+worked.
+
+Checked `nFpre` (faces per sheet) across all failures: ranged 3–11, i.e.
+every seam one-ring patch in this mesh is tiny. Hypothesis: forcing `vi`/`vj`
+to fixed absolute UV coordinates (`±0.5`), on top of `B_glued` at `±1`,
+leaves a 3–11-face patch essentially no geometric slack to satisfy 5 rigid
+constraints without a flipped/folded triangle.
+
+### Diagnostic: isolating which check(s) are actually rejecting
+
+To confirm the hypothesis without guessing, `check_valid_UV_lscm`'s checks
+were split into 3 independently reusable functions in `joint_lscm_pinned.cpp`
+(mirroring `check_valid_UV_lscm`'s logic exactly; `check_valid_UV_lscm`
+itself untouched):
+
+- `check_uv_face_flip(UV, FUV)`
+- `check_uv_foldover(UV, FUV, vi, vj)`
+- `check_uv_triangle_quality(UV, FUV, threshold=0.01)`
+
+A diagnostic gate, `check_valid_UV_lscm_diag_no_flip_foldover`, was composed
+from only the NaN check + `check_uv_triangle_quality` (both pre/post) —
+`check_uv_face_flip`/`check_uv_foldover` deliberately excluded — and swapped
+in for `joint_lscm_seam_pinned`'s validity call.
+
+**Result: 1647/1713 `SEAM-PIN-PASS`, 66 `SEAM-PIN-FAIL`, still 0
+`seam_uv_consistency` mismatches.** Confirms the flip/fold-over checks were
+the cause of the earlier 100% failure rate — the pinning mechanism itself
+does force cross-sheet agreement when it's allowed to run.
+
+**But this doesn't make the fixed-pin approach viable.** QCE
+(`quasi_conformal_error`) on the "passing" cases: max up to `6.3`, means
+around `2–4` — well above the existing `[DC-HIGH-DISTORTION]` threshold of
+`3.0` used elsewhere in this codebase. The flip/fold-over checks were
+correctly rejecting genuinely invalid (inverted/self-overlapping)
+parameterizations, not being overly strict; disabling them just stops
+catching that, it doesn't fix the geometry.
+
+**`check_valid_UV_lscm_diag_no_flip_foldover` is left in the code as a
+diagnostic result, not switched on as the actual validity gate.**
+`joint_lscm_seam_pinned` should be reverted to the full 3-check composition
+(or `check_valid_UV_lscm` directly) once the pin-target strategy itself is
+fixed — see "Next steps" below.
+
+## Next steps (not yet implemented)
+
+Literal, collapse-independent pin constants (`vi=(-0.5,0)`, `vj=(0.5,0)`)
+don't work for these tiny one-ring patches — they ignore each collapse's
+actual local geometry. Proposed direction: derive the pin *targets* from
+something scale/shape-appropriate to that specific collapse, while still
+reusing the *same* value across every sheet of that one collapse (the actual
+goal). E.g.: solve one designated reference sheet normally (free `vi`/`vj`/
+`vk`, exactly like the unpinned original), then pin every *other* sheet's
+`vi`/`vj`/`vk` to that reference sheet's solved values. This adapts to each
+collapse's real scale instead of imposing an arbitrary fixed geometry on a
+3-face patch. Not yet implemented — awaiting direction before proceeding.

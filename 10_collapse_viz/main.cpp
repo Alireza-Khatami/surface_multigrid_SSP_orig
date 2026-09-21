@@ -27,6 +27,9 @@
 
 #include <SSP_collapse_edge.h>
 #include <SSP_rejection_detail.h>
+#ifdef SSP_SEAM_UV_PINNING
+#include "joint_lscm_pinned.h"
+#endif
 #include <SSP_exhaustion_full_diagnostic.h>
 #include <single_collapse_data.h>
 #include <partition_into_sheets.h>
@@ -907,6 +910,9 @@ int main(int argc, char * argv[])
     SSP_seam_uv_log_open((out_dir + "seam_uv_consistency_" + stem + ".txt").c_str());
     // SSP_rej_log_open already called before init_ssp (to capture initial cost-pass [QSLIM-INF]).
     dc_log_open((out_dir + "dc_log_" + stem + ".txt").c_str());
+#ifdef SSP_SEAM_UV_PINNING
+    seam_uv_pinned_log_open((out_dir + "seam_uv_pinned_" + stem + ".txt").c_str());
+#endif
 
 #ifdef C2F_VIZ_DIAGNOSTIC
     polyscope::init();
@@ -942,6 +948,9 @@ int main(int argc, char * argv[])
     SSP_seam_uv_log_close();
     SSP_rej_log_close();
     dc_log_close();
+#ifdef SSP_SEAM_UV_PINNING
+    seam_uv_pinned_log_close();
+#endif
     SSP_lscm_write_readme();
 
     // Export the simplified mesh regardless of how many collapses happened.

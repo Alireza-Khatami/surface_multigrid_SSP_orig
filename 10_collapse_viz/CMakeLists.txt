@@ -66,3 +66,18 @@ option(ML_QEM_LOG "Enable MeshLab QEM rejection logs (ML-COST-REJECT, ML-REJECT)
 if(ML_QEM_LOG)
     target_compile_definitions(${PROJECT_NAME}_bin PRIVATE ML_QEM_LOG)
 endif()
+
+# Seam UV pinning fix (10_collapse_viz-only, see md_files/seam_uv_pinning_fix.md).
+# Force-pins vi/vj/vk to fixed shared UV targets for seam (multi-sheet) collapses
+# so every active sheet agrees, instead of solving them as free LSCM variables.
+# joint_lscm_pinned.{h,cpp} live here (not src/) so src/joint_lscm.cpp stays
+# untouched; SSP_collapse_edge.cpp's #include of the new header is itself
+# guarded by this same define, so 08_subdiv_remesh/11_correspond_viz (which
+# don't compile joint_lscm_pinned.cpp or have it on their include path) are
+# unaffected.
+option(SSP_SEAM_UV_PINNING "Force-pin vi/vj/vk to fixed shared UV targets for seam collapses (10_collapse_viz-only)" ON)
+if(SSP_SEAM_UV_PINNING)
+    target_compile_definitions(${PROJECT_NAME}_bin PRIVATE SSP_SEAM_UV_PINNING)
+    target_sources(${PROJECT_NAME}_bin PRIVATE joint_lscm_pinned.cpp)
+    target_include_directories(${PROJECT_NAME}_bin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+endif()
