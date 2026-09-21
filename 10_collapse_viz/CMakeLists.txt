@@ -32,6 +32,8 @@ set(APP_SRCS
     coarse_mesh_sanity_check.cpp
     coarse_fine_viz.cpp
     face_sample_tracker.cpp
+    load_matstruct_edges.cpp
+    edge_sample_tracker.cpp
     orient_faces_consistently.cpp
     meshlab_qslim_callbacks.cpp
     meshlab_qslim_config.cpp

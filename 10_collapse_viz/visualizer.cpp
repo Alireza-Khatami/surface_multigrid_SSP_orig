@@ -4,6 +4,7 @@
 #include "seam_uv_view.h"
 #include "coarse_fine_viz.h"
 #include "face_sample_tracker.h"
+#include "edge_sample_tracker.h"
 #include "collapse_structure_tracker/simp_viz_tracker.h"
 
 #include <polyscope/polyscope.h>
@@ -1654,6 +1655,7 @@ void update_display()
 
     sample_tracker_show();
     sample_tracker_show_vertices();
+    edge_sample_tracker_show();
     face_flip_tracker_show_viz();
 
     simp_viz_tracker_update_display();

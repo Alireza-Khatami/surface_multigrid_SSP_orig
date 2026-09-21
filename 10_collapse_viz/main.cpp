@@ -63,6 +63,7 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
 
 #include "face_sample_tracker.h"
 #include "load_matstruct.h"
+#include "edge_sample_tracker.h"
 #include "collapse_structure_tracker/simp_viz_tracker.h"
 
 using namespace Eigen;
@@ -621,6 +622,7 @@ bool do_next_step()
             }
             vertex_watch_check_collapse(s, d);
             sample_tracker_update();
+            edge_sample_tracker_update();
             face_flip_tracker_post_update();
             fprintf(stderr,
                 "[COLLAPSE #%d] e=%d  kept=v%d  gone=v%d"
@@ -667,6 +669,7 @@ int main(int argc, char * argv[])
     bool        matStructCheck = false;  // --mat_struct_check: enable struct-ID collapse gate
     std::string traceVerticesPath;  // optional: text file with one fine_vertex_id per line
     int         trackFaceFlip     = -1;  // --track_face_flip <idx>
+    int         gNEdgeSamplesPerStruct = 1000;  // --n_edge_samples_per_struct <N>
 
 
     //usage
@@ -677,6 +680,8 @@ int main(int argc, char * argv[])
     // [--output_dir PATH]      default: .
     // [--validity-checks]
     // [--trace_vertices PATH]  text file: one fine_vertex_id per line; enables per-step walk trace
+    // [--n_edge_samples_per_struct N]  default: 1000 — samples per seam/boundary .ma_struct curve
+    //                                  (only used when --matstruct_path is also given)
 
 
     for (int i = 1; i < argc; ++i) {
@@ -695,6 +700,7 @@ int main(int argc, char * argv[])
             else if (a == "--matstruct_path")   matstructPath     = argv[i+1];
             else if (a == "--trace_vertices")   traceVerticesPath = argv[i+1];
             else if (a == "--track_face_flip")  trackFaceFlip     = std::stoi(argv[i+1]);
+            else if (a == "--n_edge_samples_per_struct") gNEdgeSamplesPerStruct = std::stoi(argv[i+1]);
             else { continue; }
             ++i;
         }
@@ -902,6 +908,7 @@ int main(int argc, char * argv[])
     const std::string samples_fine_path     = out_dir + "samples_fine_"       + stem + ".txt";
     const std::string samples_coarse_path   = out_dir + "samples_coarse_"     + stem + ".txt";
     const std::string samples_vertices_path = out_dir + "samples_vertices_"   + stem + ".txt";
+    const std::string edge_samples_path     = out_dir + "edge_samples_"       + stem + ".txt";
 
     if (gNSamplesTotal >= 0) {
         if (!traceVerticesPath.empty()) {
@@ -912,6 +919,8 @@ int main(int argc, char * argv[])
     } else {
         std::cout << "Sampling disabled (--n_samples_total not given).\n";
     }
+    if (!matstructPath.empty())
+        edge_sample_tracker_init(matstructPath, gNEdgeSamplesPerStruct);
     if (trackFaceFlip >= 0)
         face_flip_tracker_init(trackFaceFlip);
 
@@ -977,6 +986,7 @@ int main(int argc, char * argv[])
 
     sample_tracker_save(samples_fine_path, samples_coarse_path, samples_vertices_path);
     sample_tracker_export_deformed_mesh(out_dir + "deformed_fine_mesh_" + stem + ".obj");
+    edge_sample_tracker_save(edge_samples_path);
 
     const std::string simp_viz_json_path = out_dir + stem + "_simp_visualize_info.json";
     simp_viz_tracker_write_json(simp_viz_json_path);
