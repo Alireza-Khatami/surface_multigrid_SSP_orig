@@ -29,8 +29,18 @@ namespace {
 // vk (the post-collapse merged point) reuses vi's target: vi is always the
 // survivor (get_post_faces remaps vj -> vi), so vk IS vi, just after the
 // collapse — pinning it to vi_target keeps that identity in UV space too.
-constexpr double kSeamPinViX = -0.5, kSeamPinViY = 0.0;
-constexpr double kSeamPinVjX =  0.5, kSeamPinVjY = 0.0;
+//
+// x-ordering matches the ORIGINAL 2-pin code's own documented natural order
+// (src/joint_lscm.cpp:242-255): "B_glued[0] is adjacent to vj and
+// B_glued[1] is adjacent to vi ... B_glued[0](-1) < vj < vi < B_glued[1](+1)".
+// So vj (adjacent to B_glued[0]) goes near -1, and vi (adjacent to
+// B_glued[1], closing the loop) goes near +1 — NOT the other way around.
+// (An earlier version of this file had these swapped, which contradicted
+// that documented ordering and is suspected to be why the fixed-pin solve
+// failed check_valid_UV_lscm's flip/fold-over checks on ~100% of sheets —
+// see md_files/seam_uv_pinning_fix.md "Next steps".)
+constexpr double kSeamPinViX =  0.5, kSeamPinViY = 0.0;
+constexpr double kSeamPinVjX = -0.5, kSeamPinVjY = 0.0;
 constexpr double kSeamPinVkX = kSeamPinViX, kSeamPinVkY = kSeamPinViY;
 
 } // namespace
@@ -115,6 +125,30 @@ static bool check_valid_UV_lscm_diag_no_flip_foldover(
 {
     if (UV_pre.array().isNaN().sum() > 0 || UV_post.array().isNaN().sum() > 0)
         return false;
+    if (check_uv_triangle_quality(UV_pre,  FUV_pre))  return false;
+    if (check_uv_triangle_quality(UV_post, FUV_post)) return false;
+    return true;
+}
+
+// Full validity gate, composed from all 3 modular checks above (equivalent
+// to check_valid_UV_lscm's own logic, just built from the split-out
+// functions instead of duplicated inline). This is the gate that should
+// actually be used — check_valid_UV_lscm_diag_no_flip_foldover above stays
+// only as a diagnostic result, not something to switch back on.
+static bool check_valid_UV_lscm_full(
+    const Eigen::MatrixXd & UV_pre,
+    const Eigen::MatrixXi & FUV_pre,
+    const Eigen::MatrixXd & UV_post,
+    const Eigen::MatrixXi & FUV_post,
+    const int & vi,
+    const int & vj)
+{
+    if (UV_pre.array().isNaN().sum() > 0 || UV_post.array().isNaN().sum() > 0)
+        return false;
+    if (check_uv_face_flip(UV_pre,  FUV_pre))  return false;
+    if (check_uv_face_flip(UV_post, FUV_post)) return false;
+    if (check_uv_foldover(UV_pre,  FUV_pre,  vi, vj)) return false;
+    if (check_uv_foldover(UV_post, FUV_post, vi, vj)) return false;
     if (check_uv_triangle_quality(UV_pre,  FUV_pre))  return false;
     if (check_uv_triangle_quality(UV_post, FUV_post)) return false;
     return true;
@@ -325,14 +359,12 @@ bool joint_lscm_seam_pinned(
         FUV_dc_pre, FUV_dc_post, UV_dc_pre, UV_dc_post,
         B_glued, B_reflected);
 
-    // DIAGNOSTIC: using check_valid_UV_lscm_diag_no_flip_foldover (quality
-    // check only) instead of the full check_valid_UV_lscm. Revert to
-    // check_valid_UV_lscm(V_pre, UV_pre, FUV_pre, V_post, UV_post, FUV_post,
-    // vi, vj, Nsv, Ndv) — or check_uv_face_flip/check_uv_foldover/
-    // check_uv_triangle_quality composed together — once the pin-target
-    // strategy itself no longer relies on skipping flip/fold-over checks.
-    bool ok = check_valid_UV_lscm_diag_no_flip_foldover(
-        UV_pre, FUV_pre, UV_post, FUV_post);
+    // Full validity check (flip + fold-over + quality) — testing whether
+    // correcting the vi/vj pin ordering (see kSeamPinViX/kSeamPinVjX above)
+    // to match the original code's documented natural order actually
+    // avoids the flips/fold-overs that caused the earlier 100% fail rate,
+    // rather than just disabling the checks that were catching them.
+    bool ok = check_valid_UV_lscm_full(UV_pre, FUV_pre, UV_post, FUV_post, vi, vj);
 
     if (!ok) {
         bool has_nan = UV_pre.array().isNaN().any() || UV_post.array().isNaN().any();

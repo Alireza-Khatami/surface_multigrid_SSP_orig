@@ -260,15 +260,55 @@ diagnostic result, not switched on as the actual validity gate.**
 (or `check_valid_UV_lscm` directly) once the pin-target strategy itself is
 fixed — see "Next steps" below.
 
-## Next steps (not yet implemented)
+## Fix found: vi/vj pin ordering was backwards
 
-Literal, collapse-independent pin constants (`vi=(-0.5,0)`, `vj=(0.5,0)`)
-don't work for these tiny one-ring patches — they ignore each collapse's
-actual local geometry. Proposed direction: derive the pin *targets* from
-something scale/shape-appropriate to that specific collapse, while still
-reusing the *same* value across every sheet of that one collapse (the actual
-goal). E.g.: solve one designated reference sheet normally (free `vi`/`vj`/
-`vk`, exactly like the unpinned original), then pin every *other* sheet's
-`vi`/`vj`/`vk` to that reference sheet's solved values. This adapts to each
-collapse's real scale instead of imposing an arbitrary fixed geometry on a
-3-face patch. Not yet implemented — awaiting direction before proceeding.
+Before jumping to a more complex (reference-sheet-derived) strategy, the
+original 2-pin code's own comment (`src/joint_lscm.cpp:245-247`) was
+re-checked directly:
+
+```
+// B_glued[0] is adjacent to vj and B_glued[1] is adjacent to vi in the one-ring.
+// Pinning them on the seam line (y=0) spread in x forces the correct seam ordering:
+//   B_glued[0](-1) < vj < vi < B_glued[1](+1)  at y≈0
+```
+
+The documented natural cyclic order is `B_glued[0](-1) < vj < vi <
+B_glued[1](+1)` — `vj` (adjacent to `B_glued[0]`) belongs near `-1`, `vi`
+(adjacent to `B_glued[1]`, closing the loop) belongs near `+1`. The original
+implementation of this fix had them **backwards**:
+`vi_target=(-0.5,0)`/`vj_target=(0.5,0)` — i.e. `B_glued[0](-1) < vi(-0.5) <
+vj(0.5) < B_glued[1](+1)`, contradicting the documented order. Forcing `vi`
+and `vj` into the wrong relative position on the seam line, on top of tiny
+3-11-face patches with no slack, is exactly the kind of contradiction that
+produces flipped/folded triangles.
+
+**Fix**: swapped to `vi_target=(0.5,0)`, `vj_target=(-0.5,0)` (and
+`vk_target = vi_target` still, per the earlier reasoning), matching the
+documented order. Re-ran headless verification with the validity gate
+reverted to the **full** check (`check_valid_UV_lscm_full`, composed from
+`check_uv_face_flip` + `check_uv_foldover` + `check_uv_triangle_quality` —
+not the relaxed diagnostic gate):
+
+| Metric | Before (backwards pins, full check) | After (correct pins, full check) |
+|---|---|---|
+| `SEAM-PIN-PASS` | 0 / 1290 | **1211 / 1257 (96.3%)** |
+| `seam_uv_consistency` mismatches | 0 (trivial — nothing succeeded) | **0 (real — solves actually agree)** |
+| QCE on passing cases | N/A (nothing passed) | max ~1.3–2.2, mean ~1.1–1.8 (well under the 3.0 high-distortion threshold) |
+
+This confirms the fix is real, not just a relaxed check: passing cases now
+have good conformal quality, not the ~6.3-max distortion seen when the
+flip/fold-over checks were disabled instead.
+
+`check_valid_UV_lscm_diag_no_flip_foldover` and the composed
+`check_valid_UV_lscm_full` both remain in `joint_lscm_pinned.cpp` (the
+diagnostic as a documented result of the investigation, the full one as the
+actual validity gate now in use).
+
+## Remaining: 43/1257 (3.4%) still fail
+
+Not yet investigated. Possible causes to check next: whether these are
+correlated with very short `B_arc`s (few `B_reflected` vertices), or
+orientation-flip cases that `joint_lscm_case1_dc` has an auto-correction
+safety net for (re-solve with swapped pin x-values if majority of top-sheet
+faces come out with negative signed area) but `joint_lscm_double_cover`
+(and this pinned variant, which mirrors it) does not.
