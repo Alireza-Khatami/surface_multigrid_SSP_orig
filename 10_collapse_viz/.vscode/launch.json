@@ -10,7 +10,12 @@
         "--mesh_path",
         // "C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\meshes\\bunny.obj",
         // "c:\\Users\\alirz\\OneDrive\\Desktop\\subDiv_cube.obj"
-        "C:\\Users\\alirz\\Projects\\Graphics\\QMAT_old working version  exe file\\qmat_x64\\qmat\\output\\01_00040057_f8f78dbd17414efda75bc437_trimesh_000\\mat_01_00040051_b95bd5d02f4d435098659bb3_trimesh_000.obj__2025-05-06_04_41_27.obj"
+        // Was pointing at a file that doesn't exist on disk (wrong id/timestamp:
+        // mat_01_00040051_..._04_41_27.obj), which made init_ssp() silently
+        // return with gV never populated, crashing later inside safe_V() on
+        // gV.leftCols(3). Fixed to the mesh matching --matstruct_path below
+        // (same id 00040057, same timestamp 02_38_00, confirmed to exist).
+        "D:\\datasets\\abc_full_10k\\out_ABC_v6_knn_poission40_20_15_10\\01_00040057_f8f78dbd17414efda75bc437_trimesh_000\\mat\\mat_01_00040057_f8f78dbd17414efda75bc437_trimesh_000.obj__2025-05-06_02_38_00.obj"
         // "C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\latest_snapshot.obj",
         ,"--matstruct_path", "D:\\datasets\\abc_full_10k\\out_ABC_v6_knn_poission40_20_15_10\\01_00040057_f8f78dbd17414efda75bc437_trimesh_000\\mat\\mat_01_00040057_f8f78dbd17414efda75bc437_trimesh_000.obj__2025-05-06_02_38_00.ma_struct"
         ,"--target_faces", "200"
@@ -35,14 +40,15 @@
       "program": "${workspaceFolder}/build/debug/Debug/collapse_viz_bin.exe",
       "args": [
         "--mesh_path",
-        "D:\\datasets\\abc_full_10k\\out_ABC_v6_knn_poission40_20_15_10\\01_00040051_b95bd5d02f4d435098659bb3_trimesh_000\\mat\\mat_01_00040051_b95bd5d02f4d435098659bb3_trimesh_000.obj__2025-05-06_04_41_27.obj"
+        "C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\Experiments\\bear\\structural_mat\\bear\\bear_simplified.obj"
         , "--matstruct_path",
-        "D:\\datasets\\abc_full_10k\\out_ABC_v6_knn_poission40_20_15_10\\01_00040051_b95bd5d02f4d435098659bb3_trimesh_000\\mat\\mat_01_00040051_b95bd5d02f4d435098659bb3_trimesh_000.obj__2025-05-06_04_41_27.ma_struct"
+        "C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\Experiments\\bear\\structural_mat\\bear\\bear.ma_struct"
         ,"--target_faces", "200"
         ,"--mode", "qslim"//qslim , midpoint, meshlab/
         // ,"--n_samples_total", "1000000"
-        ,"--output_dir", "./output/01_00040051_b95bd5d02f4d435098659bb3_trimesh_000"
-        ,"--validity-checks"
+        ,"--output_dir", "./output/bear"
+
+        // ,"--validity-checks"
         // ,"--mat_struct_check"
         ,"--trace_vertices", "trace_vids.txt"
       ],
@@ -59,14 +65,25 @@
       "program": "${workspaceFolder}/build/release/Release/collapse_viz_bin.exe",
       "args": [
         "--mesh_path",
-        "D:\\datasets\\abc_full_10k\\out_ABC_v6_knn_poission40_20_15_10\\01_00040051_b95bd5d02f4d435098659bb3_trimesh_000\\mat\\mat_01_00040051_b95bd5d02f4d435098659bb3_trimesh_000.obj__2025-05-06_04_41_27.obj"
-        , "--matstruct_path",
-        "D:\\datasets\\abc_full_10k\\out_ABC_v6_knn_poission40_20_15_10\\01_00040051_b95bd5d02f4d435098659bb3_trimesh_000\\mat\\mat_01_00040051_b95bd5d02f4d435098659bb3_trimesh_000.obj__2025-05-06_04_41_27.ma_struct"
+        // "D:\\datasets\\abc_full_10k\\out_ABC_v6_knn_poission40_20_15_10\\01_00040108_03c764cd0c404d349d75040b_trimesh_000\\mat\\mat_01_00040108_03c764cd0c404d349d75040b_trimesh_000.obj__2025-05-06_05_44_50.obj",
+        //  "--matstruct_path",
+        // "D:\\datasets\\abc_full_10k\\out_ABC_v6_knn_poission40_20_15_10\\01_00040108_03c764cd0c404d349d75040b_trimesh_000\\mat\\mat_01_00040108_03c764cd0c404d349d75040b_trimesh_000.obj__2025-05-06_05_44_50.ma_struct"
+        // "--mesh_path",
+        // "D:\\datasets\\abc_full_10k\\out_ABC_v6_knn_poission40_20_15_10\\01_00040049_5c84f0ac4aea4ad28f79872b_trimesh_000\\mat\\mat_01_00040049_5c84f0ac4aea4ad28f79872b_trimesh_000.obj__2025-05-06_01_18_16.obj"
+        // , "--matstruct_path",
+        // "D:\\datasets\\abc_full_10k\\out_ABC_v6_knn_poission40_20_15_10\\01_00040049_5c84f0ac4aea4ad28f79872b_trimesh_000\\mat\\mat_01_00040049_5c84f0ac4aea4ad28f79872b_trimesh_000.obj__2025-05-06_01_18_16.ma_struct"
+        "D:\\projects\\graphics\\QMAT_CLI\\experiments\\spike_experiments\\results\\bear_5000\\bear___v_5000.ply"
+        // , "--matstruct_path",
+        // "C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\Experiments\\bear\\structural_mat\\bear\\bear.ma_struct"
         ,"--target_faces", "200"
         ,"--mode", "qslim"//qslim , midpoint, meshlab/
-        ,"--n_samples_total", "1000000"
-        ,"--output_dir", "./output/01_00040051_b95bd5d02f4d435098659bb3_trimesh_000"
-        ,"--validity-checks"
+        // ,"--n_samples_total", "1000000"
+        ,"--output_dir", "./output/bear"
+        ,"--target_faces", "200"
+        ,"--mode", "qslim"//qslim , midpoint, meshlab/
+        // ,"--n_samples_total", "1000000"
+        ,"--output_dir", "./output/bear/bear_5000"
+        // ,"--validity-checks"
         // ,"--mat_struct_check"
         ,"--trace_vertices", "trace_vids.txt"
       ],

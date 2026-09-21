@@ -36,6 +36,7 @@
 #include <min_heap.h>
 
 #include <Eigen/Dense>
+#include <cstdlib>
 #include <iostream>
 #include <map>
 #include <set>
@@ -128,7 +129,16 @@ static void init_ssp(const std::string & mesh_path, int tarF, const std::string 
 
         bool ok = (ext == "obj") ? load_obj_vfl(mesh_path, VO, FO, l_edges)
                                  : igl::read_triangle_mesh(mesh_path, VO, FO);
-        if (!ok) return;
+        if (!ok) {
+            // Fail loudly and exit instead of silently returning: leaving
+            // gV/gF unpopulated (0x0) lets the program keep running and
+            // crash much later, in an unrelated place, on the first
+            // gV.leftCols(3) call (e.g. safe_V() in visualizer.cpp) —
+            // confusing to debug since the stack trace points nowhere near
+            // the actual cause (a bad --mesh_path).
+            fprintf(stderr, "[FATAL] failed to load mesh: %s\n", mesh_path.c_str());
+            std::exit(1);
+        }
     }
     std::cout << "Loaded: |V|=" << VO.rows() << "  |F|=" << FO.rows()
               << "  |l|=" << l_edges.size() << "\n";
