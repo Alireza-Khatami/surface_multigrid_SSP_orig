@@ -1,6 +1,7 @@
-#include "visualizer.h"
+﻿#include "visualizer.h"
 #include "stale_chains.h"
 #include "sheet_seam_viz.h"
+#include "seam_uv_view.h"
 #include "coarse_fine_viz.h"
 #include "face_sample_tracker.h"
 #include "collapse_structure_tracker/simp_viz_tracker.h"
@@ -66,6 +67,9 @@ static bool  gStopAtDCFail   = false;  // persistent: stop when DC solve itself 
 static int   gBreakAtCollapse   = -1;     // stop when gCollapseCount reaches this; -1 = disabled
 static char  gBreakAtBuf[16]    = "";
 static bool  gCanonicalView     = false;
+static bool  gUVView            = false;  // standalone seam multi-sheet UV overlay view
+static bool  gShowUVViewPre     = true;   // UV View: show UV_pre overlay
+static bool  gShowUVViewPost    = true;   // UV View: show UV_post overlay
 static bool  gShowRingPre       = true;
 static bool  gShowRingPost      = true;
 static bool  gShowUVPre         = false;
@@ -88,6 +92,10 @@ static float gPostHeight        = 1.0f;   // elevation of ring_post above ring_p
 static bool  gShowCollapsedEdge = true;
 static bool  gShowMeshPre       = false;
 static bool  gShowOrigOrient    = false; // original fine mesh with CW/CCW face colors
+// V_pre/V_post point clouds for ALL sheets (3D, canonical ring space).
+// The seam multi-sheet UV overlay lives in its own standalone view (see
+// seam_uv_view.h) — pure UV space, not mixed with 3D ring geometry.
+static bool  gShowSheetVPts     = true;
 static float edge_radius        = 0.00006f;
 static float pts_radius         = 0.00008f;
 
@@ -250,6 +258,23 @@ struct DisplayGeometry {
 
 static DisplayGeometry gLastCanonGeom;   // saved from last show_canonical_view()
 static bool            gHasCanonGeom = false;
+
+// Shared HSV→RGB helper for per-sheet color coding (non-active sheets, seam overlay).
+static std::array<float,3> hsv_to_rgb(float h, float s, float v) {
+    float c = v * s, x = c * (1.f - std::fabs(std::fmod(h * 6.f, 2.f) - 1.f));
+    float m = v - c;
+    float r,g,b;
+    int hi = (int)(h * 6.f);
+    switch (hi % 6) {
+        case 0: r=c; g=x; b=0; break;
+        case 1: r=x; g=c; b=0; break;
+        case 2: r=0; g=c; b=x; break;
+        case 3: r=0; g=x; b=c; break;
+        case 4: r=x; g=0; b=c; break;
+        default:r=c; g=0; b=x; break;
+    }
+    return {r+m, g+m, b+m};
+}
 
 static DisplayGeometry compute_ring_geometry()
 {
@@ -1201,23 +1226,6 @@ static void show_canonical_view()
     if (!gDecInfo.empty()) {
         const auto & collapse = gDecInfo.back();
 
-        // Shared HSV helper used by both (a) and (b).
-        auto hsv_to_rgb = [](float h, float s, float v) -> std::array<float,3> {
-            float c = v * s, x = c * (1.f - std::fabs(std::fmod(h * 6.f, 2.f) - 1.f));
-            float m = v - c;
-            float r,g,b;
-            int hi = (int)(h * 6.f);
-            switch (hi % 6) {
-                case 0: r=c; g=x; b=0; break;
-                case 1: r=x; g=c; b=0; break;
-                case 2: r=0; g=c; b=x; break;
-                case 3: r=0; g=x; b=c; break;
-                case 4: r=x; g=0; b=c; break;
-                default:r=c; g=0; b=x; break;
-            }
-            return {r+m, g+m, b+m};
-        };
-
         // (a) NAF faces — grouped by sheet_id, one mesh per sheet with its own hue.
         {
             // Group by sheet_id.
@@ -1475,6 +1483,41 @@ static void show_canonical_view()
         }
     }
 
+    // ---- Per-sheet V_pre / V_post point clouds (3D) ----
+    // Exact pre/post one-ring geometry for every active sheet of the current collapse,
+    // not just the currently-selected one. Positioned in canonical 3D ring space
+    // (same rotation/centering as V_ring) so they line up with the one-ring mesh.
+    // NOTE: this is true 3D mesh scale, not UV space — the seam multi-sheet UV
+    // overlay lives in its own standalone view (see seam_uv_view.h) so it is never
+    // mixed with this 3D geometry.
+    if (!gAllSheets.empty()) {
+        int nSheets = (int)gAllSheets.size();
+        for (int si = 0; si < nSheets; si++) {
+            const SheetData & es = gAllSheets[si];
+            float hue = (float)si / (float)nSheets;
+            auto c = hsv_to_rgb(hue, 0.8f, 0.95f);
+
+            if (es.V_pre.rows() > 0) {
+                MatrixXd pre_pts = rot(es.V_pre);
+                char name[64];
+                snprintf(name, sizeof(name), "sheet_%d_sid%d_Vpre_pts", si, es.global_sheet_id);
+                polyscope::registerPointCloud(name, pre_pts)
+                    ->setPointColor({c[0], c[1], c[2]})
+                    ->setPointRadius(0.010f, true)
+                    ->setEnabled(gShowSheetVPts);
+            }
+            if (es.V_post.rows() > 0) {
+                MatrixXd post_pts = rot(es.V_post);
+                char name[64];
+                snprintf(name, sizeof(name), "sheet_%d_sid%d_Vpost_pts", si, es.global_sheet_id);
+                polyscope::registerPointCloud(name, post_pts)
+                    ->setPointColor({1.0f - c[0], 1.0f - c[1], 1.0f - c[2]})
+                    ->setPointRadius(0.010f, true)
+                    ->setEnabled(gShowSheetVPts);
+            }
+        }
+    }
+
     sample_tracker_show_canonical(gc.uv_pre_3d, gc.uv_post_3d, gSnap.FUV_pre, gSnap.FUV_post);
 
     // Cache for the export panel.
@@ -1543,6 +1586,14 @@ static void face_flip_tracker_show_viz()
 // ---- update polyscope display ----
 void update_display()
 {
+    // Standalone UV view: pure UV-space overlay, nothing else. Short-circuit so
+    // step/slider-driven redraws don't rebuild the normal-view or canonical-view
+    // geometry underneath it.
+    if (gUVView) {
+        if (gSnap.valid) show_seam_uv_view(gAllSheets, gShowUVViewPre, gShowUVViewPost);
+        return;
+    }
+
     // Main mesh (only in normal view)
     if (!gCanonicalView) {
         MatrixXi Flive = live_faces();
@@ -1620,6 +1671,39 @@ void update_display()
 // ---- ImGui callback ----
 void ui_callback()
 {
+    // Standalone UV View: its own dedicated window, completely separate from
+    // the main "SSP Collapse Visualizer" panel. Stepping/running is paused
+    // while inspecting it — it's a frozen snapshot of the current collapse's
+    // sheets, not something that changes as decimation continues.
+    if (gUVView) {
+        ImGui::SetNextWindowSize({320, 170}, ImGuiCond_FirstUseEver);
+        ImGui::Begin("Seam UV View");
+        ImGui::Text("Collapse #%d   sheets=%d", gCollapseCount, (int)gAllSheets.size());
+        if (gSnap.valid) ImGui::Text("Edge: vi=%d  vj=%d", gSnap.vi, gSnap.vj);
+        ImGui::TextWrapped(
+            "Raw, unaligned per-sheet joint_lscm UV output overlaid in one\n"
+            "shared frame (no rotation/scale). Misaligned sheets show up as\n"
+            "same-colored vi/vj markers that do NOT coincide.");
+        ImGui::Separator();
+        bool uvRedraw = false;
+        uvRedraw |= ImGui::Checkbox("Pre (bright)", &gShowUVViewPre);
+        ImGui::SameLine();
+        uvRedraw |= ImGui::Checkbox("Post (muted)", &gShowUVViewPost);
+        if (uvRedraw)
+            show_seam_uv_view(gAllSheets, gShowUVViewPre, gShowUVViewPost);
+        ImGui::Separator();
+        if (ImGui::Button("Back to Canonical View")) {
+            gUVView        = false;
+            gCanonicalView = true;
+            polyscope::removeAllStructures();
+            clear_seam_onering();
+            show_canonical_view();
+            polyscope::view::resetCameraToHomeView();
+        }
+        ImGui::End();
+        return;
+    }
+
     sheet_seam_pick_check();
     coarse_fine_pick_check();
     simp_viz_tracker_pick_check();
@@ -1827,7 +1911,9 @@ void ui_callback()
                 "(waiting for #%d)", gBreakAtCollapse);
     }
 
-    // Canonical / normal view toggle
+    // Canonical / normal view toggle.
+    // (UV View has its own dedicated window — see the early-return at the top
+    // of ui_callback() — so it never reaches this panel.)
     if (gSnap.valid) {
         ImGui::Separator();
         if (!gCanonicalView) {
@@ -1929,6 +2015,38 @@ void ui_callback()
                 else          { printf("[Log Seam Info] no data\n"); fflush(stdout); }
             }
         }
+        ImGui::Separator();
+
+        // Seam multi-sheet UV overlay — standalone view (see seam_uv_view.h).
+        // Overlays each active sheet's RAW (unaligned, un-rotated) UV_pre/UV_post
+        // solution in one shared UV frame so misalignment at the shared vi/vj seam
+        // vertices is visible. Pure UV space — kept separate from the 3D canonical
+        // view so it's never mixed with true-mesh-scale geometry like V_pre/V_post pts.
+        if ((int)gAllSheets.size() > 1) {
+            if (ImGui::Button("UV View")) {
+                gUVView        = true;
+                gCanonicalView = false;
+                polyscope::removeAllStructures();
+                clear_seam_onering();
+                show_seam_uv_view(gAllSheets, gShowUVViewPre, gShowUVViewPost);
+                polyscope::view::resetCameraToHomeView();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Switches to a standalone UV-space view: overlays each active\n"
+                    "sheet's RAW (unaligned, un-rotated) UV_pre/UV_post solution in\n"
+                    "one shared frame. vi/vj markers use the same color as their\n"
+                    "sheet's mesh — if sheets are not aligned in UV, their vi/vj\n"
+                    "markers will not coincide even though vi/vj are the same\n"
+                    "global vertices.");
+            ImGui::Separator();
+        }
+        vis |= ImGui::Checkbox("Sheet V_pre/V_post points (all sheets)", &gShowSheetVPts);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "Exact 3D pre/post one-ring point clouds for every active sheet of\n"
+                "this collapse (not just the selected sheet), colored to match the\n"
+                "sheet's overlay/non-active-sheet color.");
         ImGui::Separator();
 
         vis |= ImGui::Checkbox("UV", &gShowCanonUV);

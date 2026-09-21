@@ -208,6 +208,17 @@ int SSP_last_collapse_dv();
 void SSP_seam_log_open(const char * path);
 void SSP_seam_log_close();
 
+// Per-seam-collapse UV-consistency diagnostic: for every seam collapse (2+
+// active sheets), checks whether vi's UV_pre, vj's UV_pre, and the merged
+// post-collapse point's UV_post agree (within 1e-9) across all active
+// sheets. Each sheet solves joint_lscm independently, so they are NOT
+// expected to agree in general — this logs every case where they don't,
+// with the collapse, the point (vi/vj/vk), which sheet, and by how much.
+// Call once from main after out_dir is known. Falls back to stderr if never
+// opened. No-op (nothing logged) for non-seam collapses.
+void SSP_seam_uv_log_open(const char * path);
+void SSP_seam_uv_log_close();
+
 void SSP_rej_log_open(const char * path);
 void SSP_rej_log_close();
 FILE * SSP_rej_log_file();          // shared by SSP_collapse_edge and qslim callbacks

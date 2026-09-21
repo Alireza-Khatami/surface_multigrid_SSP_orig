@@ -904,6 +904,7 @@ int main(int argc, char * argv[])
 
     print_seam_edge_costs(out_dir + "seam_edge_costs_" + stem + ".txt");
     SSP_seam_log_open((out_dir + "seam_diag_" + stem + ".txt").c_str());
+    SSP_seam_uv_log_open((out_dir + "seam_uv_consistency_" + stem + ".txt").c_str());
     // SSP_rej_log_open already called before init_ssp (to capture initial cost-pass [QSLIM-INF]).
     dc_log_open((out_dir + "dc_log_" + stem + ".txt").c_str());
 
@@ -938,6 +939,7 @@ int main(int argc, char * argv[])
 #endif
 
     SSP_seam_log_close();
+    SSP_seam_uv_log_close();
     SSP_rej_log_close();
     dc_log_close();
     SSP_lscm_write_readme();

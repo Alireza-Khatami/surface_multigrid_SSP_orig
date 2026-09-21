@@ -23,6 +23,18 @@ void SSP_seam_log_close() {
   if (s_seam_log) { fclose(s_seam_log); s_seam_log = nullptr; }
 }
 
+// ---- Seam UV-consistency diagnostic log ----
+// See SSP_collapse_edge.h for what this checks.
+static FILE * s_seam_uv_log = nullptr;
+void SSP_seam_uv_log_open(const char * path) {
+  if (s_seam_uv_log) fclose(s_seam_uv_log);
+  s_seam_uv_log = path ? fopen(path, "w") : nullptr;
+}
+void SSP_seam_uv_log_close() {
+  if (s_seam_uv_log) { fclose(s_seam_uv_log); s_seam_uv_log = nullptr; }
+}
+#define SEAM_UV_LOG(fmt, ...) fprintf(s_seam_uv_log ? s_seam_uv_log : stderr, fmt, __VA_ARGS__)
+
 // ---- Validity checks toggle ----
 static bool s_validity_checks = false;
 void SSP_validity_checks_enable(bool e) { s_validity_checks = e; }
@@ -1399,6 +1411,67 @@ bool SSP_collapse_edge(
     }
 #endif
     return false;
+  }
+
+  // ---- Seam UV-consistency check ----
+  // Every active sheet of a seam collapse solves its own independent
+  // joint_lscm, so vi/vj/vk (the merged post-collapse point) are NOT
+  // expected to land on the same UV coordinates across sheets. Log every
+  // case where they differ by more than 1e-9, so the extent of this
+  // misalignment can be audited across a whole run rather than only
+  // inspected interactively (see 10_collapse_viz's "UV View").
+  if (is_seam_collapse && data.sheets.size() > 1) {
+    constexpr double kSeamUvTol = 1e-9;
+
+    // extract(sheet) -> (found, uv). "vk" = the merged post-collapse point:
+    // UV_post.row(local vi) — vi is always the survivor (get_post_faces
+    // remaps vj onto vi), so that row holds the solved merged position.
+    auto check_point = [&](const char * label, auto extract) {
+      struct Sample { int sheet_idx; int global_sid; Eigen::RowVector2d uv; };
+      vector<Sample> samples;
+      for (int si = 0; si < (int)data.sheets.size(); si++) {
+        Eigen::RowVector2d uv;
+        if (extract(data.sheets[si], uv))
+          samples.push_back({si, data.sheets[si].global_sheet_id, uv});
+      }
+      if (samples.size() < 2) return;
+      const Sample & ref = samples[0];
+      for (size_t k = 1; k < samples.size(); k++) {
+        double diff = (samples[k].uv - ref.uv).norm();
+        if (diff > kSeamUvTol) {
+          SEAM_UV_LOG(
+            "[SEAM-UV-MISMATCH] collapse=#%zu e=(%d,%d) point=%s "
+            "sheet=%d(sid=%d) UV=(%.9f,%.9f)  ref_sheet=%d(sid=%d) ref_UV=(%.9f,%.9f)  diff=%.9e\n",
+            decInfo.size(), E(e,0), E(e,1), label,
+            samples[k].sheet_idx, samples[k].global_sid, samples[k].uv(0), samples[k].uv(1),
+            ref.sheet_idx, ref.global_sid, ref.uv(0), ref.uv(1), diff);
+        }
+      }
+    };
+
+    check_point("vi", [](const SheetData & sd, Eigen::RowVector2d & out) -> bool {
+      if (sd.b.size() < 1) return false;
+      int lvi = sd.b(0);
+      if (lvi < 0 || lvi >= sd.UV_pre.rows()) return false;
+      out = sd.UV_pre.row(lvi);
+      return true;
+    });
+    check_point("vj", [](const SheetData & sd, Eigen::RowVector2d & out) -> bool {
+      if (sd.b.size() < 2) return false;
+      int lvj = sd.b(1);
+      if (lvj < 0 || lvj >= sd.UV_pre.rows()) return false;
+      out = sd.UV_pre.row(lvj);
+      return true;
+    });
+    check_point("vk", [](const SheetData & sd, Eigen::RowVector2d & out) -> bool {
+      if (sd.b.size() < 1) return false;
+      int lvi = sd.b(0);
+      if (lvi < 0 || lvi >= sd.UV_post.rows()) return false;
+      out = sd.UV_post.row(lvi);
+      return true;
+    });
+
+    fflush(s_seam_uv_log ? s_seam_uv_log : stderr);
   }
 
   // [NON-ACTIVE-SHEET] Real faces of d that Pass 2 will remap (d→s in gF)

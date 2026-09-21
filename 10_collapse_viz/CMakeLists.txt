@@ -54,7 +54,7 @@ endif()
 option(C2F_VIZ_DIAGNOSTIC "Enable per-collapse ring_post c2f diagnostic polyscope visualization (traced walk, point clouds, arrows)" ON)
 if(C2F_VIZ_DIAGNOSTIC)
     target_compile_definitions(${PROJECT_NAME}_bin PRIVATE C2F_VIZ_DIAGNOSTIC)
-    target_sources(${PROJECT_NAME}_bin PRIVATE visualizer.cpp sheet_seam_viz.cpp)
+    target_sources(${PROJECT_NAME}_bin PRIVATE visualizer.cpp sheet_seam_viz.cpp seam_uv_view.cpp)
 endif()
 
 option(SSP_LSCM_LOG "Enable SSP LSCM mapping diagnostic logs (fan_walk, pre-jlscm, LSCM-FAIL, NON-ACTIVE-SHEET, etc.)" ON)
