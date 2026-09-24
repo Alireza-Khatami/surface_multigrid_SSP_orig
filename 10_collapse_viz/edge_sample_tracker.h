@@ -1,4 +1,5 @@
 #pragma once
+#include "coarse_mesh_compaction.h"
 #include <string>
 
 // Tracks samples seeded on the fine mesh's boundary/seam edges (from a
@@ -53,9 +54,11 @@ void edge_sample_tracker_update();
 
 // Write all edge samples to one file:
 //   id  type_id  struct_id  src_v0  src_v1  t  seed_face_id  cur_FIdx
-//   b0 b1 b2  bv0 bv1 bv2
+//   b0 b1 b2  bv0 bv1 bv2  cfi cb0 cb1 cb2
 // type_id follows the .ma_struct convention: 1 = seam, 2 = boundary.
-void edge_sample_tracker_save(const std::string& path);
+// cfi/cb*: compact face into lookup.cmc.Fout, bary in that face's corner order.
+// Throws if any sample cannot be resolved on the compact mesh.
+void edge_sample_tracker_save(const CoarseFaceLookup& lookup, const std::string& path);
 
 // Register polyscope point clouds (boundary / seam, colored distinctly).
 // No-op when C2F_VIZ_DIAGNOSTIC is not defined.

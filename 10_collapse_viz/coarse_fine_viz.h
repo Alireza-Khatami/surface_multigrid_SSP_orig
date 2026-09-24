@@ -1,9 +1,10 @@
 #pragma once
+#include "coarse_mesh_compaction.h"
 #include <string>
 
-// Compute coarse→fine correspondence for all live coarse vertices and write to file.
+// Compute coarse→fine correspondence for cmc's face-referenced vertices and write to file.
 // Call only after decimation has finished (gFinished == true).
-void coarse_fine_compute_and_save(const std::string & path);
+void coarse_fine_compute_and_save(const CoarseMeshCompaction & cmc, const std::string & path);
 
 // Read a previously saved correspondence file and visualise it in polyscope:
 // semi-transparent fine mesh + a line from every coarse vertex to its fine-mesh counterpart.
@@ -15,7 +16,8 @@ void coarse_fine_clear();
 // Save a self-contained bundle (compact coarse mesh + fine mesh + correspondence)
 // that 11_correspond_viz can load without any SSP library.
 // corrPath = existing coarse_to_fine.txt, bundlePath = output .c2f file.
-void coarse_fine_save_bundle(const std::string & corrPath, const std::string & bundlePath);
+void coarse_fine_save_bundle(const CoarseMeshCompaction & cmc,
+                             const std::string & corrPath, const std::string & bundlePath);
 
 // ImGui collapsing section: Save / Load+Show buttons + vertex picker.
 // Call inside ImGui::Begin / ImGui::End.

@@ -71,6 +71,7 @@ static int gNumInitial = 0;
 static std::vector<int>                     gTopoType;   // MS_* id, -1 = unknown
 static std::vector<std::set<int>>           gStructIds;
 static std::vector<std::unordered_set<int>> gAncestors;
+static std::vector<std::array<int,2>>       gStructTypes; // {struct_id, type_id} in .ma_struct order
 
 #ifdef C2F_VIZ_DIAGNOSTIC
 // point-cloud index → gV vertex id (rebuilt by simp_viz_tracker_update_display)
@@ -130,9 +131,11 @@ static bool derive_topo_types(const std::string& fname, int nv)
     std::vector<int>  seam_deg(nv, 0);
     std::vector<int>  bnd_deg(nv, 0);
 
+    gStructTypes.clear();
     for (int s = 0; s < num_structs; ++s) {
         int struct_id, type_id, count;
         if (!(f >> struct_id >> type_id >> count)) break;
+        gStructTypes.push_back({struct_id, type_id});
 
         for (int j = 0; j < count; ++j) {
             int elem_id;
@@ -245,15 +248,8 @@ void simp_viz_tracker_on_collapse(int s, int d)
     warn_unknown(d);
 }
 
-void simp_viz_tracker_write_json(const std::string& path)
+void simp_viz_tracker_write_json(const CoarseMeshCompaction& cmc, const std::string& path)
 {
-    // Live vertices in the SAME order as simplified_*.obj's v-lines and the
-    // .c2f bundle's coarseV, so vertices[i] here is the same physical point
-    // as coarseV[i] / the i-th OBJ vertex for i < NC. extend_with_stale_chains()
-    // then appends the naked stale-chain vertices past NC, using the same
-    // deterministic assignment the OBJ and bundle now also use.
-    CoarseMeshCompaction cmc = build_compact_coarse_mesh(gV, gF);
-    extend_with_stale_chains(cmc, gV, gStaleChains);
     const int NC = cmc.NC;
     const std::vector<int> live_verts(cmc.newToOld.data(), cmc.newToOld.data() + cmc.newToOld.size());
 
@@ -312,9 +308,17 @@ void simp_viz_tracker_write_json(const std::string& path)
         if (i < nL - 1) out << ",";
         out << "\n";
     }
+    out << "  ],\n";
+
+    // ---- structs: type per struct_id (0 sheet, 1 seam, 2 boundary, 3 junction) ----
+    out << "  \"structs\": [\n";
+    for (size_t i = 0; i < gStructTypes.size(); ++i)
+        out << "    { \"id\": " << gStructTypes[i][0] << ", \"type\": " << gStructTypes[i][1] << " }"
+            << (i + 1 < gStructTypes.size() ? "," : "") << "\n";
     out << "  ]\n}\n";
 
-    fprintf(stderr, "[simp_viz] wrote %d simplified vertices  ->  %s\n", nL, path.c_str());
+    fprintf(stderr, "[simp_viz] wrote %d simplified vertices, %zu structs  ->  %s\n",
+            nL, gStructTypes.size(), path.c_str());
 }
 
 // ============================================================

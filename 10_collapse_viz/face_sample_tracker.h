@@ -1,4 +1,5 @@
 #pragma once
+#include "coarse_mesh_compaction.h"
 #include <string>
 #include <Eigen/Dense>
 
@@ -21,9 +22,13 @@ void sample_tracker_init(int n_total = 2000);
 void sample_tracker_update();
 
 // Write fine-mesh seeds and coarse-mesh correspondences to text files.
-// vertices_path receives one row per original fine-mesh vertex:
-//   fine_vertex_id  coarse_face_id  b0 b1 b2  bv0 bv1 bv2
-void sample_tracker_save(const std::string& fine_path,
+// Coarse rows: global side (gF_row b0 b1 b2 bv0 bv1 bv2), then compact side
+// (cfi cb0 cb1 cb2: face into lookup.cmc.Fout, bary in that face's corner order).
+//   coarse_path:   sample_id is_vertex  <global> <compact>
+//   vertices_path: fine_vertex_id       <global> <compact>
+// Throws if any sample cannot be resolved on the compact mesh.
+void sample_tracker_save(const CoarseFaceLookup& lookup,
+                         const std::string& fine_path,
                          const std::string& coarse_path,
                          const std::string& vertices_path);
 

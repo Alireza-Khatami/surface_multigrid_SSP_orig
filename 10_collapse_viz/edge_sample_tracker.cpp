@@ -13,6 +13,7 @@
 #include <fstream>
 #include <cstdio>
 #include <random>
+#include <stdexcept>
 #include <algorithm>
 #include <map>
 #include <unordered_map>
@@ -304,27 +305,34 @@ void edge_sample_tracker_update()
     }
 }
 
-void edge_sample_tracker_save(const std::string& path)
+void edge_sample_tracker_save(const CoarseFaceLookup& lookup, const std::string& path)
 {
     if (gEdgeSamples.empty()) {
         fprintf(stderr, "[edge_sample_tracker] no samples to save\n");
         return;
     }
 
-    std::ofstream f(path);
-    if (!f) {
-        fprintf(stderr, "[edge_sample_tracker] cannot write %s\n", path.c_str());
-        return;
-    }
+    // Resolve first so a bad sample aborts before the file is written.
+    std::vector<CoarseSample> compact;
+    compact.reserve(gEdgeSamples.size());
+    for (const EdgeSample& s : gEdgeSamples)
+        compact.push_back(lookup.resolve(s.cur_FIdx, s.cur_BF, s.cur_BC));
 
-    f << "# id type_id struct_id src_v0 src_v1 t seed_face_id cur_FIdx b0 b1 b2 bv0 bv1 bv2\n";
+    std::ofstream f(path);
+    if (!f) throw std::runtime_error("[edge_sample_tracker] cannot write " + path);
+
+    f << "# id type_id struct_id src_v0 src_v1 t seed_face_id cur_FIdx b0 b1 b2 bv0 bv1 bv2"
+         " cfi cb0 cb1 cb2\n";
     f << gEdgeSamples.size() << "\n";
-    for (const EdgeSample& s : gEdgeSamples) {
+    for (size_t i = 0; i < gEdgeSamples.size(); i++) {
+        const EdgeSample& s = gEdgeSamples[i];
+        const CoarseSample& c = compact[i];
         f << s.id << " " << s.type_id << " " << s.struct_id
           << " " << s.src_v0 << " " << s.src_v1 << " " << s.t
           << " " << s.seed_face_id << " " << s.cur_FIdx
           << " " << s.cur_BC(0) << " " << s.cur_BC(1) << " " << s.cur_BC(2)
-          << " " << s.cur_BF(0) << " " << s.cur_BF(1) << " " << s.cur_BF(2) << "\n";
+          << " " << s.cur_BF(0) << " " << s.cur_BF(1) << " " << s.cur_BF(2)
+          << " " << c.face << " " << c.bary(0) << " " << c.bary(1) << " " << c.bary(2) << "\n";
     }
     fprintf(stderr, "[edge_sample_tracker] wrote %zu edge samples -> %s\n",
             gEdgeSamples.size(), path.c_str());

@@ -1,6 +1,7 @@
 #include "orient_faces_consistently.h"
 #include "stale_chains.h"
 #include "coarse_mesh_compaction.h"
+#include "coarse_mesh_export.h"
 #include "coarse_mesh_sanity_check.h"
 
 #include <igl/read_triangle_mesh.h>
@@ -55,11 +56,8 @@
 
 #ifdef C2F_VIZ_DIAGNOSTIC
 #include "visualizer.h"
-#include "coarse_fine_viz.h"
-#else
-void coarse_fine_compute_and_save(const std::string & path);
-void coarse_fine_save_bundle(const std::string & corrPath, const std::string & bundlePath);
 #endif
+#include "coarse_fine_viz.h"
 
 #include "face_sample_tracker.h"
 #include "load_matstruct.h"
@@ -342,139 +340,53 @@ static void print_seam_edge_costs(const std::string & out_path = "seam_edge_cost
             (int)gSeamEdgeList.size(), out_path.c_str());
 }
 
-// ---- export simplified mesh (OBJ + l-elements, and PLY with edge elements) ----
-// path = full path including ".obj" suffix; PLY is written alongside at the same stem.
-static void save_simplified_mesh(const std::string & path)
+// ---- simplified mesh: OBJ (+ l lines), PLY (+ chain edges), stale-chains OBJ ----
+// obj_path ends in ".obj"; the other two are written next to it.
+static void save_simplified_mesh(const CoarseMeshCompaction & cmc, const std::string & obj_path)
 {
-    // Shared coarse-mesh compaction — the .c2f bundle (coarse_fine_save_bundle)
-    // and *_simp_visualize_info.json (simp_viz_tracker_write_json) build their
-    // vertex numbering from this exact same call, so vertex index i means the
-    // same physical point in all three files for i < cmc.NC (the face-referenced
-    // coarse mesh). extend_with_stale_chains() appends the naked stale-chain
-    // vertices past cmc.NC using the same deterministic assignment the bundle
-    // now also uses, so those indices agree across files too.
-    CoarseMeshCompaction cmc = build_compact_coarse_mesh(gV, gF);
-    const std::vector<std::vector<int>> staleChainsCompact = extend_with_stale_chains(cmc, gV, gStaleChains);
-    const MatrixXd & Vout = cmc.Vbase;
-    const MatrixXi & Fout = cmc.Fout;
+    const std::string stem = obj_path.substr(0, obj_path.rfind('.'));
+    write_coarse_obj(obj_path, cmc);
+    write_coarse_ply(stem + ".ply", cmc);
+    if (!cmc.staleChains.empty())
+        write_stale_chains_obj(stem + "_stale_chains.obj", cmc);
+}
 
-    // Helper: map an original vertex ID to its compacted index (-1 on failure).
-    auto remap = [&](int vid) -> int {
-        if (vid < 0 || vid >= cmc.oldToNew.size()) return -1;
-        return cmc.oldToNew(vid);
+// ---- end-of-run exports ----
+// One compaction, built once, feeds every coarse-side writer.
+static bool export_final_outputs(const std::string & out_dir, const std::string & stem)
+{
+    auto out = [&](const std::string & prefix, const std::string & ext) {
+        return out_dir + prefix + stem + ext;
     };
+    const std::string simplified_obj = out("simplified_", ".obj");
+    const std::string c2f            = out("c2f_", ".txt");
+    const std::string bundle         = out("correspondence_", ".c2f");
+    const std::string json           = out_dir + stem + "_simp_visualize_info.json";
 
-    // ---- OBJ with l-elements ----
-    if (!igl::writeOBJ(path, Vout, Fout)) {
-        fprintf(stderr, "[SAVE-MESH] writeOBJ failed: %s\n", path.c_str());
-    } else {
-        fprintf(stderr, "[SAVE-MESH] wrote %d faces  %d verts  → %s\n",
-            (int)Fout.rows(), (int)Vout.rows(), path.c_str());
+    const CoarseMeshCompaction cmc = build_final_coarse_mesh(gV, gF, gStaleChains);
+    const CoarseFaceLookup lookup(cmc);
 
-        if (!gStaleChains.empty()) {
-            std::ofstream ofs(path, std::ios::app);
-            if (ofs.is_open()) {
-                int written = 0;
-                for (const auto & chain : gStaleChains) {
-                    std::vector<int> remapped;
-                    remapped.reserve(chain.size());
-                    bool ok = true;
-                    for (int vid : chain) {
-                        int nid = remap(vid);
-                        if (nid < 0) { ok = false; break; }
-                        remapped.push_back(nid + 1); // OBJ is 1-based
-                    }
-                    if (!ok || remapped.empty()) continue;
-                    ofs << "l";
-                    for (int idx : remapped) ofs << " " << idx;
-                    ofs << "\n";
-                    written++;
-                }
-                fprintf(stderr, "[SAVE-MESH] appended %d l-element chain(s) → %s\n",
-                        written, path.c_str());
-            } else {
-                fprintf(stderr, "[SAVE-MESH] could not reopen OBJ to append l-elements: %s\n",
-                        path.c_str());
-            }
-        }
+    save_simplified_mesh(cmc, simplified_obj);
+
+    // Written whether or not decimation reached the target face count.
+    const bool wrote_bundle = !gDecInfo.empty();
+    if (wrote_bundle) {
+        coarse_fine_compute_and_save(cmc, c2f);
+        coarse_fine_save_bundle(cmc, c2f, bundle);
     }
 
-    // ---- PLY with face triangles + stale chain edges ----
-    // PLY supports an "edge" element, so we include the chain geometry there too.
-    {
-        std::string ply_path = path;
-        { size_t dot = ply_path.rfind('.'); if (dot != std::string::npos) ply_path.resize(dot); }
-        ply_path += ".ply";
+    sample_tracker_save(lookup, out("samples_fine_", ".txt"),
+                        out("samples_coarse_", ".txt"), out("samples_vertices_", ".txt"));
+    sample_tracker_export_deformed_mesh(out("deformed_fine_mesh_", ".obj")); // fine-mesh topology
+    edge_sample_tracker_save(lookup, out("edge_samples_", ".txt"));
+    simp_viz_tracker_write_json(cmc, json);
 
-        // Collect edges from stale chains (consecutive vertex pairs in each chain).
-        std::vector<std::pair<int,int>> chain_edges;
-        for (const auto & chain : gStaleChains) {
-            for (int k = 0; k + 1 < (int)chain.size(); k++) {
-                int a = remap(chain[k]), b = remap(chain[k+1]);
-                if (a >= 0 && b >= 0)
-                    chain_edges.push_back({a, b});
-            }
-        }
-
-        std::ofstream ply(ply_path);
-        if (!ply.is_open()) {
-            fprintf(stderr, "[SAVE-MESH] writePLY failed (cannot open): %s\n", ply_path.c_str());
-        } else {
-            const int nV = (int)Vout.rows();
-            const int nF = (int)Fout.rows();
-            const int nE = (int)chain_edges.size();
-            // Header
-            ply << "ply\nformat ascii 1.0\n";
-            ply << "element vertex " << nV << "\n";
-            ply << "property float x\nproperty float y\nproperty float z\n";
-            ply << "element face " << nF << "\n";
-            ply << "property list uchar int vertex_indices\n";
-            if (nE > 0) {
-                ply << "element edge " << nE << "\n";
-                ply << "property int vertex1\nproperty int vertex2\n";
-            }
-            ply << "end_header\n";
-            // Vertices
-            for (int i = 0; i < nV; i++)
-                ply << Vout(i,0) << " " << Vout(i,1) << " " << Vout(i,2) << "\n";
-            // Faces
-            for (int i = 0; i < nF; i++)
-                ply << "3 " << Fout(i,0) << " " << Fout(i,1) << " " << Fout(i,2) << "\n";
-            // Edges
-            for (auto & [a, b] : chain_edges)
-                ply << a << " " << b << "\n";
-
-            fprintf(stderr, "[SAVE-MESH] wrote PLY %d verts  %d faces  %d chain edges  → %s\n",
-                    nV, nF, nE, ply_path.c_str());
-        }
+    // Re-read the files and cross-check that they agree on the vertex ordering.
+    if (wrote_bundle && !verify_coarse_mesh_outputs(simplified_obj, bundle, json, c2f)) {
+        fprintf(stderr, "[SANITY] coarse-mesh output verification FAILED — see [SANITY] MISMATCH lines above.\n");
+        return false;
     }
-
-    // ---- Separate stale-chains OBJ (MeshLab-visible edges) ----
-    // MeshLab doesn't render PLY edge elements visually; a standalone OBJ with
-    // only v + l lines is the reliable way to see the chains in MeshLab.
-    if (!gStaleChains.empty()) {
-        std::string chains_path = path;
-        { size_t dot = chains_path.rfind('.'); if (dot != std::string::npos) chains_path.resize(dot); }
-        chains_path += "_stale_chains.obj";
-
-        std::ofstream cofs(chains_path);
-        if (!cofs.is_open()) {
-            fprintf(stderr, "[SAVE-MESH] stale chains OBJ failed (cannot open): %s\n", chains_path.c_str());
-        } else {
-            // Full compact vertex list so indices match simplified_*.obj / the bundle.
-            for (int i = 0; i < (int)Vout.rows(); i++)
-                cofs << "v " << Vout(i,0) << " " << Vout(i,1) << " " << Vout(i,2) << "\n";
-            int written = 0;
-            for (const auto & chain : staleChainsCompact) {
-                cofs << "l";
-                for (int idx : chain) cofs << " " << (idx + 1); // OBJ is 1-based
-                cofs << "\n";
-                written++;
-            }
-            fprintf(stderr, "[SAVE-MESH] wrote stale chains OBJ %d chains  %d verts  → %s\n",
-                    written, (int)Vout.rows(), chains_path.c_str());
-        }
-    }
+    return true;
 }
 
 // ---- live face count (mirrors save_simplified_mesh: excludes dead + all-inf cap faces) ----
@@ -900,12 +812,6 @@ int main(int argc, char * argv[])
             return result;
         };
     }
-    const std::string c2f_path              = out_dir + "c2f_"               + stem + ".txt";
-    const std::string bundle_path           = out_dir + "correspondence_"     + stem + ".c2f";
-    const std::string samples_fine_path     = out_dir + "samples_fine_"       + stem + ".txt";
-    const std::string samples_coarse_path   = out_dir + "samples_coarse_"     + stem + ".txt";
-    const std::string samples_vertices_path = out_dir + "samples_vertices_"   + stem + ".txt";
-    const std::string edge_samples_path     = out_dir + "edge_samples_"       + stem + ".txt";
 
     if (gNSamplesTotal >= 0) {
         if (!traceVerticesPath.empty()) {
@@ -970,36 +876,11 @@ int main(int argc, char * argv[])
 #endif
     SSP_lscm_write_readme();
 
-    // Export the simplified mesh regardless of how many collapses happened.
-    const std::string simplified_obj_path = out_dir + "simplified_" + stem + ".obj";
-    save_simplified_mesh(simplified_obj_path);
-
-    // Auto-save on exit regardless of C2F_VIZ_DIAGNOSTIC and regardless of
-    // whether decimation reached the target face count.
-    const bool wrote_bundle = !gDecInfo.empty();
-    if (wrote_bundle) {
-        coarse_fine_compute_and_save(c2f_path);
-        coarse_fine_save_bundle(c2f_path, bundle_path);
+    try {
+        if (!export_final_outputs(out_dir, stem)) return 1;
+    } catch (const std::exception & e) {
+        fprintf(stderr, "[EXPORT] FAILED: %s\n", e.what());
+        return 1;
     }
-
-    sample_tracker_save(samples_fine_path, samples_coarse_path, samples_vertices_path);
-    sample_tracker_export_deformed_mesh(out_dir + "deformed_fine_mesh_" + stem + ".obj");
-    edge_sample_tracker_save(edge_samples_path);
-
-    const std::string simp_viz_json_path = out_dir + stem + "_simp_visualize_info.json";
-    simp_viz_tracker_write_json(simp_viz_json_path);
-
-    // Cross-check that simplified_*.obj, the .c2f bundle, *_simp_visualize_info.json,
-    // and the coarse<->fine correspondence file all agree on the coarse-mesh vertex
-    // ordering. This is the safety net that would have caught the index-space bugs
-    // fixed in this file immediately, instead of them surfacing downstream in the
-    // Python training pipeline as scrambled chain data.
-    if (wrote_bundle) {
-        if (!verify_coarse_mesh_outputs(simplified_obj_path, bundle_path, simp_viz_json_path, c2f_path)) {
-            fprintf(stderr, "[SANITY] coarse-mesh output verification FAILED — see [SANITY] MISMATCH lines above.\n");
-            return 1;
-        }
-    }
-
     return 0;
 }

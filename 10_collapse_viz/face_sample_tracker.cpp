@@ -14,6 +14,7 @@
 #include <fstream>
 #include <iostream>
 #include <random>
+#include <stdexcept>
 #include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
@@ -317,7 +318,24 @@ void sample_tracker_update()
     }
 }
 
-void sample_tracker_save(const std::string& fine_path,
+static std::ofstream open_or_throw(const std::string& path)
+{
+    std::ofstream f(path);
+    if (!f) throw std::runtime_error("[sample_tracker] cannot write " + path);
+    return f;
+}
+
+// Global coarse side (gF row, bary, gV corners) followed by the compact one (cfi, cb*).
+static void write_coarse_cols(std::ofstream& f, const Sample& s, const CoarseSample& c)
+{
+    f << " " << s.cur_FIdx
+      << " " << s.cur_BC(0) << " " << s.cur_BC(1) << " " << s.cur_BC(2)
+      << " " << s.cur_BF(0) << " " << s.cur_BF(1) << " " << s.cur_BF(2)
+      << " " << c.face << " " << c.bary(0) << " " << c.bary(1) << " " << c.bary(2) << "\n";
+}
+
+void sample_tracker_save(const CoarseFaceLookup& lookup,
+                         const std::string& fine_path,
                          const std::string& coarse_path,
                          const std::string& vertices_path)
 {
@@ -326,54 +344,47 @@ void sample_tracker_save(const std::string& fine_path,
         return;
     }
 
-    {
-        std::ofstream f(fine_path);
-        if (!f) {
-            fprintf(stderr, "[sample_tracker] cannot write %s\n", fine_path.c_str());
-        } else {
-            f << "# sample_id is_vertex fine_face_id b0 b1 b2\n";
-            f << gSamples.size() << "\n";
-            for (const Sample& s : gSamples)
-                f << s.id << " " << (s.is_vertex?1:0) << " " << s.fine_face_id
-                  << " " << s.fine_BC(0) << " " << s.fine_BC(1) << " " << s.fine_BC(2) << "\n";
-            fprintf(stderr, "[sample_tracker] wrote %zu fine samples → %s\n",
-                    gSamples.size(), fine_path.c_str());
-        }
-    }
-    {
-        std::ofstream f(coarse_path);
-        if (!f) {
-            fprintf(stderr, "[sample_tracker] cannot write %s\n", coarse_path.c_str());
-        } else {
-            f << "# sample_id is_vertex coarse_face_id b0 b1 b2 bv0 bv1 bv2\n";
-            f << gSamples.size() << "\n";
-            for (const Sample& s : gSamples)
-                f << s.id << " " << (s.is_vertex?1:0) << " " << s.cur_FIdx
-                  << " " << s.cur_BC(0) << " " << s.cur_BC(1) << " " << s.cur_BC(2)
-                  << " " << s.cur_BF(0) << " " << s.cur_BF(1) << " " << s.cur_BF(2) << "\n";
-            fprintf(stderr, "[sample_tracker] wrote %zu coarse correspondences → %s\n",
-                    gSamples.size(), coarse_path.c_str());
-        }
-    }
-    {
-        // One row per original fine-mesh vertex: fine_vertex_id + coarse correspondence.
-        std::vector<const Sample*> vtx_samples;
-        for (const Sample& s : gSamples)
-            if (s.is_vertex) vtx_samples.push_back(&s);
+    // Resolve everything first so a bad sample aborts before any file is written.
+    std::vector<CoarseSample> compact;
+    compact.reserve(gSamples.size());
+    for (const Sample& s : gSamples)
+        compact.push_back(lookup.resolve(s.cur_FIdx, s.cur_BF, s.cur_BC));
 
-        std::ofstream f(vertices_path);
-        if (!f) {
-            fprintf(stderr, "[sample_tracker] cannot write %s\n", vertices_path.c_str());
-        } else {
-            f << "# fine_vertex_id coarse_face_id b0 b1 b2 bv0 bv1 bv2\n";
-            f << vtx_samples.size() << "\n";
-            for (const Sample* s : vtx_samples)
-                f << s->fine_vertex_id << " " << s->cur_FIdx
-                  << " " << s->cur_BC(0) << " " << s->cur_BC(1) << " " << s->cur_BC(2)
-                  << " " << s->cur_BF(0) << " " << s->cur_BF(1) << " " << s->cur_BF(2) << "\n";
-            fprintf(stderr, "[sample_tracker] wrote %zu vertex tracks → %s\n",
-                    vtx_samples.size(), vertices_path.c_str());
+    {
+        std::ofstream f = open_or_throw(fine_path);
+        f << "# sample_id is_vertex fine_face_id b0 b1 b2\n";
+        f << gSamples.size() << "\n";
+        for (const Sample& s : gSamples)
+            f << s.id << " " << (s.is_vertex?1:0) << " " << s.fine_face_id
+              << " " << s.fine_BC(0) << " " << s.fine_BC(1) << " " << s.fine_BC(2) << "\n";
+        fprintf(stderr, "[sample_tracker] wrote %zu fine samples → %s\n",
+                gSamples.size(), fine_path.c_str());
+    }
+    {
+        std::ofstream f = open_or_throw(coarse_path);
+        f << "# sample_id is_vertex gF_row b0 b1 b2 bv0 bv1 bv2 cfi cb0 cb1 cb2\n";
+        f << gSamples.size() << "\n";
+        for (size_t i = 0; i < gSamples.size(); i++) {
+            f << gSamples[i].id << " " << (gSamples[i].is_vertex?1:0);
+            write_coarse_cols(f, gSamples[i], compact[i]);
         }
+        fprintf(stderr, "[sample_tracker] wrote %zu coarse correspondences → %s\n",
+                gSamples.size(), coarse_path.c_str());
+    }
+    {
+        size_t n_vtx = 0;
+        for (const Sample& s : gSamples) n_vtx += s.is_vertex;
+
+        std::ofstream f = open_or_throw(vertices_path);
+        f << "# fine_vertex_id gF_row b0 b1 b2 bv0 bv1 bv2 cfi cb0 cb1 cb2\n";
+        f << n_vtx << "\n";
+        for (size_t i = 0; i < gSamples.size(); i++) {
+            if (!gSamples[i].is_vertex) continue;
+            f << gSamples[i].fine_vertex_id;
+            write_coarse_cols(f, gSamples[i], compact[i]);
+        }
+        fprintf(stderr, "[sample_tracker] wrote %zu vertex tracks → %s\n",
+                n_vtx, vertices_path.c_str());
     }
 }
 

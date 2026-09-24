@@ -1,4 +1,5 @@
 #pragma once
+#include "../coarse_mesh_compaction.h"
 #include <string>
 
 // Initialize tracking: call once after init_ssp() and after load_matstruct().
@@ -11,9 +12,8 @@ void simp_viz_tracker_init(const std::string& matstruct_path, int n_initial);
 // Unions d's ancestors + struct IDs into s.
 void simp_viz_tracker_on_collapse(int s, int d);
 
-// Write *_simp_visualize_info.json to `path`.
-// Call after decimation finishes (or at any intermediate point for inspection).
-void simp_viz_tracker_write_json(const std::string& path);
+// Write *_simp_visualize_info.json to `path`; vertices[i] is cmc vertex i.
+void simp_viz_tracker_write_json(const CoarseMeshCompaction& cmc, const std::string& path);
 
 #ifdef C2F_VIZ_DIAGNOSTIC
 // Register / refresh the "simp_viz_verts" point cloud (colored by topo type).

@@ -13,6 +13,7 @@
 #include <igl/writeOBJ.h>
 #include "face_dead.h"
 #include "coarse_mesh_compaction.h"
+#include "coarse_mesh_export.h"
 #include "stale_chains.h"
 
 #include <query_coarse_to_fine.h>
@@ -435,22 +436,12 @@ static void rebuild_coarse_mesh_viz()
 
 // ---- implementation ----
 
-void coarse_fine_compute_and_save(const std::string & path)
+void coarse_fine_compute_and_save(const CoarseMeshCompaction & cmc, const std::string & path)
 {
     const int nFO = (int)gFaceSheetID.size();   // original face count (no infinity faces)
 
-    // Collect live coarse vertices: non-infinity, referenced by at least one live original face.
-    std::vector<int> coarseVerts;
-    coarseVerts.reserve(256);
-    for (int v = 0; v < (int)gV.rows(); v++) {
-        if (std::isinf(gV(v, 0))) continue;
-        for (int f : gVF[v]) {
-            if (f >= nFO) continue;
-            if (!is_face_live(gF, gV, f)) continue;
-            coarseVerts.push_back(v);
-            break;
-        }
-    }
+    // Face-referenced coarse vertices (gV ids), in compact order.
+    const std::vector<int> coarseVerts(cmc.newToOld.data(), cmc.newToOld.data() + cmc.NC);
 
     const int N = (int)coarseVerts.size();
     if (N == 0) { std::cerr << "[c2f] No live coarse vertices found.\n"; return; }
@@ -580,7 +571,8 @@ void coarse_fine_compute_and_save(const std::string & path)
 //   correspondence   NC × (bc0 bc1 bc2 double  +  fv0 fv1 fv2 uint32)
 //                    one entry per compact coarse vertex, in order
 // -----------------------------------------------------------------------
-void coarse_fine_save_bundle(const std::string & corrPath, const std::string & bundlePath)
+void coarse_fine_save_bundle(const CoarseMeshCompaction & cmc,
+                             const std::string & corrPath, const std::string & bundlePath)
 {
     std::ifstream in(corrPath);
     if (!in) { std::cerr << "[bundle] Cannot read " << corrPath << "\n"; return; }
@@ -602,15 +594,7 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
         hasCorr[vi] = true;
     }
 
-    // Build compact coarse mesh via the shared helper — this is the SAME
-    // vertex/face compaction save_simplified_mesh() and
-    // simp_viz_tracker_write_json() use, so coarseV[i] agrees with
-    // simplified_*.obj's i-th vertex and the JSON's vertices[i] for i < NC.
-    // extend_with_stale_chains() then appends the naked stale-chain vertices
-    // past NC, using the same deterministic assignment save_simplified_mesh
-    // uses, so coarseV[NC..NCE-1] also agrees with the OBJ's appended verts.
-    CoarseMeshCompaction cmc = build_compact_coarse_mesh(gV, gF);
-    std::vector<std::vector<int>> staleChainsCompact = extend_with_stale_chains(cmc, gV, gStaleChains);
+    const std::vector<std::vector<int>> & staleChainsCompact = cmc.staleChains;
     const MatrixXi & fullF = cmc.Fout;               // FC x 3, already in compact-index space (matches coarseV)
     const std::vector<int> newToOld(cmc.newToOld.data(), cmc.newToOld.data() + cmc.newToOld.size()); // size NCE
     const std::vector<int> fullFOrigIdx(cmc.faceOrigIdx.data(), cmc.faceOrigIdx.data() + cmc.faceOrigIdx.size());
@@ -838,39 +822,11 @@ void coarse_fine_save_bundle(const std::string & corrPath, const std::string & b
               << " nDec=" << nDec << " nStaleChains=" << staleChainsCompact.size()
               << " → " << bundlePath << "\n";
 
-    // Export the coarse mesh as OBJ alongside the bundle — same shape as
-    // simplified_*.obj: NC face-referenced verts + faces, then the naked
-    // stale-chain verts (NC..NCE-1) with l-elements, no face references.
-    {
-        std::string objPath = bundlePath;
-        size_t dot = objPath.rfind('.');
-        if (dot != std::string::npos) objPath = objPath.substr(0, dot);
-        objPath += ".obj";
-
-        MatrixXd Vc(NCE, 3);
-        for (uint32_t i = 0; i < NCE; i++)
-            Vc.row(i) << gV(newToOld[i],0), gV(newToOld[i],1), gV(newToOld[i],2);
-        // fullF is already in compact-index space (see coarseF write above) — use directly.
-        MatrixXi Fc(FC, 3);
-        for (int f = 0; f < (int)FC; f++)
-            Fc.row(f) << fullF(f,0), fullF(f,1), fullF(f,2);
-
-        if (!igl::writeOBJ(objPath, Vc, Fc)) {
-            std::cerr << "[bundle] writeOBJ failed: " << objPath << "\n";
-        } else {
-            std::cerr << "[bundle] coarse mesh OBJ → " << objPath << "\n";
-            if (!staleChainsCompact.empty()) {
-                std::ofstream ofs(objPath, std::ios::app);
-                if (ofs.is_open()) {
-                    for (const auto & chain : staleChainsCompact) {
-                        ofs << "l";
-                        for (int idx : chain) ofs << " " << (idx + 1); // OBJ is 1-based
-                        ofs << "\n";
-                    }
-                }
-            }
-        }
-    }
+    // Coarse mesh OBJ alongside the bundle, same layout as simplified_*.obj.
+    std::string objPath = bundlePath;
+    size_t dot = objPath.rfind('.');
+    if (dot != std::string::npos) objPath = objPath.substr(0, dot);
+    write_coarse_obj(objPath + ".obj", cmc);
 }
 
 void coarse_fine_clear()
@@ -1066,13 +1022,15 @@ void coarse_fine_imgui_section()
     ImGui::InputText("##c2fpath", gC2FPath, sizeof(gC2FPath));
     ImGui::SameLine();
     if (ImGui::Button("Save##c2f"))
-        coarse_fine_compute_and_save(std::string(gC2FPath));
+        coarse_fine_compute_and_save(build_final_coarse_mesh(gV, gF, gStaleChains),
+                                     std::string(gC2FPath));
 
     ImGui::SetNextItemWidth(230);
     ImGui::InputText("##bundlepath", gBundlePath, sizeof(gBundlePath));
     ImGui::SameLine();
     if (ImGui::Button("Save Bundle##c2f"))
-        coarse_fine_save_bundle(std::string(gC2FPath), std::string(gBundlePath));
+        coarse_fine_save_bundle(build_final_coarse_mesh(gV, gF, gStaleChains),
+                                std::string(gC2FPath), std::string(gBundlePath));
 
     if (ImGui::Button("Load & Show##c2f")) {
         coarse_fine_clear();

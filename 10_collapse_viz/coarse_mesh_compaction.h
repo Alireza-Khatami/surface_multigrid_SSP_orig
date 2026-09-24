@@ -1,45 +1,52 @@
 #pragma once
 #include <Eigen/Core>
+#include <array>
+#include <map>
+#include <utility>
 #include <vector>
 
-// The single shared compaction of the live decimated mesh (gV/gF) into a
-// coarse vertex/face list. Every exporter that writes "the simplified/coarse
-// mesh" (simplified_*.obj, the .c2f bundle's coarseV, *_simp_visualize_info.json)
-// must build its vertex numbering from this — building an independent
-// remap makes vertex index i refer to a different physical point in each file.
+// The single dense numbering of the decimated mesh (gV/gF). Every coarse-side
+// exporter must take its indices from one instance of this, built once.
 //
-// A face is kept iff it is not dead (igl::collapse_edge tombstone) and has
-// no vertex at infinity (the boundary-to-infinity cap). Vbase/Fout come from
-// igl::remove_unreferenced over exactly those kept faces.
-//
-// After build_compact_coarse_mesh(), indices 0..NC-1 are this face-referenced
-// coarse mesh. extend_with_stale_chains() (below) may append further, naked
-// (non-face-referenced) vertices past NC — Vbase/newToOld/oldToNew grow, but
-// NC itself stays fixed at the original face-referenced count so callers can
-// always tell the two regions apart.
+// Indices 0..NC-1: vertices referenced by a live face (not dead, no vertex at
+// infinity). Indices NC..Vbase.rows()-1: naked stale-chain vertices, appended
+// in gStaleChains order, first-seen-gets-next-index.
 struct CoarseMeshCompaction {
-    Eigen::MatrixXd Vbase;    // Vbase.rows() x 3 compacted vertex positions (NC rows until extended)
-    Eigen::MatrixXi Fout;     // FC x 3 compacted coarse faces (indices into Vbase, always < NC)
-    Eigen::VectorXi newToOld; // size Vbase.rows(); newToOld(i) = original (gV) vertex id
-    Eigen::VectorXi oldToNew; // size gV.rows(); oldToNew(v) = compact index, or -1 if not live/extended
-    Eigen::VectorXi faceOrigIdx; // size FC; faceOrigIdx(f) = original (gF) row this compact face came from
-    int NC = 0;               // face-referenced coarse vertex count, fixed at build time
+    Eigen::MatrixXd Vbase;       // compact vertex positions (NC + naked stale-chain rows)
+    Eigen::MatrixXi Fout;        // FC x 3 compact faces (indices < NC)
+    Eigen::VectorXi newToOld;    // compact -> gV id
+    Eigen::VectorXi oldToNew;    // gV id -> compact, -1 if not live
+    Eigen::VectorXi faceOrigIdx; // compact face -> gF row
+    int NC = 0;                  // face-referenced vertex count
+    std::vector<std::vector<int>> staleChains; // gStaleChains in compact indices
 };
 
-CoarseMeshCompaction build_compact_coarse_mesh(const Eigen::MatrixXd & gV, const Eigen::MatrixXi & gF);
+// Faces + stale chains. Throws on an empty or unmappable stale chain.
+CoarseMeshCompaction build_final_coarse_mesh(const Eigen::MatrixXd & gV,
+                                             const Eigen::MatrixXi & gF,
+                                             const std::vector<std::vector<int>> & gStaleChains);
 
-// Appends stale-chain vertices (naked, not referenced by any live face) to
-// cmc.Vbase/newToOld/oldToNew, past the existing NC entries. A chain vertex
-// already covered by the coarse mesh (oldToNew(v) >= 0) keeps its existing
-// index — it is not duplicated. New vertices are assigned indices in a fixed
-// deterministic order: gStaleChains walked in order, first-seen-gets-next-index.
-//
-// Returns the chains re-expressed as compact indices (0..Vbase.rows()-1).
-// Throws std::runtime_error on an empty chain or a vertex with no valid gV row.
-//
-// Call this AFTER build_compact_coarse_mesh() and BEFORE reading cmc.Vbase.rows()
-// as the final vertex count — cmc.NC still reports the pre-extension count.
-std::vector<std::vector<int>> extend_with_stale_chains(
-    CoarseMeshCompaction & cmc,
-    const Eigen::MatrixXd & gV,
-    const std::vector<std::vector<int>> & gStaleChains);
+// A tracker sample expressed on the compact mesh.
+struct CoarseSample {
+    int             face; // index into cmc.Fout
+    Eigen::Vector3d bary; // in cmc.Fout.row(face) corner order
+};
+
+// Converts tracker samples (gF row + bary on 3 gV corners) to CoarseSample.
+// Holds a reference to cmc, which must outlive it.
+class CoarseFaceLookup {
+public:
+    explicit CoarseFaceLookup(const CoarseMeshCompaction & cmc);
+
+    // Throws if the sample's corners are not live or match no compact face.
+    CoarseSample resolve(int gF_row, const Eigen::RowVector3i & gv_corners,
+                         const Eigen::RowVector3d & bary) const;
+
+    const CoarseMeshCompaction & cmc;
+
+private:
+    std::vector<int> gFRowToFace;                          // gF row -> compact face, -1 if dead
+    std::map<std::array<int,3>, int> faceByVerts;          // sorted corners -> first face
+    std::map<std::pair<int,int>, int> faceByEdge;          // sorted edge -> first face
+    std::vector<int> faceByVertex;                         // compact vertex -> first face, -1 if naked
+};
