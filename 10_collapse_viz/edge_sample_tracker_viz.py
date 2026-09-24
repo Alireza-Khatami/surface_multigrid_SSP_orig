@@ -559,10 +559,27 @@ def run_viz(edge_samples_path, bundle_path, z_offset, stride=STRIDE_DEFAULT, sho
     ps.show()
 
 
+# Hardcoded default experiment — the ABC shape used to develop/test this
+# viewer. Override on the command line to point at a different run's
+# edge_samples_<stem>.txt; uncomment another DEFAULT_EDGE_SAMPLES line (or
+# add one) to switch which experiment is the no-args default.
+DEFAULT_EDGE_SAMPLES = (
+    r"C:\Users\alirz\Projects\Graphics\Neural QMAT\external\surf_subgrid_SSP_orig"
+    r"\10_collapse_viz\output\abc_00040057_test"
+    r"\edge_samples_mat_01_00040057_f8f78dbd17414efda75bc437_trimesh_000.obj__2025-05-06_02_38_00.txt"
+)
+# DEFAULT_EDGE_SAMPLES = (
+#     r"C:\Users\alirz\Projects\Graphics\Neural QMAT\external\surf_subgrid_SSP_orig"
+#     r"\10_collapse_viz\output\bear_edge_test\edge_samples_bear_simplified.txt"
+# )
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("edge_samples", help="path to edge_samples_<stem>.txt")
+    ap.add_argument("edge_samples", nargs="?", default=DEFAULT_EDGE_SAMPLES,
+                    help=f"path to edge_samples_<stem>.txt (default: the hardcoded "
+                         f"experiment path, DEFAULT_EDGE_SAMPLES in this file)")
     ap.add_argument("bundle", nargs="?", default=None,
                     help="path to correspondence_<stem>.c2f "
                          "(default: alongside edge_samples, same stem)")
@@ -575,6 +592,10 @@ def main():
     ap.add_argument("--no-gui", action="store_true",
                     help="load + compute + print stats, skip opening the polyscope window")
     args = ap.parse_args()
+
+    if not os.path.isfile(args.edge_samples):
+        print(f"ERROR: edge samples file not found: {args.edge_samples}", file=sys.stderr)
+        sys.exit(1)
 
     bundle_path = args.bundle or default_bundle_path(args.edge_samples)
     if not os.path.isfile(bundle_path):

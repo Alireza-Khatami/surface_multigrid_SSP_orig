@@ -34,9 +34,8 @@ CoarseMeshCompaction build_compact_coarse_mesh(const Eigen::MatrixXd & gV, const
 // index — it is not duplicated. New vertices are assigned indices in a fixed
 // deterministic order: gStaleChains walked in order, first-seen-gets-next-index.
 //
-// Returns the chains re-expressed as compact indices (0..Vbase.rows()-1). A
-// chain is silently dropped only if one of its vertices has no valid gV row
-// (should not happen); this mirrors save_simplified_mesh's prior behavior.
+// Returns the chains re-expressed as compact indices (0..Vbase.rows()-1).
+// Throws std::runtime_error on an empty chain or a vertex with no valid gV row.
 //
 // Call this AFTER build_compact_coarse_mesh() and BEFORE reading cmc.Vbase.rows()
 // as the final vertex count — cmc.NC still reports the pre-extension count.

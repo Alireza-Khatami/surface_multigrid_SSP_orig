@@ -354,7 +354,7 @@ static void save_simplified_mesh(const std::string & path)
     // vertices past cmc.NC using the same deterministic assignment the bundle
     // now also uses, so those indices agree across files too.
     CoarseMeshCompaction cmc = build_compact_coarse_mesh(gV, gF);
-    extend_with_stale_chains(cmc, gV, gStaleChains);
+    const std::vector<std::vector<int>> staleChainsCompact = extend_with_stale_chains(cmc, gV, gStaleChains);
     const MatrixXd & Vout = cmc.Vbase;
     const MatrixXi & Fout = cmc.Fout;
 
@@ -461,26 +461,18 @@ static void save_simplified_mesh(const std::string & path)
         if (!cofs.is_open()) {
             fprintf(stderr, "[SAVE-MESH] stale chains OBJ failed (cannot open): %s\n", chains_path.c_str());
         } else {
-            // Collect the unique stale chain vertices and assign local 1-based indices.
-            std::unordered_map<int,int> local_idx; // old vid → 1-based local index
-            for (const auto & chain : gStaleChains)
-                for (int vid : chain)
-                    if (!local_idx.count(vid)) {
-                        int li = (int)local_idx.size() + 1;
-                        local_idx[vid] = li;
-                        RowVector3d pos = gV.row(vid).leftCols(3);
-                        cofs << "v " << pos(0) << " " << pos(1) << " " << pos(2) << "\n";
-                    }
-            // Write one l-line per chain.
+            // Full compact vertex list so indices match simplified_*.obj / the bundle.
+            for (int i = 0; i < (int)Vout.rows(); i++)
+                cofs << "v " << Vout(i,0) << " " << Vout(i,1) << " " << Vout(i,2) << "\n";
             int written = 0;
-            for (const auto & chain : gStaleChains) {
+            for (const auto & chain : staleChainsCompact) {
                 cofs << "l";
-                for (int vid : chain) cofs << " " << local_idx[vid];
+                for (int idx : chain) cofs << " " << (idx + 1); // OBJ is 1-based
                 cofs << "\n";
                 written++;
             }
             fprintf(stderr, "[SAVE-MESH] wrote stale chains OBJ %d chains  %d verts  → %s\n",
-                    written, (int)local_idx.size(), chains_path.c_str());
+                    written, (int)Vout.rows(), chains_path.c_str());
         }
     }
 }
@@ -670,6 +662,7 @@ int main(int argc, char * argv[])
     std::string traceVerticesPath;  // optional: text file with one fine_vertex_id per line
     int         trackFaceFlip     = -1;  // --track_face_flip <idx>
     int         gNEdgeSamplesPerStruct = 1000;  // --n_edge_samples_per_struct <N>
+    bool        gEdgeSampleMonteCarlo  = false; // --edge_sample_monte_carlo: opt into the (default-off) random sampler
 
 
     //usage
@@ -682,6 +675,8 @@ int main(int argc, char * argv[])
     // [--trace_vertices PATH]  text file: one fine_vertex_id per line; enables per-step walk trace
     // [--n_edge_samples_per_struct N]  default: 1000 — samples per seam/boundary .ma_struct curve
     //                                  (only used when --matstruct_path is also given)
+    // [--edge_sample_monte_carlo]      use the random-draw sampler instead of the default
+    //                                  deterministic evenly-spaced one (see edge_sample_tracker.h)
 
 
     for (int i = 1; i < argc; ++i) {
@@ -691,6 +686,8 @@ int main(int argc, char * argv[])
             validityChecks = true;
         } else if (a == "--mat_struct_check") {
             matStructCheck = true;
+        } else if (a == "--edge_sample_monte_carlo") {
+            gEdgeSampleMonteCarlo = true;
         } else if (i + 1 < argc) {
             if      (a == "--mesh_path")        meshPath          = argv[i+1];
             else if (a == "--target_faces")     targetFaces       = std::stoi(argv[i+1]);
@@ -920,7 +917,8 @@ int main(int argc, char * argv[])
         std::cout << "Sampling disabled (--n_samples_total not given).\n";
     }
     if (!matstructPath.empty())
-        edge_sample_tracker_init(matstructPath, gNEdgeSamplesPerStruct);
+        edge_sample_tracker_init(matstructPath, gNEdgeSamplesPerStruct,
+                                 /*deterministic=*/!gEdgeSampleMonteCarlo);
     if (trackFaceFlip >= 0)
         face_flip_tracker_init(trackFaceFlip);
 

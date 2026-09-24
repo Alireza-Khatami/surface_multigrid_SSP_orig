@@ -6,6 +6,8 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -58,9 +60,12 @@ std::vector<std::vector<int>> extend_with_stale_chains(
     // decided, so every caller that runs this against the same gStaleChains
     // gets identical indices.
     std::vector<int> new_old_ids; // old (gV) ids of the newly-appended vertices, in assignment order
-    for (const auto & chain : gStaleChains) {
-        for (int vid : chain) {
-            if (vid < 0 || vid >= cmc.oldToNew.size()) continue; // out-of-range guard, shouldn't happen
+    for (size_t ci = 0; ci < gStaleChains.size(); ci++) {
+        for (int vid : gStaleChains[ci]) {
+            if (vid < 0 || vid >= cmc.oldToNew.size())
+                throw std::runtime_error("[cmc] stale chain " + std::to_string(ci) +
+                                         " has out-of-range vertex id " + std::to_string(vid) +
+                                         " (gV rows = " + std::to_string(cmc.oldToNew.size()) + ")");
             if (cmc.oldToNew(vid) >= 0) continue;                // already covered by the coarse mesh
             cmc.oldToNew(vid) = cmc.NC + (int)new_old_ids.size();
             new_old_ids.push_back(vid);
@@ -86,18 +91,19 @@ std::vector<std::vector<int>> extend_with_stale_chains(
     // Re-express each chain as compact indices via the now-extended oldToNew.
     std::vector<std::vector<int>> chainsCompact;
     chainsCompact.reserve(gStaleChains.size());
-    for (const auto & chain : gStaleChains) {
+    for (size_t ci = 0; ci < gStaleChains.size(); ci++) {
+        const auto & chain = gStaleChains[ci];
+        if (chain.empty())
+            throw std::runtime_error("[cmc] stale chain " + std::to_string(ci) + " is empty");
         std::vector<int> compact;
         compact.reserve(chain.size());
-        bool ok = true;
         for (int vid : chain) {
-            if (vid < 0 || vid >= cmc.oldToNew.size() || cmc.oldToNew(vid) < 0) { ok = false; break; }
+            if (cmc.oldToNew(vid) < 0)
+                throw std::runtime_error("[cmc] stale chain " + std::to_string(ci) +
+                                         " vertex " + std::to_string(vid) + " has no compact index");
             compact.push_back(cmc.oldToNew(vid));
         }
-        if (ok && !compact.empty())
-            chainsCompact.push_back(std::move(compact));
-        else
-            fprintf(stderr, "[cmc] WARNING: dropped a stale chain that could not be fully remapped\n");
+        chainsCompact.push_back(std::move(compact));
     }
     return chainsCompact;
 }

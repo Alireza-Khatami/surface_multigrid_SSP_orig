@@ -15,9 +15,11 @@
 #include <igl/remove_unreferenced.h>
 #include <igl/collapse_edge.h>  // IGL_COLLAPSE_EDGE_NULL
 #include "face_dead.h"
+#include "coarse_mesh_compaction.h"
 #include <igl/writeOBJ.h>
 #include <igl/writePLY.h>
 #include <ctime>
+#include <fstream>
 
 #include <single_collapse_data.h>
 #include <SSP_collapse_edge.h>
@@ -172,15 +174,23 @@ static MatrixXd safe_V()
 // program crashes, reload latest_snapshot.obj to resume from there.
 static void export_current_mesh()
 {
-    MatrixXi Fl = live_faces();
-    MatrixXd Vs = safe_V();
-    MatrixXd Vc; MatrixXi Fc; VectorXi I1, I2;
-    igl::remove_unreferenced(Vs, Fl, Vc, Fc, I1, I2);
+    // Same compaction as simplified_*.obj / the .c2f bundle.
+    CoarseMeshCompaction cmc = build_compact_coarse_mesh(gV, gF);
+    std::vector<std::vector<int>> chains = extend_with_stale_chains(cmc, gV, gStaleChains);
 
     std::string path = std::string(gExportDir) + "/latest_snapshot.obj";
-    bool ok = igl::writeOBJ(path, Vc, Fc);
-    if (!ok)
+    if (!igl::writeOBJ(path, cmc.Vbase, cmc.Fout)) {
         fprintf(stderr, "[export] FAILED to write %s\n", path.c_str());
+        return;
+    }
+    if (!chains.empty()) {
+        std::ofstream ofs(path, std::ios::app);
+        for (const auto & chain : chains) {
+            ofs << "l";
+            for (int idx : chain) ofs << " " << (idx + 1); // OBJ is 1-based
+            ofs << "\n";
+        }
+    }
 }
 
 static void snapshot_pre_mesh()

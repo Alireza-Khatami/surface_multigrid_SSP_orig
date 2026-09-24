@@ -79,7 +79,8 @@ static int face_col_of(int face, int vid)
     return -1;
 }
 
-void edge_sample_tracker_init(const std::string& matstruct_path, int samples_per_struct)
+void edge_sample_tracker_init(const std::string& matstruct_path, int samples_per_struct,
+                              bool deterministic)
 {
     gEdgeSamples.clear();
     gEdgeSamplesByFace.clear();
@@ -134,12 +135,43 @@ void edge_sample_tracker_init(const std::string& matstruct_path, int samples_per
         if (total_len <= 0.0) continue;
 
         for (int k = 0; k < samples_per_struct; ++k) {
-            double q = U(rng) * total_len;
-            int ei = (int)(std::lower_bound(len_cdf.begin(), len_cdf.end(), q) - len_cdf.begin());
-            if (ei >= (int)edges.size()) ei = (int)edges.size() - 1;
+            int ei; double t;
+
+            if (deterministic) {
+                // ---- DETERMINISTIC, EVENLY-SPACED (default) ----
+                // Walk the struct's total arc length in samples_per_struct equal
+                // steps (inclusive of both ends when samples_per_struct>1) and
+                // locate which edge + local param that arc-length position falls
+                // in via the same CDF used by the Monte Carlo path below. Because
+                // each edge's share of the step budget is proportional to its own
+                // length (same weighting as the random path), per-edge density
+                // stays correct — this just removes the draw-to-draw randomness
+                // that causes visible Poisson clumping/gaps in the display
+                // (see the "discontinuities" investigation in this session).
+                const double target = (samples_per_struct > 1)
+                    ? (double(k) / double(samples_per_struct - 1)) * total_len
+                    : 0.5 * total_len;
+                ei = (int)(std::lower_bound(len_cdf.begin(), len_cdf.end(), target) - len_cdf.begin());
+                if (ei >= (int)edges.size()) ei = (int)edges.size() - 1;
+                const double prev_cdf  = (ei > 0) ? len_cdf[ei - 1] : 0.0;
+                const double edge_len  = len_cdf[ei] - prev_cdf;
+                t = (edge_len > 1e-12) ? (target - prev_cdf) / edge_len : 0.0;
+                t = std::min(1.0, std::max(0.0, t));
+            } else {
+                // ---- MONTE CARLO (kept, not deleted — opt in via
+                // edge_sample_tracker_init(..., /*deterministic=*/false), wired
+                // to --edge_sample_monte_carlo in main.cpp. Excluded from the
+                // default pipeline because independent random draws produce
+                // visible arc-length-density variance (clumping/gaps) once the
+                // display thins samples — see edge_sample_tracker_viz.py's
+                // "Length-weighted sampling" investigation. ----
+                double q = U(rng) * total_len;
+                ei = (int)(std::lower_bound(len_cdf.begin(), len_cdf.end(), q) - len_cdf.begin());
+                if (ei >= (int)edges.size()) ei = (int)edges.size() - 1;
+                t = U(rng); // uniform position along this edge, param src_v0 -> src_v1
+            }
 
             const MatStructEdge& me = edges[ei];
-            const double t = U(rng); // uniform position along this edge, param src_v0 -> src_v1
 
             auto it = edgeFaces.find(edge_key(me.v0, me.v1));
             if (it == edgeFaces.end() || it->second.empty()) {
@@ -192,8 +224,10 @@ void edge_sample_tracker_init(const std::string& matstruct_path, int samples_per
                 n_edges_missing_face);
 
     fprintf(stderr,
-        "[edge_sample_tracker] init: %d samples  (%zu boundary edges, %zu seam edges, %zu structs)  %s\n",
-        id, boundary_edges.size(), seam_edges.size(), byStruct.size(), matstruct_path.c_str());
+        "[edge_sample_tracker] init: %d samples  (%zu boundary edges, %zu seam edges, %zu structs)"
+        "  mode=%s  %s\n",
+        id, boundary_edges.size(), seam_edges.size(), byStruct.size(),
+        deterministic ? "deterministic" : "monte_carlo", matstruct_path.c_str());
 }
 
 void edge_sample_tracker_update()
