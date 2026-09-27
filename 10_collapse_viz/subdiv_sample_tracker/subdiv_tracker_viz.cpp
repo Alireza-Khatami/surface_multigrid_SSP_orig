@@ -9,6 +9,7 @@
 #include <Eigen/Dense>
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <string>
 
@@ -19,8 +20,10 @@ namespace {
 int  gLevel          = -1;       // display level; -1 = pick from gMaxDisplayVerts
 int  gMaxDisplayVerts = 500000;
 int  gRefreshEvery   = 1;        // re-upload deformed positions every K collapses
-bool gShowFine       = false;
-bool gShowDeformed   = true;
+bool gShowFine       = false;   // surface meshes
+bool gShowDeformed   = false;
+bool gShowFinePts    = true;    // point clouds colored per struct set
+bool gShowDefPts     = false;
 bool gShowDisp       = false;
 bool gDirty          = true;     // re-register everything on next update
 int  gLastRefresh    = -1;       // collapse count at the last position upload
@@ -29,6 +32,64 @@ int  gQuery          = -1;       // highlighted subdivided vertex
 const char * kFine = "subdiv_fine";
 const char * kDef  = "subdiv_deformed";
 const char * kQry  = "subdiv_query";
+std::array<double, 3> type_color(uint8_t mask);
+const char * kFinePts = "subdiv_pts_fine";
+const char * kDefPts  = "subdiv_pts_deformed";
+
+// One distinct color per struct set: hues spaced by the golden ratio, with
+// saturation/value cycling so neighbouring set ids stay distinguishable.
+std::array<double, 3> set_color(int k)
+{
+    const double h = std::fmod(0.1 + 0.6180339887498949 * k, 1.0) * 6.0;
+    const double sat = (k % 3 == 0) ? 0.85 : (k % 3 == 1) ? 0.65 : 0.95;
+    const double val = (k % 2 == 0) ? 0.95 : 0.75;
+    const int i = (int)h;
+    const double f = h - i, p = val * (1 - sat), q = val * (1 - sat * f), t = val * (1 - sat * (1 - f));
+    switch (i % 6) {
+    case 0:  return { val, t, p };
+    case 1:  return { q, val, p };
+    case 2:  return { p, val, t };
+    case 3:  return { p, q, val };
+    case 4:  return { t, p, val };
+    default: return { val, p, q };
+    }
+}
+
+MatrixXd set_colors(int nv)
+{
+    const std::vector<int32_t> & S = subdiv_tracker_set_ids();
+    MatrixXd c(nv, 3);
+    for (int i = 0; i < nv; ++i) {
+        const auto a = set_color(S[i]);
+        c.row(i) << a[0], a[1], a[2];
+    }
+    return c;
+}
+
+void add_point_quantities(polyscope::PointCloud * pc, int nv)
+{
+    const StructPalette & P = subdiv_tracker_palette();
+    const std::vector<int32_t> & S = subdiv_tracker_set_ids();
+    MatrixXd tc(nv, 3);
+    VectorXd sid(nv), rad(nv);
+    for (int i = 0; i < nv; ++i) {
+        const uint8_t m = P.typeMask[S[i]];
+        const auto a = type_color(m);
+        tc.row(i) << a[0], a[1], a[2];
+        sid(i) = S[i];
+        // Radius factor by structure: junction > seam / boundary > sheet.
+        rad(i) = (m & STRUCT_MASK_JUNCTION) ? 1.0
+               : (m & (STRUCT_MASK_SEAM | STRUCT_MASK_BOUNDARY)) ? 0.7
+               : 0.35;
+    }
+    pc->addColorQuantity("struct set", set_colors(nv))->setEnabled(true);
+    pc->addColorQuantity("struct type", tc);
+    pc->addScalarQuantity("struct set id", sid);
+    pc->addScalarQuantity("radius by struct type", rad);
+    // Autoscaled: radius = point radius * factor / max factor, so junctions get the full radius.
+    pc->setPointRadiusQuantity("radius by struct type", true);
+    pc->setPointRadius(0.004, true);
+}
 
 std::array<double, 3> type_color(uint8_t mask)
 {
@@ -67,7 +128,8 @@ void add_quantities(polyscope::SurfaceMesh * sm, int nv)
         cc.row(i) << b[0], b[1], b[2];
         sid(i) = S[i];
     }
-    sm->addVertexColorQuantity("struct type", tc)->setEnabled(true);
+    sm->addVertexColorQuantity("struct set", set_colors(nv))->setEnabled(true);
+    sm->addVertexColorQuantity("struct type", tc);
     sm->addVertexColorQuantity("carrier (vertex/edge/face)", cc);
     sm->addVertexScalarQuantity("struct set id", sid);
 }
@@ -100,9 +162,18 @@ void subdiv_tracker_viz_update()
         auto * def = polyscope::registerSurfaceMesh(kDef, Pd, Fl);
         add_quantities(def, nv);
         def->setEnabled(gShowDeformed);
+
+        auto * fp = polyscope::registerPointCloud(kFinePts, M.V.topRows(nv));
+        add_point_quantities(fp, nv);
+        fp->setEnabled(gShowFinePts);
+
+        auto * dp = polyscope::registerPointCloud(kDefPts, Pd);
+        add_point_quantities(dp, nv);
+        dp->setEnabled(gShowDefPts);
         gDirty = false;
     } else if (pos) {
         polyscope::getSurfaceMesh(kDef)->updateVertexPositions(Pd);
+        polyscope::getPointCloud(kDefPts)->updatePointPositions(Pd);
     }
 
     if (pos) {
@@ -154,6 +225,11 @@ void subdiv_tracker_viz_ui()
         polyscope::getSurfaceMesh(kDef)->setEnabled(gShowDeformed);
     ImGui::SameLine();
     if (ImGui::Checkbox("displacement##subdiv", &gShowDisp)) redraw = true;
+    if (ImGui::Checkbox("fine points##subdiv", &gShowFinePts) && polyscope::hasPointCloud(kFinePts))
+        polyscope::getPointCloud(kFinePts)->setEnabled(gShowFinePts);
+    ImGui::SameLine();
+    if (ImGui::Checkbox("deformed points##subdiv", &gShowDefPts) && polyscope::hasPointCloud(kDefPts))
+        polyscope::getPointCloud(kDefPts)->setEnabled(gShowDefPts);
     if (ImGui::Button("refresh now##subdiv")) { gLastRefresh = -1; redraw = true; }
 
     static int q = 0;

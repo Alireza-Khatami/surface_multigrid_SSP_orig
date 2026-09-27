@@ -54,6 +54,10 @@ struct Stats {
     int64_t stranded = 0;           // samples on pre faces of a sheet with no post faces
     int64_t outside = 0;            // query outside every post face (clamped)
     double  maxOutside = 0.0;       // largest -min(bary) among those
+    int64_t placementChecked = 0;   // post-ring corners compared with gV
+    int64_t placementUnchecked = 0; // sheets without V_post
+    int64_t placementNaN = 0;
+    double  maxPlacementDiff = 0.0; // max |V_post corner - gV| after the collapse
 } gStats;
 
 int gLogBudget = 20;
@@ -261,6 +265,26 @@ void subdiv_tracker_update(int s, int d)
         }
     }
 
+    // The UV_post each sample was cast into was built from V_post, the ring with
+    // the survivor at the decimation's placement point (whatever the cost
+    // function chose). Check that geometry is the one the collapse actually
+    // produced: every post-face corner's V_post row must equal gV now.
+    for (const SheetData & sd : D.sheets) {
+        if (sd.V_post.rows() == 0) { ++gStats.placementUnchecked; continue; }
+        for (int j = 0; j < sd.FUV_post.rows(); ++j)
+            for (int k = 0; k < 3; ++k) {
+                const int l = sd.FUV_post(j, k);
+                int g = sd.subsetVIdx(l);
+                g = (g == d) ? s : resolve(g);
+                const double diff = (sd.V_post.row(l).leftCols(3) - gV.row(g).leftCols(3)).norm();
+                if (!(diff <= gStats.maxPlacementDiff)) {
+                    if (std::isnan(diff)) ++gStats.placementNaN;
+                    else gStats.maxPlacementDiff = diff;
+                }
+                ++gStats.placementChecked;
+            }
+    }
+
     gRedirect[d] = s;
 }
 
@@ -405,6 +429,10 @@ void subdiv_tracker_save(const CoarseFaceLookup & lookup, const std::string & pa
         maxPosDiff = std::max(maxPosDiff, (pg - pc).norm());
     }
 
+    fprintf(stderr,
+        "[subdiv_tracker] placement: %lld post-ring corners vs gV, max diff %.3g (NaN %lld, sheets without V_post %lld)\n",
+        (long long)gStats.placementChecked, gStats.maxPlacementDiff,
+        (long long)gStats.placementNaN, (long long)gStats.placementUnchecked);
     fprintf(stderr,
         "[subdiv_tracker] %d collapses, %lld casts | order!=FUV_pre %lld | corner mismatch %lld | "
         "(s,d) mismatch %lld | face in 2 sheets %lld | stranded %lld | outside post ring %lld (max %.3g)\n",
