@@ -32,13 +32,14 @@ set(APP_SRCS
     coarse_mesh_export.cpp
     coarse_mesh_sanity_check.cpp
     coarse_fine_viz.cpp
-    face_sample_tracker.cpp
-    load_matstruct_edges.cpp
-    edge_sample_tracker.cpp
     orient_faces_consistently.cpp
     meshlab_qslim_callbacks.cpp
     meshlab_qslim_config.cpp
     collapse_structure_tracker/simp_viz_tracker.cpp
+    subdiv_sample_tracker/subdiv_mesh.cpp
+    subdiv_sample_tracker/subdiv_struct_ids.cpp
+    subdiv_sample_tracker/subdiv_tracker.cpp
+    subdiv_sample_tracker/debug_trackers.cpp
 )
 
 # SSP library sources — glob is fine here; all files belong to the shared library
@@ -54,10 +55,25 @@ if(MSVC)
   target_compile_definitions(${PROJECT_NAME}_bin PRIVATE _USE_MATH_DEFINES NOMINMAX)
 endif()
 
-option(C2F_VIZ_DIAGNOSTIC "Enable per-collapse ring_post c2f diagnostic polyscope visualization (traced walk, point clouds, arrows)" ON)
+option(SUBDIV_TESTS "Build the subdiv_sample_tracker standalone checks" OFF)
+if(SUBDIV_TESTS)
+    add_executable(subdiv_mesh_test
+        subdiv_sample_tracker/tests/subdiv_mesh_test.cpp
+        subdiv_sample_tracker/subdiv_mesh.cpp
+        subdiv_sample_tracker/subdiv_struct_ids.cpp
+        load_matstruct.cpp)
+    target_compile_features(subdiv_mesh_test PRIVATE cxx_std_17)
+    target_link_libraries(subdiv_mesh_test igl::core)
+    if(MSVC)
+        target_compile_definitions(subdiv_mesh_test PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    endif()
+endif()
+
+option(C2F_VIZ_DIAGNOSTIC"Enable per-collapse ring_post c2f diagnostic polyscope visualization (traced walk, point clouds, arrows)" ON)
 if(C2F_VIZ_DIAGNOSTIC)
     target_compile_definitions(${PROJECT_NAME}_bin PRIVATE C2F_VIZ_DIAGNOSTIC)
-    target_sources(${PROJECT_NAME}_bin PRIVATE visualizer.cpp sheet_seam_viz.cpp seam_uv_view.cpp)
+    target_sources(${PROJECT_NAME}_bin PRIVATE visualizer.cpp sheet_seam_viz.cpp seam_uv_view.cpp
+        subdiv_sample_tracker/subdiv_tracker_viz.cpp)
 endif()
 
 option(SSP_LSCM_LOG "Enable SSP LSCM mapping diagnostic logs (fan_walk, pre-jlscm, LSCM-FAIL, NON-ACTIVE-SHEET, etc.)" ON)

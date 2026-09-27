@@ -3,8 +3,8 @@
 #include "sheet_seam_viz.h"
 #include "seam_uv_view.h"
 #include "coarse_fine_viz.h"
-#include "face_sample_tracker.h"
-#include "edge_sample_tracker.h"
+#include "subdiv_sample_tracker/debug_trackers.h"
+#include "subdiv_sample_tracker/subdiv_tracker_viz.h"
 #include "collapse_structure_tracker/simp_viz_tracker.h"
 
 #include <polyscope/polyscope.h>
@@ -1518,8 +1518,6 @@ static void show_canonical_view()
         }
     }
 
-    sample_tracker_show_canonical(gc.uv_pre_3d, gc.uv_post_3d, gSnap.FUV_pre, gSnap.FUV_post);
-
     // Cache for the export panel.
     gLastCanonGeom = gc;
     gHasCanonGeom  = true;
@@ -1652,9 +1650,7 @@ void update_display()
         update_stale_chains_display();
     }
 
-    sample_tracker_show();
-    sample_tracker_show_vertices();
-    edge_sample_tracker_show();
+    subdiv_tracker_viz_update();
     face_flip_tracker_show_viz();
 
     simp_viz_tracker_update_display();
@@ -2183,6 +2179,8 @@ void ui_callback()
             }
         }
     }
+
+    subdiv_tracker_viz_ui();
 
     if (face_flip_tracker_enabled()) {
         ImGui::Separator();

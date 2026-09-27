@@ -59,9 +59,9 @@
 #endif
 #include "coarse_fine_viz.h"
 
-#include "face_sample_tracker.h"
 #include "load_matstruct.h"
-#include "edge_sample_tracker.h"
+#include "subdiv_sample_tracker/subdiv_tracker.h"
+#include "subdiv_sample_tracker/debug_trackers.h"
 #include "collapse_structure_tracker/simp_viz_tracker.h"
 
 using namespace Eigen;
@@ -353,6 +353,9 @@ static void save_simplified_mesh(const CoarseMeshCompaction & cmc, const std::st
 
 // ---- end-of-run exports ----
 // One compaction, built once, feeds every coarse-side writer.
+// --subdiv_obj_max_verts N: largest subdivided mesh written as subdiv_deformed_*.obj
+static long long gSubdivObjMaxVerts = 2000000;
+
 static bool export_final_outputs(const std::string & out_dir, const std::string & stem)
 {
     auto out = [&](const std::string & prefix, const std::string & ext) {
@@ -375,10 +378,8 @@ static bool export_final_outputs(const std::string & out_dir, const std::string 
         coarse_fine_save_bundle(cmc, c2f, bundle);
     }
 
-    sample_tracker_save(lookup, out("samples_fine_", ".txt"),
-                        out("samples_coarse_", ".txt"), out("samples_vertices_", ".txt"));
-    sample_tracker_export_deformed_mesh(out("deformed_fine_mesh_", ".obj")); // fine-mesh topology
-    edge_sample_tracker_save(lookup, out("edge_samples_", ".txt"));
+    subdiv_tracker_save(lookup, out("subdiv_", ".sdt"));
+    subdiv_tracker_export_deformed_obj(out("subdiv_deformed_", ".obj"), gSubdivObjMaxVerts);
     simp_viz_tracker_write_json(cmc, json);
 
     // Re-read the files and cross-check that they agree on the vertex ordering.
@@ -525,8 +526,7 @@ bool do_next_step()
                 fflush(gStructGateLog);
             }
             vertex_watch_check_collapse(s, d);
-            sample_tracker_update();
-            edge_sample_tracker_update();
+            subdiv_tracker_update(s, d);
             face_flip_tracker_post_update();
             fprintf(stderr,
                 "[COLLAPSE #%d] e=%d  kept=v%d  gone=v%d"
@@ -566,29 +566,26 @@ int main(int argc, char * argv[])
     std::string meshPath         = "bunny.obj";
     int         targetFaces      = 285;
     std::string namedMode;
-    int         gNSamplesTotal   = -1;   // -1 = not given → sampling disabled
     std::string namedOutDir;
     bool        validityChecks   = false;
     std::string matstructPath;      // optional: path to .ma_struct file for struct-ID collapse gating
     bool        matStructCheck = false;  // --mat_struct_check: enable struct-ID collapse gate
-    std::string traceVerticesPath;  // optional: text file with one fine_vertex_id per line
     int         trackFaceFlip     = -1;  // --track_face_flip <idx>
-    int         gNEdgeSamplesPerStruct = 1000;  // --n_edge_samples_per_struct <N>
-    bool        gEdgeSampleMonteCarlo  = false; // --edge_sample_monte_carlo: opt into the (default-off) random sampler
+    long long   nSubdivSamples   = -1;   // --n_subdiv_samples N; -1 = subdivided-mesh tracker off
 
 
     //usage
     // [--mesh_path PATH]       default: bunny.obj
     // [--target_faces N]       default: 285
     // [--mode midpoint|qslim|meshlab]   default: qslim
-    // [--n_samples_total N]    optional — omit to disable sampling entirely
+    // [--n_subdiv_samples N]   optional — subdivide the fine mesh until it has >= N vertices
+    //                          and track every one of them (subdiv_sample_tracker/); omit to disable
+    // [--matstruct_path PATH]  .ma_struct file: struct IDs (collapse gate, subdivided-vertex struct sets)
+    // [--subdiv_obj_max_verts N]  default: 2000000 — write subdiv_fine_*.obj / subdiv_deformed_*.obj
+    //                             only up to N vertices
+    // [--track_face_flip F]    face-flip debug tracker on gFO face F (needs --n_subdiv_samples)
     // [--output_dir PATH]      default: .
     // [--validity-checks]
-    // [--trace_vertices PATH]  text file: one fine_vertex_id per line; enables per-step walk trace
-    // [--n_edge_samples_per_struct N]  default: 1000 — samples per seam/boundary .ma_struct curve
-    //                                  (only used when --matstruct_path is also given)
-    // [--edge_sample_monte_carlo]      use the random-draw sampler instead of the default
-    //                                  deterministic evenly-spaced one (see edge_sample_tracker.h)
 
 
     for (int i = 1; i < argc; ++i) {
@@ -598,18 +595,15 @@ int main(int argc, char * argv[])
             validityChecks = true;
         } else if (a == "--mat_struct_check") {
             matStructCheck = true;
-        } else if (a == "--edge_sample_monte_carlo") {
-            gEdgeSampleMonteCarlo = true;
         } else if (i + 1 < argc) {
             if      (a == "--mesh_path")        meshPath          = argv[i+1];
             else if (a == "--target_faces")     targetFaces       = std::stoi(argv[i+1]);
             else if (a == "--mode")             namedMode         = argv[i+1];
-            else if (a == "--n_samples_total")  gNSamplesTotal    = std::stoi(argv[i+1]);
             else if (a == "--output_dir")       namedOutDir       = argv[i+1];
             else if (a == "--matstruct_path")   matstructPath     = argv[i+1];
-            else if (a == "--trace_vertices")   traceVerticesPath = argv[i+1];
             else if (a == "--track_face_flip")  trackFaceFlip     = std::stoi(argv[i+1]);
-            else if (a == "--n_edge_samples_per_struct") gNEdgeSamplesPerStruct = std::stoi(argv[i+1]);
+            else if (a == "--n_subdiv_samples") nSubdivSamples = std::stoll(argv[i+1]);
+            else if (a == "--subdiv_obj_max_verts") gSubdivObjMaxVerts = std::stoll(argv[i+1]);
             else { continue; }
             ++i;
         }
@@ -813,18 +807,17 @@ int main(int argc, char * argv[])
         };
     }
 
-    if (gNSamplesTotal >= 0) {
-        if (!traceVerticesPath.empty()) {
-            const std::string trace_out = out_dir + "fine_samples_log_" + stem + ".txt";
-            sample_tracker_set_trace(traceVerticesPath, trace_out);
+    if (nSubdivSamples >= 0) {
+        try {
+            subdiv_tracker_init(nSubdivSamples, matstructPath);
+            subdiv_tracker_export_fine_obj(out_dir + "subdiv_fine_" + stem + ".obj", gSubdivObjMaxVerts);
+        } catch (const std::exception & e) {
+            fprintf(stderr, "[FATAL] %s\n", e.what());
+            return 1;
         }
-        sample_tracker_init(gNSamplesTotal);
     } else {
-        std::cout << "Sampling disabled (--n_samples_total not given).\n";
+        std::cout << "Sampling disabled (--n_subdiv_samples not given).\n";
     }
-    if (!matstructPath.empty())
-        edge_sample_tracker_init(matstructPath, gNEdgeSamplesPerStruct,
-                                 /*deterministic=*/!gEdgeSampleMonteCarlo);
     if (trackFaceFlip >= 0)
         face_flip_tracker_init(trackFaceFlip);
 

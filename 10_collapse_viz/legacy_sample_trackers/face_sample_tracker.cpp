@@ -158,6 +158,8 @@ void sample_tracker_init(int n_total)
         gSamples.push_back(s);
     }
 
+    const int n_vertex = id;
+
     // --- interior barycentric samples (area-weighted) ---
     // Build CDF over face areas so larger faces receive proportionally more samples.
     std::vector<double> area_cdf(nFO);
@@ -205,7 +207,7 @@ void sample_tracker_init(int n_total)
 
     fprintf(stderr,
         "[sample_tracker] init: %d samples (%d vertex + %d interior)  nFO=%d  nVO=%d  trace_set=%zu\n",
-        id, id, n_interior, nFO, nVO, gTraceVIDSet.size());
+        id, n_vertex, n_interior, nFO, nVO, gTraceVIDSet.size());
 }
 
 void sample_tracker_update()
