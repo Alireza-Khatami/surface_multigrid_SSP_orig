@@ -39,6 +39,7 @@ set(APP_SRCS
     subdiv_sample_tracker/subdiv_mesh.cpp
     subdiv_sample_tracker/subdiv_struct_ids.cpp
     subdiv_sample_tracker/subdiv_tracker.cpp
+    subdiv_sample_tracker/subdiv_relax.cpp
     subdiv_sample_tracker/debug_trackers.cpp
 )
 
@@ -55,6 +56,14 @@ if(MSVC)
   target_compile_definitions(${PROJECT_NAME}_bin PRIVATE _USE_MATH_DEFINES NOMINMAX)
 endif()
 
+# Standalone viewer for the relaxation graph file (.slg); parses the file only.
+add_executable(subdiv_graph_viewer subdiv_sample_tracker/subdiv_graph_viewer.cpp)
+target_compile_features(subdiv_graph_viewer PRIVATE cxx_std_17)
+target_link_libraries(subdiv_graph_viewer polyscope)
+if(MSVC)
+    target_compile_definitions(subdiv_graph_viewer PRIVATE _USE_MATH_DEFINES NOMINMAX)
+endif()
+
 option(SUBDIV_TESTS "Build the subdiv_sample_tracker standalone checks" OFF)
 if(SUBDIV_TESTS)
     add_executable(subdiv_mesh_test
@@ -67,6 +76,18 @@ if(SUBDIV_TESTS)
     target_link_libraries(subdiv_mesh_test igl::core)
     if(MSVC)
         target_compile_definitions(subdiv_mesh_test PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    endif()
+
+    add_executable(subdiv_relax_test
+        subdiv_sample_tracker/tests/subdiv_relax_test.cpp
+        subdiv_sample_tracker/subdiv_mesh.cpp
+        subdiv_sample_tracker/subdiv_struct_ids.cpp
+        subdiv_sample_tracker/subdiv_relax.cpp
+        load_matstruct.cpp)
+    target_compile_features(subdiv_relax_test PRIVATE cxx_std_17)
+    target_link_libraries(subdiv_relax_test igl::core)
+    if(MSVC)
+        target_compile_definitions(subdiv_relax_test PRIVATE _USE_MATH_DEFINES NOMINMAX)
     endif()
 endif()
 

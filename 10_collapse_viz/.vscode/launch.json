@@ -2,6 +2,21 @@
   "version": "0.2.0",
   "configurations": [
     {
+      // Relaxation graph viewer: parses the .slg written by a relaxed run (here the
+      // 4-level qslim run in ./output/relax_on) and draws exactly that graph.
+      "name": "Release – subdiv graph viewer",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/release/Release/subdiv_graph_viewer.exe",
+      "args": [
+        "${workspaceFolder}/output/relax_on/subdiv_graph_mat_01_00040057_f8f78dbd17414efda75bc437_trimesh_000.obj__2025-05-06_02_38_00.slg"
+      ],
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "console": "internalConsole"
+    },
+
+    {
       // Subdivided sample tracker viewer: 4 subdivision levels (N=200000 -> 350,016 points),
       // point clouds colored per struct set, radius junction > seam/boundary > sheet.
       "name": "Debug – collapse_viz subdiv tracker (4 levels)",

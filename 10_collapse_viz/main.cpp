@@ -574,6 +574,7 @@ int main(int argc, char * argv[])
     bool        matStructCheck = false;  // --mat_struct_check: enable struct-ID collapse gate
     int         trackFaceFlip     = -1;  // --track_face_flip <idx>
     long long   nSubdivSamples   = -1;   // --n_subdiv_samples N; -1 = subdivided-mesh tracker off
+    bool        subdivRelax      = true; // --no_subdiv_relax: keep the exact midpoint positions
 
 
     //usage
@@ -583,6 +584,8 @@ int main(int argc, char * argv[])
     // [--n_subdiv_samples N]   optional — subdivide the fine mesh until it has >= N vertices
     //                          and track every one of them (subdiv_sample_tracker/); omit to disable
     // [--matstruct_path PATH]  .ma_struct file: struct IDs (collapse gate, subdivided-vertex struct sets)
+    // [--no_subdiv_relax]      skip the structure-aware relaxation of the subdivided vertices
+    //                          (md_files/subdiv_relax_plan.md); output then matches the plain subdivision
     // [--subdiv_obj_max_verts N]  default: 2000000 — write subdiv_fine_*.obj / subdiv_deformed_*.obj
     //                             only up to N vertices
     // [--track_face_flip F]    face-flip debug tracker on gFO face F (needs --n_subdiv_samples)
@@ -597,6 +600,8 @@ int main(int argc, char * argv[])
             validityChecks = true;
         } else if (a == "--mat_struct_check") {
             matStructCheck = true;
+        } else if (a == "--no_subdiv_relax") {
+            subdivRelax = false;
         } else if (i + 1 < argc) {
             if      (a == "--mesh_path")        meshPath          = argv[i+1];
             else if (a == "--target_faces")     targetFaces       = std::stoi(argv[i+1]);
@@ -814,8 +819,12 @@ int main(int argc, char * argv[])
 
     if (nSubdivSamples >= 0) {
         try {
-            subdiv_tracker_init(nSubdivSamples, gHaveMatStruct ? &gMatStruct : nullptr);
+            subdiv_tracker_init(nSubdivSamples, gHaveMatStruct ? &gMatStruct : nullptr, subdivRelax);
             subdiv_tracker_export_fine_obj(out_dir + "subdiv_fine_" + stem + ".obj", gSubdivObjMaxVerts);
+            if (subdivRelax) {
+                subdiv_tracker_export_seed_obj(out_dir + "subdiv_fine_seed_" + stem + ".obj", gSubdivObjMaxVerts);
+                subdiv_tracker_export_graph(out_dir + "subdiv_graph_" + stem + ".slg");
+            }
         } catch (const std::exception & e) {
             fprintf(stderr, "[FATAL] %s\n", e.what());
             return 1;

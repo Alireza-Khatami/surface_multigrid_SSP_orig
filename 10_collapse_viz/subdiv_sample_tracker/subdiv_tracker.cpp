@@ -33,6 +33,9 @@ bool                 gEnabled = false;
 SubdivMesh           gM;
 StructPalette        gPal;
 std::vector<int32_t> gSet;
+bool                 gRelaxed = false;
+MatrixXd             gVseed;   // positions before relaxation (relaxed init only)
+RelaxGraph           gGraph;
 
 // Per sample (= subdivided vertex). gFace < 0: untracked (vertex on no face).
 std::vector<int32_t> gFace;   // gF row
@@ -78,7 +81,7 @@ void fail(const std::string & msg) { throw std::runtime_error("[subdiv_tracker] 
 
 // ---------------------------------------------------------------- init
 
-void subdiv_tracker_init(int64_t nTarget, const MatStruct * ms)
+void subdiv_tracker_init(int64_t nTarget, const MatStruct * ms, bool relax)
 {
     gEnabled = false;
     gStats = Stats();
@@ -96,6 +99,30 @@ void subdiv_tracker_init(int64_t nTarget, const MatStruct * ms)
     gM = build_subdiv_mesh(gVO, gFO, nTarget);
 
     build_struct_sets(gM, gFO, ms, gPal, gSet);
+
+    gRelaxed = false;
+    gVseed.resize(0, 3);
+    gGraph = RelaxGraph();
+    if (relax) {
+        gGraph = build_relax_graph(gM, gPal, gSet, ms);
+        gVseed = gM.V;
+        const MeshQuality q0 = subdiv_mesh_quality(gM.V, gM.F);
+        const RelaxReport R = subdiv_relax(gM, gVO, gFO, ms, gPal, gSet, gGraph);
+        const double tolStep = 1e-10;
+        if (!R.converged || R.jacobiStepMove > tolStep)
+            fail("relaxation did not converge (one relaxation step still moves "
+                 + std::to_string(R.jacobiStepMove) + " x diag)");
+        if (R.seedOffStructure || R.fixedMoved || R.posMismatch || R.badBary || R.offStructure)
+            fail("relaxation consistency checks failed");
+        const MeshQuality q1 = subdiv_mesh_quality(gM.V, gM.F, &gVseed);
+        fprintf(stderr,
+            "[subdiv_tracker] relaxation, before -> after: edge CV %.4f -> %.4f | min angle %.3f -> %.3f, "
+            "p1 %.3f -> %.3f, p5 %.3f -> %.3f, median %.3f -> %.3f deg | degenerate %lld -> %lld | "
+            "flipped vs seed %lld | move max %.3g mean %.3g (x diag)\n",
+            q0.edgeCV, q1.edgeCV, q0.minAngle, q1.minAngle, q0.p1, q1.p1, q0.p5, q1.p5, q0.median, q1.median,
+            (long long)q0.degenerate, (long long)q1.degenerate, (long long)q1.flippedVsRef, R.maxMove, R.meanMove);
+        gRelaxed = true;
+    }
 
     const size_t Vs = gM.carrierType.size();
     gFace.assign(Vs, -1);
@@ -328,12 +355,12 @@ void subdiv_tracker_cur_positions(MatrixXd & P)
 
 // ---------------------------------------------------------------- save
 //
-// subdiv_<stem>.sdt, little-endian. Header (224 bytes):
+// subdiv_<stem>.sdt, little-endian. Header (224 bytes; 232 when relaxed):
 //   0   char[8]  magic "SUBDIVT\0"
-//   8   uint32   version (1)
-//   12  uint32   header_bytes (224)
+//   8   uint32   version (1; 2 when relaxed)
+//   12  uint32   header_bytes (112 + 8 * n_arrays)
 //   16  uint32   n_levels
-//   20  uint32   reserved (0)
+//   20  uint32   relaxed (0 / 1; "reserved (0)" in version 1)
 //   24  uint64   n_samples_requested
 //   32  uint64   n_sub_verts      (Vs)
 //   40  uint64   n_sub_faces      (Fs)
@@ -344,14 +371,16 @@ void subdiv_tracker_cur_positions(MatrixXd & P)
 //   80  uint64   n_coarse_faces   (|cmc.Fout|)
 //   88  uint64   n_palette        (P)
 //   96  uint64   n_palette_ids
-//   104 uint64   n_arrays (14)
-//   112 uint64   offsets[14]      byte offset of each array; each is 8-byte aligned
+//   104 uint64   n_arrays (14; 15 when relaxed)
+//   112 uint64   offsets[n_arrays] byte offset of each array; each is 8-byte aligned
 // Arrays:
 //   0  sub_V             float64 Vs x 3   subdivided vertex positions on the fine mesh
+//                                         (after relaxation when relaxed)
 //   1  sub_F             int32   Fs x 3   subdivided faces (Laplacian connectivity)
 //   2  sub_face_orig     int32   Fs       fine face (gFO row) containing each sub face
 //   3  orig_edges        int32   nE x 2   fine-mesh edges (min, max); EDGE carrier index
-//   4  carrier_type      uint8   Vs       0 VERTEX, 1 EDGE, 2 FACE
+//   4  carrier_type      uint8   Vs       0 VERTEX, 1 EDGE, 2 FACE, of the seed position
+//                                         (before relaxation); the struct ids come from it
 //   5  carrier_index     int32   Vs       gVO vertex / orig_edges row / gFO face
 //   6  fine_face         int32   Vs       gFO face the vertex lies on (-1: on no face)
 //   7  fine_bary         float64 Vs x 3   in gFO.row(fine_face) corner order; for an EDGE
@@ -363,6 +392,7 @@ void subdiv_tracker_cur_positions(MatrixXd & P)
 //   11 palette_offsets   int32   P+1      set k = palette_ids[offsets[k] .. offsets[k+1])
 //   12 palette_ids       int32   n_palette_ids
 //   13 palette_type_mask uint8   P        bit0 sheet, bit1 seam, bit2 boundary, bit3 junction
+//   14 sub_V_seed        float64 Vs x 3   relaxed only: positions before relaxation
 
 namespace {
 
@@ -447,7 +477,7 @@ void subdiv_tracker_save(const CoarseFaceLookup & lookup, const std::string & pa
         maxBarySumErr, minBary, maxPosDiff);
 
     // ---- write ----
-    const int kArrays = 14;
+    const int kArrays = gRelaxed ? 15 : 14;
     const uint32_t kHeader = 112 + 8 * kArrays;
     const uint64_t nE = (uint64_t)gM.origEdges.rows();
     const uint64_t P = (uint64_t)gPal.size();
@@ -463,7 +493,12 @@ void subdiv_tracker_save(const CoarseFaceLookup & lookup, const std::string & pa
     }
 
     struct Arr { const void * p; size_t bytes; };
-    const Arr arrs[kArrays] = {
+    std::vector<double> seedV;
+    if (gRelaxed) {
+        seedV.resize(Vs * 3);
+        for (size_t i = 0; i < Vs; ++i) for (int c = 0; c < 3; ++c) seedV[3 * i + c] = gVseed((Index)i, c);
+    }
+    const Arr arrs[15] = {
         { subV.data(),              subV.size() * 8 },
         { subF.data(),              subF.size() * 4 },
         { gM.faceOrig.data(),       gM.faceOrig.size() * 4 },
@@ -478,8 +513,9 @@ void subdiv_tracker_save(const CoarseFaceLookup & lookup, const std::string & pa
         { gPal.offsets.data(),      gPal.offsets.size() * 4 },
         { gPal.ids.data(),          gPal.ids.size() * 4 },
         { gPal.typeMask.data(),     gPal.typeMask.size() },
+        { seedV.data(),             seedV.size() * 8 },
     };
-    uint64_t offsets[kArrays];
+    uint64_t offsets[15];
     uint64_t at = kHeader;
     for (int k = 0; k < kArrays; ++k) {
         at = (at + 7) / 8 * 8;
@@ -492,10 +528,10 @@ void subdiv_tracker_save(const CoarseFaceLookup & lookup, const std::string & pa
     if (!w.f) fail("cannot write " + path);
     const char magic[8] = { 'S', 'U', 'B', 'D', 'I', 'V', 'T', '\0' };
     w.raw(magic, 8);
-    w.val<uint32_t>(1);
+    w.val<uint32_t>(gRelaxed ? 2 : 1);
     w.val<uint32_t>(kHeader);
     w.val<uint32_t>((uint32_t)gM.nLevels);
-    w.val<uint32_t>(0);
+    w.val<uint32_t>(gRelaxed ? 1 : 0);
     w.val<uint64_t>((uint64_t)gRequested);
     w.val<uint64_t>(Vs);
     w.val<uint64_t>((uint64_t)gM.F.rows());
@@ -548,3 +584,27 @@ void subdiv_tracker_export_deformed_obj(const std::string & path, int64_t maxVer
     else
         fprintf(stderr, "[subdiv_tracker] deformed subdivided mesh -> %s\n", path.c_str());
 }
+
+void subdiv_tracker_export_seed_obj(const std::string & path, int64_t maxVerts)
+{
+    if (!gEnabled || !gRelaxed) return;
+    if ((int64_t)gVseed.rows() > maxVerts) {
+        fprintf(stderr, "[subdiv_tracker] skipping %s: %lld vertices > %lld\n",
+                path.c_str(), (long long)gVseed.rows(), (long long)maxVerts);
+        return;
+    }
+    if (!igl::writeOBJ(path, gVseed, gM.F))
+        fprintf(stderr, "[subdiv_tracker] writeOBJ failed: %s\n", path.c_str());
+    else
+        fprintf(stderr, "[subdiv_tracker] seed (unrelaxed) subdivided mesh -> %s\n", path.c_str());
+}
+
+void subdiv_tracker_export_graph(const std::string & path)
+{
+    if (!gEnabled || !gRelaxed) return;
+    save_relax_graph(path, gVseed, gGraph, gPal, gSet);
+}
+
+bool subdiv_tracker_relaxed() { return gRelaxed; }
+const MatrixXd & subdiv_tracker_seed_positions() { return gVseed; }
+const RelaxGraph & subdiv_tracker_graph() { return gGraph; }
