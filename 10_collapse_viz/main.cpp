@@ -86,7 +86,9 @@ std::vector<std::vector<int>> gDecIM;
 VectorXi gFaceSheetID;
 int gNumSheets    = 1;
 std::vector<std::vector<int>> gVF;
-std::vector<std::set<int>> gVertexStructIDs;  // per-vertex struct ID sets from .ma_struct file
+std::vector<std::set<int>> gVertexStructIDs;  // per-vertex struct ID sets (= gMatStruct.vertexIds)
+static MatStruct gMatStruct;                  // the parsed .ma_struct (the only reader)
+static bool      gHaveMatStruct = false;
 FILE* gStructGateLog = nullptr;               // dedicated log file for struct-ID gate decisions
 std::vector<std::pair<int,int>> gSeamEdgeList;  // vertex pairs of seam (non-manifold) edges
 std::vector<double> gInitCosts;               // initial cost per edge (index = gE row)
@@ -671,7 +673,10 @@ int main(int argc, char * argv[])
 
     // Load per-vertex struct IDs from .ma_struct file (optional).
     if (!matstructPath.empty()) {
-        if (load_matstruct(matstructPath, gVertexStructIDs)) {
+        std::string msErr;
+        if (load_matstruct(matstructPath, gVO, gFO, gMatStruct, &msErr)) {
+            gHaveMatStruct   = true;
+            gVertexStructIDs = gMatStruct.vertexIds;
             std::cout << "Struct IDs loaded from " << matstructPath
                       << "  (" << gVertexStructIDs.size() << " vertices)\n";
             if (matStructCheck)
@@ -679,7 +684,7 @@ int main(int argc, char * argv[])
             else
                 std::cout << "  --mat_struct_check OFF: struct ID gate inactive\n";
         } else {
-            std::cerr << "[ERROR] load_matstruct failed for: " << matstructPath << "\n";
+            std::cerr << "[ERROR] " << msErr << "\n";
             if (matStructCheck) {
                 std::cerr << "  --mat_struct_check is ON but struct IDs could not be loaded — aborting.\n";
                 return 1;
@@ -688,7 +693,7 @@ int main(int argc, char * argv[])
     }
     // Initialize simplification visualization tracker (topo types, struct IDs, ancestors).
     // Works with or without a .ma_struct file (topo types will be -1 if none provided).
-    simp_viz_tracker_init(matstructPath, (int)gVO.rows());
+    simp_viz_tracker_init(gHaveMatStruct ? &gMatStruct : nullptr, (int)gVO.rows());
 
     // Helper: format a std::set<int> as "{1,2,3}" for logging.
     auto struct_ids_str = [](const std::set<int>& s) -> std::string {
@@ -809,7 +814,7 @@ int main(int argc, char * argv[])
 
     if (nSubdivSamples >= 0) {
         try {
-            subdiv_tracker_init(nSubdivSamples, matstructPath);
+            subdiv_tracker_init(nSubdivSamples, gHaveMatStruct ? &gMatStruct : nullptr);
             subdiv_tracker_export_fine_obj(out_dir + "subdiv_fine_" + stem + ".obj", gSubdivObjMaxVerts);
         } catch (const std::exception & e) {
             fprintf(stderr, "[FATAL] %s\n", e.what());

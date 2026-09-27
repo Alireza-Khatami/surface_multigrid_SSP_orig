@@ -302,3 +302,15 @@ so old launch configs still start, but with the tracker off).
 - An independent Python reader of `.sdt` recomputed all struct sets from `.ma_struct` and
   checked the layout, fine positions and coarse barycentrics.
 - The shared prefix of a 4-level and a 5-level run is bit-identical.
+
+### Single `.ma_struct` reader (follow-up)
+
+`load_matstruct.{h,cpp}` is the only code that parses `.ma_struct`. It fills one
+`MatStruct`: per-vertex / per-face / per-edge IDs, struct types, raw `.ma` edges,
+and the struct list in file order. It also checks that the file describes the mesh.
+`main.cpp` parses once and passes the result to the collapse gate (`gVertexStructIDs`),
+the simp_viz tracker (topo types, same counting rules) and the subdivided tracker.
+Checked against the previous code on ABC 00040057, with and without
+`--mat_struct_check`: all output files byte-identical. The unit test compares the
+reader with a verbatim copy of the old `load_matstruct`
+(`tests/legacy_load_matstruct_ref.cpp`).

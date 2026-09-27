@@ -61,6 +61,7 @@ if(SUBDIV_TESTS)
         subdiv_sample_tracker/tests/subdiv_mesh_test.cpp
         subdiv_sample_tracker/subdiv_mesh.cpp
         subdiv_sample_tracker/subdiv_struct_ids.cpp
+        subdiv_sample_tracker/tests/legacy_load_matstruct_ref.cpp
         load_matstruct.cpp)
     target_compile_features(subdiv_mesh_test PRIVATE cxx_std_17)
     target_link_libraries(subdiv_mesh_test igl::core)

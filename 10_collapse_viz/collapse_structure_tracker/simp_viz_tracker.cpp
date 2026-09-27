@@ -2,6 +2,7 @@
 #include "../face_dead.h"
 #include "../coarse_mesh_compaction.h"
 #include "../stale_chains.h"
+#include "../load_matstruct.h"
 
 #ifdef C2F_VIZ_DIAGNOSTIC
 #include <polyscope/polyscope.h>
@@ -95,72 +96,41 @@ static void ensure_size(int n)
     }
 }
 
-// Derive per-vertex topo type by re-reading the .ma_struct file and counting
-// seam/boundary edge degrees and junction membership.
-static bool derive_topo_types(const std::string& fname, int nv)
+// Derive per-vertex topo type from the parsed .ma_struct: seam/boundary edge
+// degrees (counted over every listed .ma edge) and junction membership.
+static void derive_topo_types(const MatStruct& ms, int nv)
 {
-    std::ifstream f(fname);
-    if (!f) return false;
-
-    int fnv, fne, fnf;
-    if (!(f >> fnv >> fne >> fnf) || fnv <= 0) return false;
-
-    // Skip vertex lines ("v x y z r")
-    for (int i = 0; i < fnv; ++i) {
-        char ch; double x, y, z, r;
-        f >> ch >> x >> y >> z >> r;
-    }
-
-    // Read edge endpoints
-    std::vector<std::array<int,2>> edge_ep(fne);
-    for (int i = 0; i < fne; ++i) {
-        char ch;
-        f >> ch >> edge_ep[i][0] >> edge_ep[i][1];
-    }
-
-    // Skip face lines
-    for (int i = 0; i < fnf; ++i) {
-        char ch; int a, b, c;
-        f >> ch >> a >> b >> c;
-    }
-
-    int num_structs = 0;
-    if (!(f >> num_structs)) return true;  // no struct section — topo stays -1
+    gStructTypes.clear();
+    if (!ms.hasStructSection) return;  // no struct section — topo stays MS_Unknown
 
     std::vector<bool> is_junction(nv, false);
     std::vector<int>  seam_deg(nv, 0);
     std::vector<int>  bnd_deg(nv, 0);
 
-    gStructTypes.clear();
-    for (int s = 0; s < num_structs; ++s) {
-        int struct_id, type_id, count;
-        if (!(f >> struct_id >> type_id >> count)) break;
-        gStructTypes.push_back({struct_id, type_id});
+    for (const MatStructEntry& st : ms.structs) {
+        gStructTypes.push_back({st.id, st.type});
 
-        for (int j = 0; j < count; ++j) {
-            int elem_id;
-            if (!(f >> elem_id)) break;
-
-            if (type_id == 3) {
+        for (int elem_id : st.elements) {
+            if (st.type == 3) {
                 // JUNCTION — elem_id is a vertex index
                 if (elem_id >= 0 && elem_id < nv)
                     is_junction[elem_id] = true;
-            } else if (type_id == 1) {
+            } else if (st.type == 1) {
                 // SEAM — elem_id is an edge index
-                if (elem_id >= 0 && elem_id < fne) {
-                    int u = edge_ep[elem_id][0], v = edge_ep[elem_id][1];
+                if (elem_id >= 0 && elem_id < ms.ne) {
+                    int u = ms.maEdges[elem_id][0], v = ms.maEdges[elem_id][1];
                     if (u >= 0 && u < nv) seam_deg[u]++;
                     if (v >= 0 && v < nv) seam_deg[v]++;
                 }
-            } else if (type_id == 2) {
+            } else if (st.type == 2) {
                 // BOUNDARY — elem_id is an edge index
-                if (elem_id >= 0 && elem_id < fne) {
-                    int u = edge_ep[elem_id][0], v = edge_ep[elem_id][1];
+                if (elem_id >= 0 && elem_id < ms.ne) {
+                    int u = ms.maEdges[elem_id][0], v = ms.maEdges[elem_id][1];
                     if (u >= 0 && u < nv) bnd_deg[u]++;
                     if (v >= 0 && v < nv) bnd_deg[v]++;
                 }
             }
-            // type_id == 0 (SHEET) — purely a face-element struct; vertices
+            // type 0 (SHEET) — purely a face-element struct; vertices
             // that belong only to sheets are MS_Sheet, handled by the else branch below.
         }
     }
@@ -182,12 +152,11 @@ static bool derive_topo_types(const std::string& fname, int nv)
             gTopoType[i] = MS_Sheet;
         }
     }
-    return true;
 }
 
 // ---- public API ----
 
-void simp_viz_tracker_init(const std::string& matstruct_path, int n_initial)
+void simp_viz_tracker_init(const MatStruct* ms, int n_initial)
 {
     gNumInitial = n_initial;
     int total   = (int)gV.rows();  // n_initial + 1 (infinity cap)
@@ -204,13 +173,9 @@ void simp_viz_tracker_init(const std::string& matstruct_path, int n_initial)
         gAncestors[i].insert(i);
 
     // Derive topo types
-    if (!matstruct_path.empty()) {
-        if (derive_topo_types(matstruct_path, n_initial))
-            fprintf(stderr, "[simp_viz] topo types derived  (%d vertices)  %s\n",
-                    n_initial, matstruct_path.c_str());
-        else
-            fprintf(stderr, "[simp_viz] could not derive topo types from %s — all -1\n",
-                    matstruct_path.c_str());
+    if (ms) {
+        derive_topo_types(*ms, n_initial);
+        fprintf(stderr, "[simp_viz] topo types derived  (%d vertices)\n", n_initial);
     }
 
 #ifdef C2F_VIZ_DIAGNOSTIC
@@ -237,7 +202,7 @@ void simp_viz_tracker_on_collapse(int s, int d)
     // in .ma_struct coverage.  Warn once per unique unknown vertex encountered
     // (the struct gate should have already blocked unknown-struct-set collapses,
     // but topo type is derived independently so it can be unknown even when the
-    // struct ID set is non-empty, e.g. if derive_topo_types failed to open the file).
+    // struct ID set is non-empty, e.g. if no .ma_struct was given).
     static std::unordered_set<int> sWarnedUnknown;
     auto warn_unknown = [&](int v) {
         if (gTopoType[v] == MS_Unknown && sWarnedUnknown.insert(v).second)

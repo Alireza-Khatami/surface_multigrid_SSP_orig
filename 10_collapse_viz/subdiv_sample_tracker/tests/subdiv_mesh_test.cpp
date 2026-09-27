@@ -22,6 +22,9 @@
 #include <string>
 #include <unordered_map>
 
+// tests/legacy_load_matstruct_ref.cpp
+bool legacy_load_matstruct(const std::string & fname, std::vector<std::set<int>> & vertex_struct_ids);
+
 using namespace Eigen;
 
 static int g_fail = 0;
@@ -199,15 +202,19 @@ int main(int argc, char ** argv)
 
     // ---- struct IDs ----
     if (argc > 3) {
-        MatStructElements E = load_matstruct_elements(argv[3], VO, FO, M.origEdges);
+        MatStruct E;
+        std::string err;
+        if (!load_matstruct(argv[3], VO, FO, E, &err)) { fprintf(stderr, "FAIL: %s\n", err.c_str()); return 1; }
         StructPalette P; std::vector<int32_t> sid;
         auto t2 = std::chrono::steady_clock::now();
         build_struct_sets(M, FO, &E, P, sid);
         auto t3 = std::chrono::steady_clock::now();
         fprintf(stderr, "struct sets: %.2f s\n", std::chrono::duration<double>(t3 - t2).count());
 
+        // Reference: the pre-unification reader, verbatim.
         std::vector<std::set<int>> ref;
-        CHECK(load_matstruct(argv[3], ref), "load_matstruct");
+        CHECK(legacy_load_matstruct(argv[3], ref), "legacy_load_matstruct");
+        CHECK(ref == E.vertexIds, "shared reader's vertex sets differ from the old load_matstruct");
         auto setOf = [&](int64_t v) {
             const int k = sid[v];
             return std::set<int>(P.ids.begin() + P.offsets[k], P.ids.begin() + P.offsets[k + 1]);

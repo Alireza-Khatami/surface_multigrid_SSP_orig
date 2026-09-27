@@ -18,10 +18,10 @@
 #include <cstdint>
 #include <string>
 
-// Build the subdivided mesh (>= nTarget vertices), its struct IDs (when
-// matstructPath is non-empty) and seed every vertex on its fine face.
+// Build the subdivided mesh (>= nTarget vertices), its struct IDs (from ms,
+// the parsed .ma_struct; nullptr = none) and seed every vertex on its fine face.
 // Call once after init_ssp() and load_matstruct(). Throws on invalid input.
-void subdiv_tracker_init(int64_t nTarget, const std::string & matstructPath);
+void subdiv_tracker_init(int64_t nTarget, const MatStruct * ms);
 
 bool subdiv_tracker_enabled();
 

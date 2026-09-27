@@ -26,7 +26,6 @@ extern MatrixXd gVO;
 extern MatrixXi gF;
 extern MatrixXi gFO;
 extern std::vector<single_collapse_data> gDecInfo;
-extern std::vector<std::set<int>> gVertexStructIDs;
 
 namespace {
 
@@ -75,7 +74,7 @@ void fail(const std::string & msg) { throw std::runtime_error("[subdiv_tracker] 
 
 // ---------------------------------------------------------------- init
 
-void subdiv_tracker_init(int64_t nTarget, const std::string & matstructPath)
+void subdiv_tracker_init(int64_t nTarget, const MatStruct * ms)
 {
     gEnabled = false;
     gStats = Stats();
@@ -92,17 +91,7 @@ void subdiv_tracker_init(int64_t nTarget, const std::string & matstructPath)
 
     gM = build_subdiv_mesh(gVO, gFO, nTarget);
 
-    if (!matstructPath.empty()) {
-        const MatStructElements E = load_matstruct_elements(matstructPath, gVO, gFO, gM.origEdges);
-        if (gVertexStructIDs.size() == E.vertexIds.size()) {
-            for (size_t v = 0; v < E.vertexIds.size(); ++v)
-                if (std::set<int>(E.vertexIds[v].begin(), E.vertexIds[v].end()) != gVertexStructIDs[v])
-                    fail("struct IDs of vertex " + std::to_string(v) + " differ from load_matstruct");
-        }
-        build_struct_sets(gM, gFO, &E, gPal, gSet);
-    } else {
-        build_struct_sets(gM, gFO, nullptr, gPal, gSet);
-    }
+    build_struct_sets(gM, gFO, ms, gPal, gSet);
 
     const size_t Vs = gM.carrierType.size();
     gFace.assign(Vs, -1);

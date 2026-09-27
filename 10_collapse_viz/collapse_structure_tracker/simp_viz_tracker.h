@@ -1,12 +1,13 @@
 #pragma once
 #include "../coarse_mesh_compaction.h"
+#include "../load_matstruct.h"
 #include <string>
 
 // Initialize tracking: call once after init_ssp() and after load_matstruct().
-// matstruct_path: the same .ma_struct file used for struct IDs — used here to
-//   derive per-vertex topo types (seam degree, boundary degree, junction membership).
+// ms: the parsed .ma_struct (nullptr = none) — used here to derive per-vertex
+//   topo types (seam degree, boundary degree, junction membership).
 // n_initial: gVO.rows() at initialization time.
-void simp_viz_tracker_init(const std::string& matstruct_path, int n_initial);
+void simp_viz_tracker_init(const MatStruct* ms, int n_initial);
 
 // Call after each successful collapse: s = surviving vertex, d = absorbed vertex.
 // Unions d's ancestors + struct IDs into s.
