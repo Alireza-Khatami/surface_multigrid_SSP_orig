@@ -58,6 +58,7 @@
 #include "visualizer.h"
 #endif
 #include "coarse_fine_viz.h"
+#include "coarse_subdiv_c2f.h"
 
 #include "load_matstruct.h"
 #include "subdiv_sample_tracker/subdiv_tracker.h"
@@ -358,7 +359,12 @@ static void save_simplified_mesh(const CoarseMeshCompaction & cmc, const std::st
 // Correspondence meshes, named <topology>_at_<positions>:
 //   subdiv_fine_at_coarse_pos_*.obj   subdivided fine mesh, each vertex at its tracked coarse position
 //   subdiv_coarse_at_fine_pos_*.obj   those tracked samples replaced by their fine positions
+//   coarse_subdiv_*.obj               the simplified mesh subdivided (build_subdiv_mesh)
+//   coarse_subdiv_at_fine_pos_*.obj   its vertices mapped to fine with query_coarse_to_fine
 static long long gSubdivObjMaxVerts = 2000000;
+// --n_coarse_subdiv_samples N: subdivide the simplified mesh to >= N vertices and map
+// them to fine (default: --n_subdiv_samples; -1 = off)
+static long long gCoarseSubdivSamples = -1;
 
 static bool export_final_outputs(const std::string & out_dir, const std::string & stem)
 {
@@ -385,6 +391,9 @@ static bool export_final_outputs(const std::string & out_dir, const std::string 
     subdiv_tracker_save(lookup, out("subdiv_", ".sdt"));
     subdiv_tracker_export_deformed_obj(out("subdiv_fine_at_coarse_pos_" + subdiv_tracker_relax_tag(), ".obj"), gSubdivObjMaxVerts);
     subdiv_tracker_export_coarse_at_fine_obj(out("subdiv_coarse_at_fine_pos_" + subdiv_tracker_relax_tag(), ".obj"), gSubdivObjMaxVerts);
+    if (gCoarseSubdivSamples >= 0)
+        coarse_subdiv_c2f_export(cmc, gCoarseSubdivSamples, gSubdivObjMaxVerts,
+                                 out("coarse_subdiv_", ".obj"), out("coarse_subdiv_at_fine_pos_", ".obj"));
     simp_viz_tracker_write_json(cmc, json);
 
     // Re-read the files and cross-check that they agree on the vertex ordering.
@@ -604,6 +613,9 @@ int main(int argc, char * argv[])
     //                          more than t x bbox diagonal (Douglas-Peucker)
     // [--subdiv_relax_curve_anchors N]  solve_project only, overrides the adaptive anchors with
     //                          N vertices per seam/boundary group, evenly spaced along it
+    // [--n_coarse_subdiv_samples N]  default: --n_subdiv_samples. After decimation, subdivide the
+    //                          simplified mesh until it has >= N vertices, map every vertex to the fine
+    //                          mesh (query_coarse_to_fine), write coarse_subdiv_[at_fine_pos_]*.obj
     // [--subdiv_obj_max_verts N]  default: 2000000 — write subdiv_fine_*.obj (incl. subdiv_fine_at_coarse_pos_*.obj)
     //                             only up to N vertices
     // [--track_face_flip F]    face-flip debug tracker on gFO face F (needs --n_subdiv_samples)
@@ -635,6 +647,7 @@ int main(int argc, char * argv[])
             else if (a == "--track_face_flip")  trackFaceFlip     = std::stoi(argv[i+1]);
             else if (a == "--n_subdiv_samples") nSubdivSamples = std::stoll(argv[i+1]);
             else if (a == "--subdiv_obj_max_verts") gSubdivObjMaxVerts = std::stoll(argv[i+1]);
+            else if (a == "--n_coarse_subdiv_samples") gCoarseSubdivSamples = std::stoll(argv[i+1]);
             else if (a == "--subdiv_relax_method") subdivRelaxMethod = argv[i+1];
             else if (a == "--subdiv_relax_curve_anchors") subdivCurveAnchors = std::stoi(argv[i+1]);
             else if (a == "--subdiv_relax_anchor_tol") subdivAnchorTol = std::stod(argv[i+1]);
@@ -844,6 +857,7 @@ int main(int argc, char * argv[])
         };
     }
 
+    if (gCoarseSubdivSamples < 0) gCoarseSubdivSamples = nSubdivSamples;
     if (nSubdivSamples >= 0) {
         try {
             subdiv_tracker_init(nSubdivSamples, gHaveMatStruct ? &gMatStruct : nullptr, subdivRelax,

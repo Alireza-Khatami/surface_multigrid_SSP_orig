@@ -32,6 +32,7 @@ set(APP_SRCS
     coarse_mesh_export.cpp
     coarse_mesh_sanity_check.cpp
     coarse_fine_viz.cpp
+    coarse_subdiv_c2f.cpp
     orient_faces_consistently.cpp
     meshlab_qslim_callbacks.cpp
     meshlab_qslim_config.cpp
