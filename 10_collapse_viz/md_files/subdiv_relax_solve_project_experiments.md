@@ -235,3 +235,44 @@ For comparison, level 3 per 100k faces: 1e-2 -> 8.6 degenerate / 9.8 flipped;
 **Consequence.** Keep the tolerance in diag units, not in sample spacings.
 3e-3 to 5e-3 x diag is safe at both levels, with a margin of about 2x to the
 break. The current default is 1e-3.
+
+## Joint solve (seams + sheets at once) vs two passes, 2026-09-27
+
+**Question.** solve_project solves the seams first, projects them onto the MAT,
+and then solves the sheets against the projected seams. Can everything be
+solved at once instead?
+
+**Implementation** (`--subdiv_relax_joint`). One system for all free seam and
+sheet vertices, then projection of everything. The system is non-symmetric,
+because sheets are pulled by seams but not the reverse, so it uses sparse LU
+(relative residual 1e-14).
+
+**Expected.** Because the system is block-triangular, the joint solve gives
+exactly the same seam positions as the seam pass. The only difference is that
+the sheets see the seams *before* projection: on the straight chords between
+anchors instead of on the real seam.
+
+| run | seams off the MAT, max | sheets off the MAT, mean | one step moves | smallest angle, 1st pct / median | edge CV | degenerate | flipped |
+|---|---|---|---|---|---|---|---|
+| L3 tol 3e-3, two passes | 0.00298 | 0.00011 | 0.00044 | 17.9 / 42.4 | 0.354 | **2** | **5** |
+| L3 tol 3e-3, joint | 0.00298 | 0.00032 | 0.00063 | 16.5 / 42.1 | 0.363 | 260 | 169 |
+| L3 tol 1e-2, two passes | 0.00971 | 0.00013 | 0.0020 | 16.8 / 41.8 | 0.360 | **15** | **17** |
+| L3 tol 1e-2, joint | 0.00971 | 0.00110 | 0.0024 | 0 / 39.5 | 0.466 | 8,270 | 4,488 |
+| L4 tol 5e-3, two passes | 0.00495 | 0.00011 | 0.00084 | 17.8 / 42.4 | 0.355 | **16** | **17** |
+| L4 tol 5e-3, joint | 0.00495 | 0.00046 | 0.00099 | 0 / 41.8 | 0.396 | 11,513 | 5,985 |
+
+Distances are in bbox diagonals; angles are each triangle's smallest angle in
+degrees. Folders: `l3_sp_joint_tol3e-3`, `l3_sp_joint_tol1e-2` and
+`l4_sp_joint_tol5e-3`, next to the two-pass runs. The tracker counters were 0
+in every run.
+
+**Result.**
+- **The seams are identical, as expected.** Their off-the-MAT numbers match to
+  the last digit.
+- **The joint solve is worse in every run.** Its sheet interiors land 3-9x
+  farther off the MAT before projection, because their rims are the unprojected
+  chords. That produces 100-700x more degenerate triangles, and at the looser
+  tolerances the 1st-percentile angle collapses to 0.
+- Projecting the seams between the two passes is what keeps the sheet rims on
+  the real seams. So the two-pass order is not only cheaper, it is what makes
+  this method work.

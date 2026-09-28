@@ -86,7 +86,7 @@ void fail(const std::string & msg) { throw std::runtime_error("[subdiv_tracker] 
 // ---------------------------------------------------------------- init
 
 void subdiv_tracker_init(int64_t nTarget, const MatStruct * ms, bool relax, const std::string & method,
-                         int curveAnchors, double curveAnchorTol)
+                         int curveAnchors, double curveAnchorTol, bool jointSolve)
 {
     gEnabled = false;
     gStats = Stats();
@@ -120,6 +120,7 @@ void subdiv_tracker_init(int64_t nTarget, const MatStruct * ms, bool relax, cons
         RelaxOptions expOpt;
         expOpt.curveAnchors = curveAnchors;
         expOpt.curveAnchorTol = curveAnchorTol;
+        expOpt.jointSolve = jointSolve;
         const RelaxReport R = experiment ? subdiv_relax_solve_project(gM, gVO, gFO, ms, gPal, gSet, gGraph, expOpt)
                                          : subdiv_relax(gM, gVO, gFO, ms, gPal, gSet, gGraph);
         const double tolStep = 1e-10;
