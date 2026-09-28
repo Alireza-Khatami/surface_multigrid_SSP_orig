@@ -68,7 +68,14 @@ Little-endian. A fixed header is followed by arrays, each starting at an
 - Sample `i` is row `i` of every per-sample array and vertex `i` of `sub_F`
   and of every exported subdivided OBJ.
 - Samples `0 .. n_fine_verts-1` are the original MAT vertices, in their
-  original order.
+  original order. After relaxation this holds for identity, not position:
+  only junctions and fixed samples stay put. The original positions are in
+  `sub_V_seed`.
+- Samples with `fine_face == -1` are MAT vertices used by no face. They
+  include the loose vertices of stale chains (OBJ `l` polylines that are not
+  face edges). They are never relaxed, never tracked (`coarse_face == -1`),
+  and have no edges in `sub_F`. Their coarse position is their `sub_V`, because
+  decimation locks stale-chain vertices.
 - The levels are nested. The first samples are exactly the vertices of each
   coarser level (see `level_faces` below).
 - `carrier_*` describe the seed position (before relaxation). The structure
