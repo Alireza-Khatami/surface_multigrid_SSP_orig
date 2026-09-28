@@ -24,7 +24,13 @@
 // it stops changing (relax = true; subdiv_relax.h) and seed every vertex on its
 // fine face. Call once after init_ssp() and load_matstruct(). Throws on invalid
 // input or if the relaxation does not converge.
-void subdiv_tracker_init(int64_t nTarget, const MatStruct * ms, bool relax = true);
+// method: "newton" (default; runs until one relaxation step moves nothing) or
+// "solve_project" (experiment: one 3D solve of L x = 0, then projection).
+// solve_project only: curveAnchors > 0 fixes that many vertices per curve group;
+// otherwise curveAnchorTol > 0 places anchors adaptively (Douglas-Peucker, x diag).
+void subdiv_tracker_init(int64_t nTarget, const MatStruct * ms, bool relax = true,
+                         const std::string & method = "newton", int curveAnchors = 0,
+                         double curveAnchorTol = 1e-3);
 
 bool subdiv_tracker_enabled();
 
@@ -48,6 +54,15 @@ void subdiv_tracker_export_fine_obj(const std::string & path, int64_t maxVerts =
 // The subdivided mesh before relaxation (exact midpoint positions). Same
 // connectivity and vertex order as the fine OBJ. Only after a relaxed init.
 void subdiv_tracker_export_seed_obj(const std::string & path, int64_t maxVerts = 2000000);
+
+// "relaxed_<method>_" after a relaxed init, "" otherwise: goes into export names
+// so relaxed and unrelaxed files cannot be confused.
+std::string subdiv_tracker_relax_tag();
+
+// Relaxed subdivided mesh (grey) plus a small sphere at every curve anchor, one
+// color per seam/boundary struct id, as a binary PLY with vertex colors. Only
+// when the relaxation used anchors (solve_project). Same size limit as the OBJs.
+void subdiv_tracker_export_anchor_ply(const std::string & path, int64_t maxVerts = 2000000);
 
 // The relaxation graph (.slg, layout in subdiv_relax.cpp). Only after a relaxed init.
 void subdiv_tracker_export_graph(const std::string & path);

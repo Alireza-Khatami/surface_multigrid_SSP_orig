@@ -1,3 +1,11 @@
+// EXPERIMENT (copied from subdiv_relax.cpp): relax by one 3D linear solve of
+// L x = 0, then project. Selected with --subdiv_relax_method solve_project.
+//
+// Same graph, projection, pinning and checks as subdiv_relax.cpp; only the
+// solver differs. Instead of iterating until one plain step moves nothing, it
+// solves the 3D Laplacian once per pass (curves, then sheets with the curves
+// fixed) and projects each vertex onto its own structure. The plain-step check
+// at the end reports how far that result is from a resting state.
 #include "subdiv_relax.h"
 
 #include <igl/parallel_for.h>
@@ -13,11 +21,13 @@
 #include <cmath>
 #include <cstdio>
 
-#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <mutex>
 #include <stdexcept>
+#include <functional>
+#include <queue>
+#include <set>
 #include <unordered_map>
 
 using namespace Eigen;
@@ -399,172 +409,11 @@ struct Projector {
 
 } // namespace
 
-// ---------------------------------------------------------------- graph
-
-RelaxGraph build_relax_graph(const SubdivMesh & M, const StructPalette & pal,
-                             const std::vector<int32_t> & setId, const MatStruct * ms)
-{
-    const double t0 = now_s();
-    RelaxGraph G;
-    const int64_t Vs = M.V.rows();
-    if ((int64_t)setId.size() != Vs) fail("setId size mismatch");
-
-    const SetIds S = split_palette(pal, ms);
-    std::vector<uint8_t> setRole(pal.size());
-    for (int k = 0; k < pal.size(); ++k) setRole[k] = ms ? role_of(pal.typeMask[k]) : (uint8_t)RELAX_SHEET;
-
-    G.role.resize(Vs);
-    for (int64_t i = 0; i < Vs; ++i) {
-        G.role[i] = setRole[setId[i]];
-        ++G.nRole[G.role[i]];
-        if (ms && G.role[i] == RELAX_SHEET && S.sheet[setId[i]].empty()) ++G.sheetWithoutSheetId;
-    }
-
-    // Unique undirected edges of M.F.
-    std::vector<uint64_t> keys;
-    keys.reserve((size_t)M.F.rows() * 3);
-    for (Index f = 0; f < M.F.rows(); ++f)
-        for (int c = 0; c < 3; ++c) {
-            uint32_t a = (uint32_t)M.F(f, c), b = (uint32_t)M.F(f, (c + 1) % 3);
-            if (a > b) std::swap(a, b);
-            keys.push_back((uint64_t)a << 32 | b);
-        }
-    std::sort(keys.begin(), keys.end());
-    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
-    G.nUndirected = (int64_t)keys.size();
-
-    // Rule cache over palette pairs.
-    std::unordered_map<uint64_t, uint8_t> cache;  // bit0 share sheet, bit1 share curve
-    auto share = [&](int ka, int kb) -> uint8_t {
-        const uint64_t key = (uint64_t)(uint32_t)std::min(ka, kb) << 32 | (uint32_t)std::max(ka, kb);
-        auto it = cache.find(key);
-        if (it != cache.end()) return it->second;
-        uint8_t r = 0;
-        if (intersects(S.sheet[ka], S.sheet[kb])) r |= 1;
-        if (intersects(S.curve[ka], S.curve[kb])) r |= 2;
-        if (S.sheet[ka].empty() && S.sheet[kb].empty()) r |= 4;
-        cache.emplace(key, r);
-        return r;
-    };
-    // keep(i <- j): does j pull on i?
-    auto keep = [&](int64_t i, int64_t j) -> bool {
-        const uint8_t ri = G.role[i], rj = G.role[j];
-        if (!ms) return true;
-        if (ri == RELAX_JUNCTION) return false;
-        const uint8_t s = share(setId[i], setId[j]);
-        if (ri == RELAX_CURVE) return rj != RELAX_SHEET && (s & 2);
-        return (s & 1) || (s & 4);
-    };
-    auto kind_of = [&](int64_t i, int64_t j) -> int {
-        const uint8_t ri = G.role[i], rj = G.role[j];
-        if (ri == RELAX_SHEET) return rj == RELAX_SHEET ? 0 : rj == RELAX_CURVE ? 1 : 2;
-        return rj == RELAX_CURVE ? 3 : 4;
-    };
-
-    std::vector<int64_t> deg(Vs + 1, 0);
-    std::vector<uint8_t> dir(keys.size(), 0);  // bit0: a<-b kept, bit1: b<-a kept
-    for (size_t e = 0; e < keys.size(); ++e) {
-        const int64_t a = (int64_t)(keys[e] >> 32), b = (int64_t)(keys[e] & 0xffffffffu);
-        uint8_t d = 0;
-        if (keep(a, b)) { d |= 1; ++deg[a]; ++G.kind[kind_of(a, b)]; }
-        if (keep(b, a)) { d |= 2; ++deg[b]; ++G.kind[kind_of(b, a)]; }
-        if (G.role[a] == RELAX_SHEET && G.role[b] == RELAX_SHEET && d != 3) ++G.droppedSheetSheet;
-        dir[e] = d;
-    }
-    G.rowOffs.assign(Vs + 1, 0);
-    for (int64_t i = 0; i < Vs; ++i) G.rowOffs[i + 1] = G.rowOffs[i] + deg[i];
-    G.cols.resize((size_t)G.rowOffs[Vs]);
-    std::vector<int64_t> fill(G.rowOffs.begin(), G.rowOffs.end() - 1);
-    for (size_t e = 0; e < keys.size(); ++e) {
-        const int32_t a = (int32_t)(keys[e] >> 32), b = (int32_t)(keys[e] & 0xffffffffu);
-        if (dir[e] & 1) G.cols[fill[a]++] = b;
-        if (dir[e] & 2) G.cols[fill[b]++] = a;
-    }
-    for (int64_t i = 0; i < Vs; ++i) {
-        std::sort(G.cols.begin() + G.rowOffs[i], G.cols.begin() + G.rowOffs[i + 1]);
-        if (G.rowOffs[i + 1] == G.rowOffs[i]) {
-            if (G.role[i] == RELAX_SHEET) ++G.isolatedSheet;
-            else if (G.role[i] == RELAX_CURVE) ++G.isolatedCurve;
-        }
-    }
-
-    fprintf(stderr,
-        "[subdiv_relax] graph: %lld vertices (sheet %lld, curve %lld, junction %lld), %lld undirected edges, "
-        "%lld directed entries (%.2f s)\n"
-        "[subdiv_relax]   kept: S<-S %lld, S<-C %lld, S<-J %lld, C<-C %lld, C<-J %lld | "
-        "dropped sheet-sheet %lld | sheet without sheet id %lld | isolated sheet %lld, curve %lld\n",
-        (long long)Vs, (long long)G.nRole[0], (long long)G.nRole[1], (long long)G.nRole[2],
-        (long long)G.nUndirected, (long long)G.cols.size(), now_s() - t0,
-        (long long)G.kind[0], (long long)G.kind[1], (long long)G.kind[2], (long long)G.kind[3], (long long)G.kind[4],
-        (long long)G.droppedSheetSheet, (long long)G.sheetWithoutSheetId,
-        (long long)G.isolatedSheet, (long long)G.isolatedCurve);
-    return G;
-}
-
-// .slg layout (little endian, arrays 8-byte aligned):
-//   header (120 bytes): magic "SUBDIVG\0", u32 version = 1, u32 header_bytes,
-//     u64 Vs, u64 nnz, u64 P, u64 n_palette_ids, u64 n_arrays = 8, u64 offsets[8]
-//   0 V                 f64  Vs x 3   seed positions (before relaxation)
-//   1 role              u8   Vs       0 sheet, 1 curve (seam/boundary), 2 junction
-//   2 struct_set_id     i32  Vs
-//   3 row_offsets       i64  Vs+1     row i = the vertices that pull on i
-//   4 cols              i32  nnz      ascending within a row
-//   5 palette_offsets   i32  P+1
-//   6 palette_ids       i32  n_palette_ids
-//   7 palette_type_mask u8   P
-void save_relax_graph(const std::string & path, const MatrixXd & V, const RelaxGraph & G,
-                      const StructPalette & pal, const std::vector<int32_t> & setId)
-{
-    const uint64_t Vs = (uint64_t)V.rows();
-    std::vector<double> v(Vs * 3);
-    for (uint64_t i = 0; i < Vs; ++i) for (int c = 0; c < 3; ++c) v[3 * i + c] = V((Index)i, c);
-
-    struct Arr { const void * p; size_t bytes; };
-    const int kArrays = 8;
-    const Arr arrs[kArrays] = {
-        { v.data(),               v.size() * 8 },
-        { G.role.data(),          G.role.size() },
-        { setId.data(),           setId.size() * 4 },
-        { G.rowOffs.data(),       G.rowOffs.size() * 8 },
-        { G.cols.data(),          G.cols.size() * 4 },
-        { pal.offsets.data(),     pal.offsets.size() * 4 },
-        { pal.ids.data(),         pal.ids.size() * 4 },
-        { pal.typeMask.data(),    pal.typeMask.size() },
-    };
-    const uint32_t kHeader = 56 + 8 * kArrays;
-    uint64_t offsets[kArrays], at = kHeader;
-    for (int k = 0; k < kArrays; ++k) { at = (at + 7) / 8 * 8; offsets[k] = at; at += arrs[k].bytes; }
-
-    std::ofstream f(subdiv_long_path(path), std::ios::binary);
-    if (!f) fail("cannot write " + path);
-    uint64_t pos = 0;
-    auto raw = [&](const void * p, size_t n) { f.write((const char *)p, (std::streamsize)n); pos += n; };
-    auto u32 = [&](uint32_t x) { raw(&x, 4); };
-    auto u64 = [&](uint64_t x) { raw(&x, 8); };
-    const char magic[8] = { 'S', 'U', 'B', 'D', 'I', 'V', 'G', '\0' };
-    raw(magic, 8);
-    u32(1); u32(kHeader);
-    u64(Vs); u64((uint64_t)G.cols.size()); u64((uint64_t)pal.size()); u64((uint64_t)pal.ids.size());
-    u64((uint64_t)kArrays);
-    for (int k = 0; k < kArrays; ++k) u64(offsets[k]);
-    if (pos != kHeader) fail("graph header size mismatch");
-    static const char z[8] = {};
-    for (int k = 0; k < kArrays; ++k) {
-        const size_t pad = (size_t)((8 - pos % 8) % 8);
-        if (pad) raw(z, pad);
-        if (pos != offsets[k]) fail("graph array offset mismatch");
-        raw(arrs[k].p, arrs[k].bytes);
-    }
-    f.close();
-    if (!f) fail("write failed for " + path);
-    fprintf(stderr, "[subdiv_relax] graph -> %s (%.1f MB)\n", path.c_str(), pos / 1048576.0);
-}
-
 // ---------------------------------------------------------------- relaxation
 
-RelaxReport subdiv_relax(SubdivMesh & M, const MatrixXd & VO, const MatrixXi & FO, const MatStruct * ms,
-                         const StructPalette & pal, const std::vector<int32_t> & setId,
-                         const RelaxGraph & G, const RelaxOptions & opt)
+RelaxReport subdiv_relax_solve_project(SubdivMesh & M, const MatrixXd & VO, const MatrixXi & FO, const MatStruct * ms,
+                                       const StructPalette & pal, const std::vector<int32_t> & setId,
+                                       const RelaxGraph & G, const RelaxOptions & opt)
 {
     const double tStart = now_s();
     RelaxReport R;
@@ -627,6 +476,179 @@ RelaxReport subdiv_relax(SubdivMesh & M, const MatrixXd & VO, const MatrixXi & F
         if (opt.verbose)
             fprintf(stderr, "[subdiv_relax] pinned %lld vertices of unanchored groups (%lld curve loops)\n",
                     (long long)R.nPinned, (long long)R.nPinnedCurve);
+    }
+
+    // Curve anchors: in every connected group of curve vertices (joined by kept
+    // curve-curve edges), fix opt.curveAnchors vertices at their seed positions,
+    // spread evenly by farthest-point sampling on seed arc length (graph
+    // distance along the curve). Without them a closed loop's 3D solve of
+    // L x = 0 collapses the loop to its single pinned vertex.
+    if (opt.curveAnchors > 0) {
+        std::vector<uint8_t> seen(Vs, 0);
+        std::vector<double> dist(Vs, std::numeric_limits<double>::infinity());
+        for (int64_t s0 = 0; s0 < Vs; ++s0) {
+            if (G.role[s0] != RELAX_CURVE || seen[s0]) continue;
+            // Collect the group.
+            std::vector<int64_t> members{ s0 }, st{ s0 };
+            seen[s0] = 1;
+            while (!st.empty()) {
+                const int64_t v = st.back(); st.pop_back();
+                for (int64_t q = G.rowOffs[v]; q < G.rowOffs[v + 1]; ++q) {
+                    const int j = G.cols[q];
+                    if (G.role[j] != RELAX_CURVE || seen[j]) continue;
+                    seen[j] = 1; members.push_back(j); st.push_back(j);
+                }
+            }
+            // Farthest-point sampling: first anchor = lowest index (a fixed vertex
+            // if the group was pinned), then the vertex farthest from all anchors.
+            const int64_t first = *std::min_element(members.begin(), members.end());
+            for (int64_t v : members) dist[v] = std::numeric_limits<double>::infinity();
+            int64_t next = first;
+            for (int k = 0; k < opt.curveAnchors && next >= 0; ++k) {
+                R.anchors.push_back(next);
+                if (isFree[next]) { isFree[next] = 0; --R.nFree; ++R.nFixed; ++R.nCurveAnchors; }
+                // Dijkstra from the new anchor, keeping the minimum over anchors.
+                using QE = std::pair<double, int64_t>;
+                std::priority_queue<QE, std::vector<QE>, std::greater<QE>> pq;
+                dist[next] = 0.0;
+                pq.push({ 0.0, next });
+                while (!pq.empty()) {
+                    const auto [d, v] = pq.top(); pq.pop();
+                    if (d > dist[v]) continue;
+                    for (int64_t q = G.rowOffs[v]; q < G.rowOffs[v + 1]; ++q) {
+                        const int j = G.cols[q];
+                        if (G.role[j] != RELAX_CURVE) continue;
+                        const double nd = d + (Vseed.row(v) - Vseed.row(j)).norm();
+                        if (nd < dist[j]) { dist[j] = nd; pq.push({ nd, j }); }
+                    }
+                }
+                double best = 0.0;
+                next = -1;
+                for (int64_t v : members)
+                    if (dist[v] > best || (dist[v] == best && next >= 0 && v < next)) { best = dist[v]; next = v; }
+                if (best <= 0.0) next = -1;
+            }
+        }
+        if (opt.verbose)
+            fprintf(stderr, "[subdiv_relax] curve anchors: %lld vertices fixed (%d per curve group)\n",
+                    (long long)R.nCurveAnchors, opt.curveAnchors);
+    }
+
+    // Adaptive curve anchors (used when no fixed count is given). Between two
+    // fixed vertices the 3D solve puts the curve vertices on the straight chord
+    // joining them, so a stretch is fine exactly when the seam stays within tol
+    // of that chord. Douglas-Peucker on the seed polyline of every chain:
+    //   chain terminals: junctions, branch vertices (3+ curve neighbours), free
+    //   ends, and one vertex per closed loop with no other terminal;
+    //   inside a chain, the vertex farthest from the chord between the current
+    //   ends becomes an anchor if it is more than tol * diag away; recurse.
+    // Short or straight seams get no interior anchors, tightly curved ones many.
+    if (opt.curveAnchors <= 0 && opt.curveAnchorTol > 0) {
+        const double eps = opt.curveAnchorTol * diag;
+        auto isC = [&](int64_t v) { return G.role[v] == RELAX_CURVE; };
+        auto cnbrs = [&](int64_t v, std::vector<int64_t> & out) {
+            out.clear();
+            for (int64_t q = G.rowOffs[v]; q < G.rowOffs[v + 1]; ++q) if (isC(G.cols[q])) out.push_back(G.cols[q]);
+        };
+        std::vector<uint8_t> anchor(Vs, 0), seen(Vs, 0), isTerm(Vs, 0);
+        auto add_anchor = [&](int64_t v) {
+            if (!isC(v) || anchor[v]) return;
+            anchor[v] = 1;
+            R.anchors.push_back(v);
+            if (isFree[v]) { isFree[v] = 0; --R.nFree; ++R.nFixed; ++R.nCurveAnchors; }
+        };
+        // Douglas-Peucker on seed positions of chain[lo..hi] (both ends fixed).
+        std::function<void(const std::vector<int64_t> &, size_t, size_t)> dp =
+            [&](const std::vector<int64_t> & ch, size_t lo, size_t hi) {
+                if (hi <= lo + 1) return;
+                const Vector3d a = Vseed.row(ch[lo]).transpose(), b = Vseed.row(ch[hi]).transpose();
+                double best = -1.0;
+                size_t bi = lo;
+                for (size_t k = lo + 1; k < hi; ++k) {
+                    const Vector3d p = Vseed.row(ch[k]).transpose();
+                    const double t = seg_t(p, a, b);
+                    const double d = (p - ((1 - t) * a + t * b)).norm();
+                    if (d > best) { best = d; bi = k; }
+                }
+                if (best <= eps) return;
+                add_anchor(ch[bi]);
+                dp(ch, lo, bi);
+                dp(ch, bi, hi);
+            };
+
+        std::vector<int64_t> nb, nb2;
+        int64_t nChains = 0, nLoops = 0, nTerminals = 0;
+        for (int64_t s0 = 0; s0 < Vs; ++s0) {
+            if (!isC(s0) || seen[s0]) continue;
+            // Group members.
+            std::vector<int64_t> members{ s0 }, st{ s0 };
+            seen[s0] = 1;
+            while (!st.empty()) {
+                const int64_t v = st.back(); st.pop_back();
+                cnbrs(v, nb);
+                for (int64_t j : nb) if (!seen[j]) { seen[j] = 1; members.push_back(j); st.push_back(j); }
+            }
+            // A vertex next to a junction: a chain through it ends at that junction.
+            auto junction_of = [&](int64_t v) -> int64_t {
+                for (int64_t q = G.rowOffs[v]; q < G.rowOffs[v + 1]; ++q)
+                    if (G.role[G.cols[q]] == RELAX_JUNCTION) return G.cols[q];
+                return -1;
+            };
+            // Terminals (anchored): branch vertices (3+ curve neighbours) and free
+            // ends (at most one curve neighbour, no junction).
+            std::vector<int64_t> terms, starts;
+            for (int64_t v : members) {
+                cnbrs(v, nb);
+                const bool hasJ = junction_of(v) >= 0;
+                if (nb.size() >= 3 || (nb.size() <= 1 && !hasJ)) terms.push_back(v);
+                else if (nb.size() <= 1 && hasJ) starts.push_back(v);  // path end at a junction
+            }
+            if (terms.empty() && starts.empty()) {  // closed loop: one terminal
+                terms.push_back(*std::min_element(members.begin(), members.end()));
+                ++nLoops;
+            }
+            for (int64_t t : terms) { add_anchor(t); isTerm[t] = 1; }
+            nTerminals += (int64_t)terms.size();
+            starts.insert(starts.begin(), terms.begin(), terms.end());
+
+            // Walk every chain once: from a start along each curve neighbour until a
+            // terminal, the start itself (loop), or a dead end (closed by its junction).
+            std::set<std::pair<int64_t, int64_t>> used;  // directed steps already walked
+            for (int64_t s : starts) {
+                cnbrs(s, nb);
+                for (int64_t first : nb) {
+                    if (used.count({ s, first })) continue;
+                    std::vector<int64_t> ch;
+                    if (!isTerm[s]) ch.push_back(junction_of(s));
+                    ch.push_back(s);
+                    used.insert({ s, first });
+                    int64_t prev = s, cur = first;
+                    for (;;) {
+                        ch.push_back(cur);
+                        if (isTerm[cur] || cur == s) break;
+                        cnbrs(cur, nb2);
+                        int64_t nxt = -1;
+                        for (int64_t j : nb2) if (j != prev) { nxt = j; break; }
+                        if (nxt < 0) {
+                            const int64_t j = junction_of(cur);
+                            if (j >= 0) ch.push_back(j); else add_anchor(cur);
+                            break;
+                        }
+                        used.insert({ cur, nxt });
+                        prev = cur; cur = nxt;
+                    }
+                    used.insert({ cur, prev });  // not again from the far end
+                    ++nChains;
+                    dp(ch, 0, ch.size() - 1);
+                }
+            }
+            for (int64_t t : terms) isTerm[t] = 0;
+        }
+        if (opt.verbose)
+            fprintf(stderr, "[subdiv_relax] adaptive curve anchors (tol %.3g x diag): %lld anchors, %lld chains, "
+                    "%lld closed loops, %lld branch/free-end terminals\n",
+                    opt.curveAnchorTol, (long long)R.anchors.size(), (long long)nChains, (long long)nLoops,
+                    (long long)nTerminals);
     }
 
     // Project the free vertices once at their seed: they are on their structure,
@@ -800,219 +822,71 @@ RelaxReport subdiv_relax(SubdivMesh & M, const MatrixXd & VO, const MatrixXi & F
         return m;
     };
 
-    if (opt.solver == RelaxSolver::Newton) {
-        const int64_t maxIter = opt.maxIter > 0 ? opt.maxIter : 100000;
-        for (int pass = 0; pass < 2; ++pass) {
-            const uint8_t cls = pass == 0 ? RELAX_CURVE : RELAX_SHEET;
-            std::vector<int64_t> list;
-            for (int64_t i = 0; i < Vs; ++i) if (isFree[i] && G.role[i] == cls) list.push_back(i);
-            int64_t & iters = pass == 0 ? R.itersCurve : R.itersSheet;
-            double & delta = pass == 0 ? R.deltaCurve : R.deltaSheet;
-            bool conv = list.empty();
-            if (conv) delta = 0.0;
-
-            std::vector<int64_t> var(Vs, -1), slot(Vs, -1);
-            for (size_t a = 0; a < list.size(); ++a) slot[list[a]] = (int64_t)a;
-            std::vector<Matrix<double, 3, Dynamic>> T(list.size());
-            SimplicialLDLT<SparseMatrix<double>> ldlt;
-            bool analyzed = false;
-            std::vector<int> lastDims;
-
-            // Energy change of the candidate positions nX (listed vertices) against
-            // X, E = 1/2 sum over the kept edges of |x_i - x_j|^2, per edge from
-            // differences so that it stays accurate when the change is tiny. An
-            // edge between two listed vertices appears in both rows (weight 1/2).
-            std::vector<double> dEi(list.size());
-            auto energy_change = [&]() {
-                igl::parallel_for((int64_t)list.size(), [&](int64_t a) {
-                    const int64_t i = list[a];
-                    double s = 0.0;
-                    for (int64_t q = G.rowOffs[i]; q < G.rowOffs[i + 1]; ++q) {
-                        const int j = G.cols[q];
-                        const bool both = slot[j] >= 0;
-                        const Vector3d d  = (X.row(i) - X.row(j)).transpose();
-                        const Vector3d dn = (nX.row(i) - (both ? nX.row(j) : X.row(j))).transpose();
-                        s += (both ? 0.25 : 0.5) * (dn - d).dot(dn + d);
-                    }
-                    dEi[a] = s;
-                }, 1000);
-                double s = 0.0;
-                for (double v : dEi) s += v;
-                return s;
-            };
-
-            // Plain projected step x <- Pi(x + 0.5 L x) of the listed vertices into
-            // nX; returns its max move.
-            auto plain_step = [&]() {
-                igl::parallel_for((int64_t)list.size(), [&](int64_t a) {
-                    const int64_t i = list[a];
-                    Vector3d mean = Vector3d::Zero();
-                    for (int64_t q = G.rowOffs[i]; q < G.rowOffs[i + 1]; ++q) mean += X.row(G.cols[q]).transpose();
-                    mean /= (double)(G.rowOffs[i + 1] - G.rowOffs[i]);
-                    const Vector3d x = X.row(i).transpose();
-                    const ProjResult pr = proj.project(setId[i], x + 0.5 * (mean - x), face[i], edge[i]);
-                    move[i] = (pr.pos - x).norm();
-                    nX.row(i) = pr.pos.transpose(); nFace[i] = pr.face; nEdge[i] = pr.edge; nBary.row(i) = pr.bary.transpose();
-                }, 1000);
-                double m = 0.0;
-                for (int64_t i : list) m = std::max(m, move[i]);
-                return m;
-            };
-
-            // Newton rounds alternate with plain steps. Newton converges fast for the
-            // smooth, global part but its frames (the current edge / face) cannot
-            // carry a vertex over a curve corner or a sheet crease; the plain step
-            // uses the full pull and does. Done when a plain step moves nothing,
-            // which is the definition of "stopped changing".
-            for (;;) {
-            conv = list.empty();
-            while (!conv && iters < maxIter) {
-                const double ti = now_s();
-                // Frames and variable layout.
-                int64_t nVar = 0;
-                std::vector<int> dims(list.size());
-                for (size_t a = 0; a < list.size(); ++a) {
-                    const int64_t i = list[a];
-                    Vector3d r = Vector3d::Zero();
-                    for (int64_t q = G.rowOffs[i]; q < G.rowOffs[i + 1]; ++q) r += (X.row(G.cols[q]) - X.row(i)).transpose();
-                    frame(i, r, T[a]);
-                    dims[a] = (int)T[a].cols();
-                    var[list[a]] = nVar;
-                    nVar += dims[a];
-                }
-
-                // Tangent-plane Hessian of E (Gauss-Newton with the constraint
-                // linearised): deg_i u_i - sum_j T_i^T T_j u_j = T_i^T sum_j (x_j - x_i).
-                std::vector<Triplet<double>> trip;
-                trip.reserve((size_t)nVar * 7);
-                VectorXd rhs = VectorXd::Zero(nVar);
-                for (size_t a = 0; a < list.size(); ++a) {
-                    const int64_t i = list[a];
-                    const int64_t deg = G.rowOffs[i + 1] - G.rowOffs[i];
-                    const double diagv = (double)deg * (1.0 + 1e-10);
-                    Vector3d r = Vector3d::Zero();
-                    for (int64_t q = G.rowOffs[i]; q < G.rowOffs[i + 1]; ++q) {
-                        const int j = G.cols[q];
-                        r += (X.row(j) - X.row(i)).transpose();
-                        if (slot[j] >= 0) {
-                            // All entries, zeros included: the pattern must depend only
-                            // on dims and the graph, since analyzePattern is reused.
-                            const MatrixXd B = -(T[a].transpose() * T[slot[j]]);
-                            for (int uu = 0; uu < B.rows(); ++uu)
-                                for (int w = 0; w < B.cols(); ++w)
-                                    trip.emplace_back(var[i] + uu, var[j] + w, B(uu, w));
-                        }
-                    }
-                    for (int uu = 0; uu < dims[a]; ++uu) trip.emplace_back(var[i] + uu, var[i] + uu, diagv);
-                    rhs.segment(var[i], dims[a]) = T[a].transpose() * r;
-                }
-                SparseMatrix<double> A(nVar, nVar);
-                A.setFromTriplets(trip.begin(), trip.end());
-                trip.clear(); trip.shrink_to_fit();
-                if (iters == 0) {
-                    const double asym = (SparseMatrix<double>(A.transpose()) - A).norm();
-                    if (asym > 1e-12 * A.norm()) fail("tangent system is not symmetric (" + std::to_string(asym) + ")");
-                }
-                if (!analyzed || dims != lastDims) { ldlt.analyzePattern(A); analyzed = true; lastDims = dims; }
-                ldlt.factorize(A);
-                if (ldlt.info() != Success) fail("tangent system factorization failed");
-                const VectorXd u = ldlt.solve(rhs);
-                if (ldlt.info() != Success || !u.allFinite()) fail("tangent system solve failed");
-                const double slope = rhs.dot(u);  // -dE/dalpha at alpha = 0 (> 0: A is SPD)
-
-                // Backtracking line search on E (Armijo). E must decrease on every
-                // accepted step, so the iteration cannot cycle (a valley crease would
-                // otherwise make a vertex bounce between two faces' tangent planes).
-                double alpha = 1.0, m = 0.0, dE = 0.0;
-                int halvings = 0;
-                bool accepted = false;
-                for (; halvings <= 50; ++halvings, alpha *= 0.5) {
-                    igl::parallel_for((int64_t)list.size(), [&](int64_t a) {
-                        const int64_t i = list[a];
-                        const Vector3d y = X.row(i).transpose() + alpha * (T[a] * u.segment(var[i], dims[a]));
-                        const ProjResult pr = proj.project(setId[i], y, face[i], edge[i]);
-                        move[i] = (pr.pos - X.row(i).transpose()).norm();
-                        nX.row(i) = pr.pos.transpose(); nFace[i] = pr.face; nEdge[i] = pr.edge; nBary.row(i) = pr.bary.transpose();
-                    }, 1000);
-                    m = 0.0;
-                    for (int64_t i : list) m = std::max(m, move[i]);
-                    if (halvings == 0 && m <= tolAbs) { accepted = true; break; }  // full step moves nothing
-                    dE = energy_change();
-                    if (dE <= -1e-4 * alpha * slope) { accepted = true; break; }
-                }
-                ++iters;
-                if (!accepted) {
-                    // No decrease along the projected Newton direction even for tiny
-                    // steps: Newton is done for this round (the plain step decides).
-                    delta = 0.0;
-                    conv = true;
-                    ++R.lineSearchStalls;
-                    break;
-                }
-                commit(list);
-                delta = m / diag;
-                conv = halvings == 0 && m <= tolAbs;
-                R.halvings += halvings;
-                if (opt.verbose && (iters <= 10 || iters % 10 == 0 || conv))
-                    fprintf(stderr, "[subdiv_relax] %s iter %lld: %lld free, %lld unknowns, max move %.3g (x diag), "
-                            "step %.3g, dE %.3g (%.2f s)\n",
-                            pass == 0 ? "curve" : "sheet", (long long)iters, (long long)list.size(),
-                            (long long)nVar, delta, alpha, dE, now_s() - ti);
-            }
-            if (list.empty()) break;
-            const double mp = plain_step();
-            delta = mp / diag;
-            if (mp <= tolAbs) { conv = true; break; }
-            if (iters >= maxIter) { conv = false; break; }
-            commit(list);
-            ++iters;
-            ++R.plainSteps;
-            if (opt.verbose && R.plainSteps % 100 == 1)
-                fprintf(stderr, "[subdiv_relax] %s iter %lld: plain step, max move %.3g (x diag)\n",
-                        pass == 0 ? "curve" : "sheet", (long long)iters, delta);
-            }
-            if (!conv) {
-                fprintf(stderr, "[subdiv_relax] WARNING: %s pass did not converge in %lld iterations (last max move %.3g x diag)\n",
-                        pass == 0 ? "curve" : "sheet", (long long)maxIter, delta);
-                std::vector<int64_t> top = list;
-                std::sort(top.begin(), top.end(), [&](int64_t a, int64_t b) { return move[a] > move[b]; });
-                for (size_t t = 0; t < std::min<size_t>(8, top.size()); ++t) {
-                    const int64_t i = top[t];
-                    fprintf(stderr, "[subdiv_relax]   v %lld move %.3g face %d bary (%.3g %.3g %.3g) edge %d deg %lld\n",
-                            (long long)i, move[i] / diag, face[i], bary(i, 0), bary(i, 1), bary(i, 2), edge[i],
-                            (long long)(G.rowOffs[i + 1] - G.rowOffs[i]));
-                }
-            }
-            R.converged = (pass == 0) ? conv : (R.converged && conv);
-        }
-    } else {
-        const int64_t maxIter = opt.maxIter > 0 ? opt.maxIter : 1000000;
+    // ---- solve L x = 0 in 3D, then project (curves first, then sheets) ----
+    // One linear solve per pass, no iteration: every free vertex is placed at
+    // the 3D average of its pullers (fixed vertices as boundary values), and the
+    // result is then projected onto the vertex's own structure. Curves do not
+    // depend on sheets, so the curve pass comes first and the sheet pass uses
+    // the projected curve positions as boundary values.
+    for (int pass = 0; pass < 2; ++pass) {
+        const double ti = now_s();
+        const uint8_t cls = pass == 0 ? RELAX_CURVE : RELAX_SHEET;
         std::vector<int64_t> list;
-        for (int64_t i = 0; i < Vs; ++i) if (isFree[i]) list.push_back(i);
-        bool conv = list.empty();
-        while (!conv && R.itersSheet < maxIter) {
-            igl::parallel_for((int64_t)list.size(), [&](int64_t a) {
-                const int64_t i = list[a];
-                Vector3d mean = Vector3d::Zero();
-                for (int64_t q = G.rowOffs[i]; q < G.rowOffs[i + 1]; ++q) mean += X.row(G.cols[q]).transpose();
-                mean /= (double)(G.rowOffs[i + 1] - G.rowOffs[i]);
-                const Vector3d x = X.row(i).transpose();
-                const ProjResult pr = proj.project(setId[i], x + opt.lambda * (mean - x), face[i], edge[i]);
-                move[i] = (pr.pos - x).norm();
-                nX.row(i) = pr.pos.transpose(); nFace[i] = pr.face; nEdge[i] = pr.edge; nBary.row(i) = pr.bary.transpose();
-            }, 1000);
-            const double m = commit(list);
-            ++R.itersSheet;
-            R.deltaSheet = m / diag;
-            conv = m <= tolAbs;
-            if (opt.verbose && (R.itersSheet % 10000 == 0 || conv))
-                fprintf(stderr, "[subdiv_relax] jacobi iter %lld: max move %.3g (x diag)\n",
-                        (long long)R.itersSheet, R.deltaSheet);
-        }
-        if (!conv) fprintf(stderr, "[subdiv_relax] WARNING: jacobi did not converge in %lld iterations\n", (long long)maxIter);
-        R.converged = conv;
-    }
+        for (int64_t i = 0; i < Vs; ++i) if (isFree[i] && G.role[i] == cls) list.push_back(i);
+        int64_t & iters = pass == 0 ? R.itersCurve : R.itersSheet;
+        double & delta = pass == 0 ? R.deltaCurve : R.deltaSheet;
+        if (list.empty()) { delta = 0.0; continue; }
 
+        std::vector<int64_t> slot(Vs, -1);
+        for (size_t a = 0; a < list.size(); ++a) slot[list[a]] = (int64_t)a;
+        const int64_t n = (int64_t)list.size();
+        std::vector<Triplet<double>> trip;
+        trip.reserve((size_t)n * 7);
+        MatrixXd rhs = MatrixXd::Zero(n, 3);
+        for (int64_t a = 0; a < n; ++a) {
+            const int64_t i = list[a];
+            const int64_t deg = G.rowOffs[i + 1] - G.rowOffs[i];
+            trip.emplace_back(a, a, (double)deg);
+            for (int64_t q = G.rowOffs[i]; q < G.rowOffs[i + 1]; ++q) {
+                const int j = G.cols[q];
+                if (slot[j] >= 0) trip.emplace_back(a, slot[j], -1.0);
+                else              rhs.row(a) += X.row(j);
+            }
+        }
+        SparseMatrix<double> A(n, n);
+        A.setFromTriplets(trip.begin(), trip.end());
+        trip.clear(); trip.shrink_to_fit();
+        const double asym = (SparseMatrix<double>(A.transpose()) - A).norm();
+        if (asym > 1e-12 * A.norm()) fail("3D Laplacian block is not symmetric");
+        SimplicialLDLT<SparseMatrix<double>> ldlt;
+        ldlt.compute(A);
+        if (ldlt.info() != Success) fail("3D Laplacian factorization failed");
+        const MatrixXd Y = ldlt.solve(rhs);
+        if (ldlt.info() != Success || !Y.allFinite()) fail("3D Laplacian solve failed");
+
+        // How far the 3D solution is from the MAT before projection.
+        std::vector<double> offDist(list.size(), 0.0);
+        igl::parallel_for(n, [&](int64_t a) {
+            const int64_t i = list[a];
+            const Vector3d y = Y.row(a).transpose();
+            const ProjResult pr = proj.project(setId[i], y, face[i], edge[i]);
+            offDist[a] = (pr.pos - y).norm();
+            move[i] = (pr.pos - X.row(i).transpose()).norm();
+            nX.row(i) = pr.pos.transpose(); nFace[i] = pr.face; nEdge[i] = pr.edge; nBary.row(i) = pr.bary.transpose();
+        }, 1000);
+        const double m = commit(list);
+        iters = 1;
+        delta = m / diag;
+        double offMax = 0.0, offSum = 0.0;
+        for (double d : offDist) { offMax = std::max(offMax, d); offSum += d; }
+        if (opt.verbose)
+            fprintf(stderr, "[subdiv_relax] %s: 3D solve of %lld unknowns x 3, then projection: "
+                    "3D solution off the MAT max %.3g mean %.3g (x diag), max move %.3g (x diag) (%.2f s)\n",
+                    pass == 0 ? "curve" : "sheet", (long long)n, offMax / diag, offSum / n / diag, delta, now_s() - ti);
+    }
+    // One-shot method: "converged" only means it ran. Whether the result is a
+    // resting state is what the plain-step check below reports.
+    R.converged = true;
     // ---- write back ----
     M.V = X;
     M.fineFace = face;
@@ -1098,7 +972,7 @@ RelaxReport subdiv_relax(SubdivMesh & M, const MatrixXd & VO, const MatrixXi & F
         "[subdiv_relax]   fixed-point residual |T^T L x| / edge: sheet %.3g (%lld interior), curve %.3g (%lld interior)\n"
         "[subdiv_relax]   checks: seed off structure %lld, fixed moved %lld, pos != interp %lld, bad bary %lld, "
         "off own structure %lld\n",
-        opt.solver == RelaxSolver::Newton ? "newton" : "jacobi", R.converged ? "converged" : "NOT CONVERGED",
+        "solve+project", R.converged ? "converged" : "NOT CONVERGED",
         (long long)R.itersCurve, R.deltaCurve, (long long)R.itersSheet, R.deltaSheet,
         (long long)R.nFree, (long long)R.nFixed, R.maxMove, R.meanMove,
         (long long)R.halvings, (long long)R.lineSearchStalls, (long long)R.plainSteps, (long long)R.nPinned, now_s() - tStart,
@@ -1106,55 +980,4 @@ RelaxReport subdiv_relax(SubdivMesh & M, const MatrixXd & VO, const MatrixXi & F
         R.residualSheet, (long long)R.nResidualSheet, R.residualCurve, (long long)R.nResidualCurve,
         (long long)R.seedOffStructure, (long long)R.fixedMoved, (long long)R.posMismatch, (long long)R.badBary, (long long)R.offStructure);
     return R;
-}
-
-std::string subdiv_long_path(const std::string & path)
-{
-#ifdef _WIN32
-    namespace fs = std::filesystem;
-    const std::string abs = fs::absolute(fs::path(path)).lexically_normal().make_preferred().string();
-    if (abs.rfind("\\\\", 0) == 0) return abs;  // already long-path form, or a UNC path
-    return "\\\\?\\" + abs;
-#else
-    return path;
-#endif
-}
-
-// ---------------------------------------------------------------- quality
-
-MeshQuality subdiv_mesh_quality(const MatrixXd & V, const MatrixXi & F, const MatrixXd * Vref)
-{
-    MeshQuality Q;
-    const double diag = (V.leftCols(3).colwise().maxCoeff() - V.leftCols(3).colwise().minCoeff()).norm();
-    double s = 0.0, s2 = 0.0;
-    int64_t n = 0;
-    std::vector<float> minAng((size_t)F.rows());
-    for (Index f = 0; f < F.rows(); ++f) {
-        const Vector3d p[3] = { P3(V, F(f, 0)), P3(V, F(f, 1)), P3(V, F(f, 2)) };
-        double ang = 180.0;
-        for (int c = 0; c < 3; ++c) {
-            const Vector3d u = p[(c + 1) % 3] - p[c], w = p[(c + 2) % 3] - p[c];
-            // each undirected edge counted from the face with the edge c->c+1
-            const double l = u.norm();
-            s += l; s2 += l * l; ++n;
-            const double nu = u.norm(), nw = w.norm();
-            const double a = (nu > 0 && nw > 0) ? std::acos(std::max(-1.0, std::min(1.0, u.dot(w) / (nu * nw)))) * 180.0 / M_PI : 0.0;
-            ang = std::min(ang, a);
-        }
-        minAng[(size_t)f] = (float)ang;
-        const Vector3d nrm = (p[1] - p[0]).cross(p[2] - p[0]);
-        if (0.5 * nrm.norm() <= 1e-14 * diag * diag) ++Q.degenerate;
-        if (Vref) {
-            const Vector3d r0 = P3(*Vref, F(f, 0)), r1 = P3(*Vref, F(f, 1)), r2 = P3(*Vref, F(f, 2));
-            if (nrm.dot((r1 - r0).cross(r2 - r0)) < 0) ++Q.flippedVsRef;
-        }
-    }
-    const double mean = n ? s / n : 0.0;
-    Q.edgeCV = mean > 0 ? std::sqrt(std::max(0.0, s2 / n - mean * mean)) / mean : 0.0;
-    if (!minAng.empty()) {
-        std::sort(minAng.begin(), minAng.end());
-        auto pct = [&](double q) { return (double)minAng[(size_t)std::min<double>(minAng.size() - 1, q * minAng.size())]; };
-        Q.minAngle = minAng.front(); Q.p1 = pct(0.01); Q.p5 = pct(0.05); Q.median = pct(0.5);
-    }
-    return Q;
 }

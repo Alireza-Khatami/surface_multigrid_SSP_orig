@@ -40,6 +40,7 @@ set(APP_SRCS
     subdiv_sample_tracker/subdiv_struct_ids.cpp
     subdiv_sample_tracker/subdiv_tracker.cpp
     subdiv_sample_tracker/subdiv_relax.cpp
+    subdiv_sample_tracker/subdiv_relax_solve_project.cpp
     subdiv_sample_tracker/debug_trackers.cpp
 )
 

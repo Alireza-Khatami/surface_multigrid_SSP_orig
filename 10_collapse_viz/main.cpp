@@ -381,7 +381,7 @@ static bool export_final_outputs(const std::string & out_dir, const std::string 
     }
 
     subdiv_tracker_save(lookup, out("subdiv_", ".sdt"));
-    subdiv_tracker_export_deformed_obj(out("subdiv_deformed_", ".obj"), gSubdivObjMaxVerts);
+    subdiv_tracker_export_deformed_obj(out("subdiv_deformed_" + subdiv_tracker_relax_tag(), ".obj"), gSubdivObjMaxVerts);
     simp_viz_tracker_write_json(cmc, json);
 
     // Re-read the files and cross-check that they agree on the vertex ordering.
@@ -575,6 +575,9 @@ int main(int argc, char * argv[])
     int         trackFaceFlip     = -1;  // --track_face_flip <idx>
     long long   nSubdivSamples   = -1;   // --n_subdiv_samples N; -1 = subdivided-mesh tracker off
     bool        subdivRelax      = true; // --no_subdiv_relax: keep the exact midpoint positions
+    std::string subdivRelaxMethod = "newton";  // --subdiv_relax_method newton|solve_project
+    int         subdivCurveAnchors = 0;        // --subdiv_relax_curve_anchors N (solve_project only; fixed count)
+    double      subdivAnchorTol   = 1e-3;      // --subdiv_relax_anchor_tol t (solve_project only; adaptive)
 
 
     //usage
@@ -586,6 +589,13 @@ int main(int argc, char * argv[])
     // [--matstruct_path PATH]  .ma_struct file: struct IDs (collapse gate, subdivided-vertex struct sets)
     // [--no_subdiv_relax]      skip the structure-aware relaxation of the subdivided vertices
     //                          (md_files/subdiv_relax_plan.md); output then matches the plain subdivision
+    // [--subdiv_relax_method M] newton (default) | solve_project (experiment: one 3D solve of
+    //                          L x = 0, then projection; see subdiv_relax_solve_project.cpp)
+    // [--subdiv_relax_anchor_tol t]  default 1e-3: solve_project only, adaptive anchors: a seam
+    //                          vertex is fixed where the seam leaves the chord between anchors by
+    //                          more than t x bbox diagonal (Douglas-Peucker)
+    // [--subdiv_relax_curve_anchors N]  solve_project only, overrides the adaptive anchors with
+    //                          N vertices per seam/boundary group, evenly spaced along it
     // [--subdiv_obj_max_verts N]  default: 2000000 — write subdiv_fine_*.obj / subdiv_deformed_*.obj
     //                             only up to N vertices
     // [--track_face_flip F]    face-flip debug tracker on gFO face F (needs --n_subdiv_samples)
@@ -611,6 +621,9 @@ int main(int argc, char * argv[])
             else if (a == "--track_face_flip")  trackFaceFlip     = std::stoi(argv[i+1]);
             else if (a == "--n_subdiv_samples") nSubdivSamples = std::stoll(argv[i+1]);
             else if (a == "--subdiv_obj_max_verts") gSubdivObjMaxVerts = std::stoll(argv[i+1]);
+            else if (a == "--subdiv_relax_method") subdivRelaxMethod = argv[i+1];
+            else if (a == "--subdiv_relax_curve_anchors") subdivCurveAnchors = std::stoi(argv[i+1]);
+            else if (a == "--subdiv_relax_anchor_tol") subdivAnchorTol = std::stod(argv[i+1]);
             else { continue; }
             ++i;
         }
@@ -819,8 +832,12 @@ int main(int argc, char * argv[])
 
     if (nSubdivSamples >= 0) {
         try {
-            subdiv_tracker_init(nSubdivSamples, gHaveMatStruct ? &gMatStruct : nullptr, subdivRelax);
-            subdiv_tracker_export_fine_obj(out_dir + "subdiv_fine_" + stem + ".obj", gSubdivObjMaxVerts);
+            subdiv_tracker_init(nSubdivSamples, gHaveMatStruct ? &gMatStruct : nullptr, subdivRelax,
+                                subdivRelaxMethod, subdivCurveAnchors, subdivAnchorTol);
+            const std::string tag = subdiv_tracker_relax_tag();  // "relaxed_<method>_" or ""
+            subdiv_tracker_export_fine_obj(out_dir + "subdiv_fine_" + tag + stem + ".obj", gSubdivObjMaxVerts);
+            subdiv_tracker_export_anchor_ply(out_dir + "subdiv_fine_" + tag + "with_anchors_" + stem + ".ply",
+                                             gSubdivObjMaxVerts);
             if (subdivRelax) {
                 subdiv_tracker_export_seed_obj(out_dir + "subdiv_fine_seed_" + stem + ".obj", gSubdivObjMaxVerts);
                 subdiv_tracker_export_graph(out_dir + "subdiv_graph_" + stem + ".slg");

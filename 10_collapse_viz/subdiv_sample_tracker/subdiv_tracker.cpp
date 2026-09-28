@@ -12,6 +12,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <set>
 #include <stdexcept>
@@ -36,6 +37,9 @@ std::vector<int32_t> gSet;
 bool                 gRelaxed = false;
 MatrixXd             gVseed;   // positions before relaxation (relaxed init only)
 RelaxGraph           gGraph;
+std::string          gRelaxMethod;
+std::vector<int64_t> gAnchors;      // solve_project curve anchors (subdivided vertex ids)
+std::vector<int32_t> gAnchorKey;    // per anchor: smallest seam/boundary struct id of its set
 
 // Per sample (= subdivided vertex). gFace < 0: untracked (vertex on no face).
 std::vector<int32_t> gFace;   // gF row
@@ -81,7 +85,8 @@ void fail(const std::string & msg) { throw std::runtime_error("[subdiv_tracker] 
 
 // ---------------------------------------------------------------- init
 
-void subdiv_tracker_init(int64_t nTarget, const MatStruct * ms, bool relax)
+void subdiv_tracker_init(int64_t nTarget, const MatStruct * ms, bool relax, const std::string & method,
+                         int curveAnchors, double curveAnchorTol)
 {
     gEnabled = false;
     gStats = Stats();
@@ -103,25 +108,47 @@ void subdiv_tracker_init(int64_t nTarget, const MatStruct * ms, bool relax)
     gRelaxed = false;
     gVseed.resize(0, 3);
     gGraph = RelaxGraph();
+    gRelaxMethod.clear();
+    gAnchors.clear();
+    gAnchorKey.clear();
     if (relax) {
         gGraph = build_relax_graph(gM, gPal, gSet, ms);
         gVseed = gM.V;
         const MeshQuality q0 = subdiv_mesh_quality(gM.V, gM.F);
-        const RelaxReport R = subdiv_relax(gM, gVO, gFO, ms, gPal, gSet, gGraph);
+        if (method != "newton" && method != "solve_project") fail("unknown relax method " + method);
+        const bool experiment = method == "solve_project";
+        RelaxOptions expOpt;
+        expOpt.curveAnchors = curveAnchors;
+        expOpt.curveAnchorTol = curveAnchorTol;
+        const RelaxReport R = experiment ? subdiv_relax_solve_project(gM, gVO, gFO, ms, gPal, gSet, gGraph, expOpt)
+                                         : subdiv_relax(gM, gVO, gFO, ms, gPal, gSet, gGraph);
         const double tolStep = 1e-10;
-        if (!R.converged || R.jacobiStepMove > tolStep)
+        // The experiment is not expected to reach a resting state; it only reports.
+        if (!experiment && (!R.converged || R.jacobiStepMove > tolStep))
             fail("relaxation did not converge (one relaxation step still moves "
                  + std::to_string(R.jacobiStepMove) + " x diag)");
         if (R.seedOffStructure || R.fixedMoved || R.posMismatch || R.badBary || R.offStructure)
             fail("relaxation consistency checks failed");
         const MeshQuality q1 = subdiv_mesh_quality(gM.V, gM.F, &gVseed);
         fprintf(stderr,
-            "[subdiv_tracker] relaxation, before -> after: edge CV %.4f -> %.4f | min angle %.3f -> %.3f, "
+            "[subdiv_tracker] relaxation (%s), before -> after: edge CV %.4f -> %.4f | min angle %.3f -> %.3f, "
             "p1 %.3f -> %.3f, p5 %.3f -> %.3f, median %.3f -> %.3f deg | degenerate %lld -> %lld | "
             "flipped vs seed %lld | move max %.3g mean %.3g (x diag)\n",
-            q0.edgeCV, q1.edgeCV, q0.minAngle, q1.minAngle, q0.p1, q1.p1, q0.p5, q1.p5, q0.median, q1.median,
+            method.c_str(), q0.edgeCV, q1.edgeCV, q0.minAngle, q1.minAngle, q0.p1, q1.p1, q0.p5, q1.p5, q0.median, q1.median,
             (long long)q0.degenerate, (long long)q1.degenerate, (long long)q1.flippedVsRef, R.maxMove, R.meanMove);
         gRelaxed = true;
+        gRelaxMethod = method;
+        gAnchors = R.anchors;
+        for (int64_t v : gAnchors) {
+            int32_t key = -1;
+            const int k = gSet[v];
+            for (int32_t a = gPal.offsets[k]; a < gPal.offsets[k + 1]; ++a) {
+                const int id = gPal.ids[a];
+                const int t = ms ? ms->structType.at(id) : -1;
+                if ((t == 1 || t == 2) && (key < 0 || id < key)) key = id;
+            }
+            gAnchorKey.push_back(key);
+        }
     }
 
     const size_t Vs = gM.carrierType.size();
@@ -524,7 +551,7 @@ void subdiv_tracker_save(const CoarseFaceLookup & lookup, const std::string & pa
     }
 
     BinWriter w;
-    w.f.open(path, std::ios::binary);
+    w.f.open(subdiv_long_path(path), std::ios::binary);
     if (!w.f) fail("cannot write " + path);
     const char magic[8] = { 'S', 'U', 'B', 'D', 'I', 'V', 'T', '\0' };
     w.raw(magic, 8);
@@ -563,7 +590,7 @@ void subdiv_tracker_export_fine_obj(const std::string & path, int64_t maxVerts)
                 path.c_str(), (long long)gM.V.rows(), (long long)maxVerts);
         return;
     }
-    if (!igl::writeOBJ(path, gM.V, gM.F))
+    if (!igl::writeOBJ(subdiv_long_path(path), gM.V, gM.F))
         fprintf(stderr, "[subdiv_tracker] writeOBJ failed: %s\n", path.c_str());
     else
         fprintf(stderr, "[subdiv_tracker] fine subdivided mesh -> %s\n", path.c_str());
@@ -579,7 +606,7 @@ void subdiv_tracker_export_deformed_obj(const std::string & path, int64_t maxVer
     }
     MatrixXd P;
     subdiv_tracker_cur_positions(P);
-    if (!igl::writeOBJ(path, P, gM.F))
+    if (!igl::writeOBJ(subdiv_long_path(path), P, gM.F))
         fprintf(stderr, "[subdiv_tracker] writeOBJ failed: %s\n", path.c_str());
     else
         fprintf(stderr, "[subdiv_tracker] deformed subdivided mesh -> %s\n", path.c_str());
@@ -593,7 +620,7 @@ void subdiv_tracker_export_seed_obj(const std::string & path, int64_t maxVerts)
                 path.c_str(), (long long)gVseed.rows(), (long long)maxVerts);
         return;
     }
-    if (!igl::writeOBJ(path, gVseed, gM.F))
+    if (!igl::writeOBJ(subdiv_long_path(path), gVseed, gM.F))
         fprintf(stderr, "[subdiv_tracker] writeOBJ failed: %s\n", path.c_str());
     else
         fprintf(stderr, "[subdiv_tracker] seed (unrelaxed) subdivided mesh -> %s\n", path.c_str());
@@ -608,3 +635,107 @@ void subdiv_tracker_export_graph(const std::string & path)
 bool subdiv_tracker_relaxed() { return gRelaxed; }
 const MatrixXd & subdiv_tracker_seed_positions() { return gVseed; }
 const RelaxGraph & subdiv_tracker_graph() { return gGraph; }
+
+std::string subdiv_tracker_relax_tag()
+{
+    return gRelaxed ? "relaxed_" + gRelaxMethod + "_" : std::string();
+}
+
+namespace {
+
+// Unit icosphere, one subdivision (42 vertices, 80 faces).
+void icosphere(std::vector<Vector3d> & V, std::vector<std::array<int, 3>> & F)
+{
+    const double t = (1.0 + std::sqrt(5.0)) / 2.0;
+    V = { {-1, t, 0}, {1, t, 0}, {-1, -t, 0}, {1, -t, 0}, {0, -1, t}, {0, 1, t},
+          {0, -1, -t}, {0, 1, -t}, {t, 0, -1}, {t, 0, 1}, {-t, 0, -1}, {-t, 0, 1} };
+    F = { {0, 11, 5}, {0, 5, 1}, {0, 1, 7}, {0, 7, 10}, {0, 10, 11}, {1, 5, 9}, {5, 11, 4},
+          {11, 10, 2}, {10, 7, 6}, {7, 1, 8}, {3, 9, 4}, {3, 4, 2}, {3, 2, 6}, {3, 6, 8},
+          {3, 8, 9}, {4, 9, 5}, {2, 4, 11}, {6, 2, 10}, {8, 6, 7}, {9, 8, 1} };
+    std::map<std::pair<int, int>, int> mid;
+    std::vector<std::array<int, 3>> F2;
+    auto midpoint = [&](int a, int b) {
+        const auto key = std::make_pair(std::min(a, b), std::max(a, b));
+        auto it = mid.find(key);
+        if (it != mid.end()) return it->second;
+        V.push_back(0.5 * (V[a] + V[b]));
+        return mid[key] = (int)V.size() - 1;
+    };
+    for (const auto & f : F) {
+        const int a = midpoint(f[0], f[1]), b = midpoint(f[1], f[2]), c = midpoint(f[2], f[0]);
+        F2.push_back({ f[0], a, c }); F2.push_back({ f[1], b, a });
+        F2.push_back({ f[2], c, b }); F2.push_back({ a, b, c });
+    }
+    F = F2;
+    for (auto & v : V) v.normalize();
+}
+
+// Distinct, stable color per struct id (golden-ratio hue walk).
+std::array<uint8_t, 3> struct_color(int id)
+{
+    const double h = std::fmod(0.13 + 0.61803398875 * (double)(id < 0 ? 0 : id), 1.0) * 6.0;
+    const double s = 0.85, v = 0.95, c = v * s, x = c * (1 - std::abs(std::fmod(h, 2.0) - 1)), m = v - c;
+    double r = 0, g = 0, b = 0;
+    switch ((int)h) {
+    case 0: r = c; g = x; break; case 1: r = x; g = c; break; case 2: g = c; b = x; break;
+    case 3: g = x; b = c; break; case 4: r = x; b = c; break; default: r = c; b = x; break;
+    }
+    return { (uint8_t)std::lround(255 * (r + m)), (uint8_t)std::lround(255 * (g + m)), (uint8_t)std::lround(255 * (b + m)) };
+}
+
+} // namespace
+
+void subdiv_tracker_export_anchor_ply(const std::string & path, int64_t maxVerts)
+{
+    if (!gEnabled || !gRelaxed || gAnchors.empty()) return;
+    if ((int64_t)gM.V.rows() > maxVerts) {
+        fprintf(stderr, "[subdiv_tracker] skipping %s: %lld vertices > %lld\n",
+                path.c_str(), (long long)gM.V.rows(), (long long)maxVerts);
+        return;
+    }
+    std::vector<Vector3d> SV;
+    std::vector<std::array<int, 3>> SF;
+    icosphere(SV, SF);
+    const double diag = (gVO.leftCols(3).colwise().maxCoeff() - gVO.leftCols(3).colwise().minCoeff()).norm();
+    const double r = 0.004 * diag;
+
+    const int64_t nMeshV = gM.V.rows(), nMeshF = gM.F.rows();
+    const int64_t nV = nMeshV + (int64_t)gAnchors.size() * (int64_t)SV.size();
+    const int64_t nF = nMeshF + (int64_t)gAnchors.size() * (int64_t)SF.size();
+    std::ofstream f(subdiv_long_path(path), std::ios::binary);
+    if (!f) fail("cannot write " + path);
+    f << "ply\nformat binary_little_endian 1.0\n"
+      << "comment subdivided mesh after relaxation (" << gRelaxMethod << ", grey) + "
+      << gAnchors.size() << " curve anchors as spheres, colored by seam/boundary struct id\n"
+      << "element vertex " << nV << "\nproperty float x\nproperty float y\nproperty float z\n"
+      << "property uchar red\nproperty uchar green\nproperty uchar blue\n"
+      << "element face " << nF << "\nproperty list uchar int vertex_indices\nend_header\n";
+    auto vert = [&](const Vector3d & p, const std::array<uint8_t, 3> & c) {
+        const float xyz[3] = { (float)p(0), (float)p(1), (float)p(2) };
+        f.write((const char *)xyz, sizeof(xyz));
+        f.write((const char *)c.data(), 3);
+    };
+    auto face = [&](int32_t a, int32_t b, int32_t c) {
+        const uint8_t n = 3;
+        const int32_t idx[3] = { a, b, c };
+        f.write((const char *)&n, 1);
+        f.write((const char *)idx, sizeof(idx));
+    };
+    const std::array<uint8_t, 3> grey = { 185, 185, 185 };
+    for (int64_t i = 0; i < nMeshV; ++i) vert(gM.V.row(i).transpose(), grey);
+    for (size_t a = 0; a < gAnchors.size(); ++a) {
+        const Vector3d c = gM.V.row(gAnchors[a]).transpose();
+        const auto col = struct_color(gAnchorKey[a]);
+        for (const auto & v : SV) vert(c + r * v, col);
+    }
+    for (int64_t k = 0; k < nMeshF; ++k) face(gM.F(k, 0), gM.F(k, 1), gM.F(k, 2));
+    for (size_t a = 0; a < gAnchors.size(); ++a) {
+        const int32_t base = (int32_t)(nMeshV + (int64_t)a * (int64_t)SV.size());
+        for (const auto & t : SF) face(base + t[0], base + t[1], base + t[2]);
+    }
+    f.close();
+    if (!f) fail("write failed for " + path);
+    std::set<int32_t> keys(gAnchorKey.begin(), gAnchorKey.end());
+    fprintf(stderr, "[subdiv_tracker] relaxed mesh + %zu anchor spheres (%zu seam/boundary structs) -> %s\n",
+            gAnchors.size(), keys.size(), path.c_str());
+}

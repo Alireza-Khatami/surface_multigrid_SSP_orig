@@ -74,6 +74,10 @@ struct RelaxOptions {
     int64_t maxIter = -1;      // -1: 100000 for Newton (per class), 1000000 for Jacobi
     double  lambda  = 0.5;     // Jacobi step
     bool    verbose = true;
+    int     curveAnchors = 0;  // solve_project experiment only: fixed vertices per curve group
+    // solve_project experiment only, used when curveAnchors == 0: adaptive anchors,
+    // Douglas-Peucker on each seam chain with this tolerance (x bbox diagonal).
+    double  curveAnchorTol = 0.0;
 };
 
 struct RelaxReport {
@@ -83,7 +87,9 @@ struct RelaxReport {
     int64_t halvings = 0;          // Newton: total line-search step halvings
     int64_t lineSearchStalls = 0;  // Newton: passes stopped because no step decreased E
     int64_t nFree = 0, nFixed = 0;
-    int64_t nPinned = 0, nPinnedCurve = 0;  // one vertex per group nothing fixed pulls on
+    int64_t nPinned = 0, nPinnedCurve = 0;
+    int64_t nCurveAnchors = 0;    // solve_project experiment: extra fixed curve vertices
+    std::vector<int64_t> anchors; // solve_project experiment: every anchor vertex chosen  // one vertex per group nothing fixed pulls on
     int64_t plainSteps = 0;       // Newton: plain projected steps taken between Newton rounds
     int64_t seedOffStructure = 0; // seed not on its own structure (kept fixed; expected 0)
     double  maxMove = 0.0, meanMove = 0.0;       // |relaxed - seed| / diagonal
@@ -112,6 +118,24 @@ RelaxReport subdiv_relax(SubdivMesh & M,
                          const std::vector<int32_t> & setId,
                          const RelaxGraph & G,
                          const RelaxOptions & opt = RelaxOptions());
+
+// EXPERIMENT (subdiv_relax_solve_project.cpp): one 3D solve of L x = 0 per pass
+// (curves, then sheets with curves fixed), then projection onto each vertex's
+// own structure. No iteration; opt.solver / maxIter / lambda are ignored. The
+// report's jacobiStepMove says how far the result is from a resting state.
+RelaxReport subdiv_relax_solve_project(SubdivMesh & M,
+                                       const Eigen::MatrixXd & VO,
+                                       const Eigen::MatrixXi & FO,
+                                       const MatStruct * ms,
+                                       const StructPalette & pal,
+                                       const std::vector<int32_t> & setId,
+                                       const RelaxGraph & G,
+                                       const RelaxOptions & opt = RelaxOptions());
+
+// Path for opening a file for writing. On Windows, returns the absolute path in
+// long-path form (prefix backslash backslash ? backslash), so output paths over 260 characters (long run folders
+// + long mesh stems) do not fail. Elsewhere, returns path unchanged.
+std::string subdiv_long_path(const std::string & path);
 
 struct MeshQuality {
     double  edgeCV = 0.0;               // std / mean of edge lengths
