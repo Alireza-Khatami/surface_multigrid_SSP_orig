@@ -166,6 +166,15 @@ void query_coarse_to_fine(
       int v0 = sd.FUV_pre(pre_row, 0);
       int v1 = sd.FUV_pre(pre_row, 1);
       int v2 = sd.FUV_pre(pre_row, 2);
+      // BC is on the face AFTER the collapse, which has the survivor b(0) in the
+      // column where FUV_pre has the absorbed b(1). UV_post.row(b(1)) is still
+      // b(1)'s pre-collapse UV, so read the survivor's row instead.
+      // (10_collapse_viz/md_files/c2f_query_stale_uv_post.md)
+      if (sd.b.size() >= 2) {
+        if (v0 == sd.b(1)) v0 = sd.b(0);
+        if (v1 == sd.b(1)) v1 = sd.b(0);
+        if (v2 == sd.b(1)) v2 = sd.b(0);
+      }
 
       // Project current BC into UV_post to get the query point
       VectorXd queryUV =

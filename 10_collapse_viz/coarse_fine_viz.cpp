@@ -270,6 +270,12 @@ static VertexWalkResult traced_walk(int vi)
         int v0 = sd.FUV_pre(pre_row, 0);
         int v1 = sd.FUV_pre(pre_row, 1);
         int v2 = sd.FUV_pre(pre_row, 2);
+        // Survivor b(0) replaces absorbed b(1) after the collapse (see query_coarse_to_fine).
+        if (sd.b.size() >= 2) {
+            if (v0 == sd.b(1)) v0 = sd.b(0);
+            if (v1 == sd.b(1)) v1 = sd.b(0);
+            if (v2 == sd.b(1)) v2 = sd.b(0);
+        }
 
         Eigen::Vector2d queryUV =
             BC_cur(0) * sd.UV_post.row(v0).transpose()
