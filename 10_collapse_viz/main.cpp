@@ -577,7 +577,7 @@ int main(int argc, char * argv[])
     bool        matStructCheck = false;  // --mat_struct_check: enable struct-ID collapse gate
     int         trackFaceFlip     = -1;  // --track_face_flip <idx>
     long long   nSubdivSamples   = -1;   // --n_subdiv_samples N; -1 = subdivided-mesh tracker off
-    bool        subdivRelax      = true; // --no_subdiv_relax: keep the exact midpoint positions
+    bool        subdivRelax      = false; // --subdiv_relax: opt in (off for now: relaxation is not part of the pipeline yet)
     std::string subdivRelaxMethod = "solve_project";  // --subdiv_relax_method solve_project|newton
     int         subdivCurveAnchors = 0;        // --subdiv_relax_curve_anchors N (solve_project only; fixed count)
     double      subdivAnchorTol   = 3e-3;      // --subdiv_relax_anchor_tol t (solve_project only; adaptive)
@@ -593,8 +593,9 @@ int main(int argc, char * argv[])
     // [--seam_pin_fixed]       seam collapses pin vj/vi/merged point to the old fixed UV targets
     //                          instead of their 3D arc-length fractions (default); the fixed
     //                          targets stretch samples unevenly along seams
-    // [--no_subdiv_relax]      skip the structure-aware relaxation of the subdivided vertices
-    //                          (md_files/subdiv_relax_plan.md); output then matches the plain subdivision
+    // [--subdiv_relax]         run the structure-aware relaxation of the subdivided vertices
+    //                          (md_files/subdiv_relax_plan.md). Off by default for now: the pipeline
+    //                          tracks the plain midpoint subdivision. --no_subdiv_relax is still accepted.
     // [--subdiv_relax_method M] solve_project (default: one 3D solve of L x = 0 per pass, then
     //                          projection; subdiv_relax_solve_project.cpp) | newton (exact resting
     //                          state, much slower; subdiv_relax.cpp). See md_files/subdiv_tracker_cli.md
@@ -621,6 +622,8 @@ int main(int argc, char * argv[])
 #ifdef SSP_SEAM_UV_PINNING
             gSeamPinArcLength = false;
 #endif
+        } else if (a == "--subdiv_relax") {
+            subdivRelax = true;
         } else if (a == "--no_subdiv_relax") {
             subdivRelax = false;
         } else if (i + 1 < argc) {

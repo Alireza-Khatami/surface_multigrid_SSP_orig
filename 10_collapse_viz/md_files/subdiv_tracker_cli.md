@@ -14,7 +14,8 @@ Background docs: `subdiv_tracker_plan.md` (tracker), `subdiv_relax_plan.md` and
 2. **Subdivides** the MAT uniformly (midpoint 1->4 split per level) until it
    has at least `--n_subdiv_samples` vertices. These vertices are the samples.
    The subdivided mesh is never decimated.
-3. **Relaxes** the samples (on by default). Each sample moves along its own
+3. **Relaxes** the samples (**off for now**: not part of the pipeline yet; opt in
+   with `--subdiv_relax`). Each sample moves along its own
    structure to even out the spacing:
    - sheet samples stay on their sheet;
    - seam/boundary samples stay on their curve;
@@ -38,8 +39,9 @@ collapse_viz_bin.exe
   --output_dir     <out_dir>
 ```
 
-The relaxation defaults are the recommended values (`solve_project`, anchor
-tolerance 3e-3), so they need not be passed.
+Relaxation is currently excluded from the pipeline: samples stay at the exact
+midpoint positions. With `--subdiv_relax`, the relaxation defaults are the
+recommended values (`solve_project`, anchor tolerance 3e-3).
 
 Use the **Release** build (`build/release/Release/collapse_viz_bin.exe`). It is
 headless and exits when done. The Debug build opens the viewer and is much
@@ -82,7 +84,7 @@ level. Levels on ABC 00040057 (1,506 MAT vertices):
 
 | flag | default | recommended | meaning |
 |---|---|---|---|
-| `--no_subdiv_relax` | relaxation on | not given | Skip relaxation: samples stay at the exact midpoint positions. The output is then identical to the pre-relaxation code. |
+| `--subdiv_relax` | off | not given (for now) | Run the relaxation. Without it, samples stay at the exact midpoint positions (identical to the pre-relaxation code). `--no_subdiv_relax` is still accepted and keeps it off. |
 | `--subdiv_relax_method M` | `solve_project` | default | How to relax (see below). |
 | `--subdiv_relax_anchor_tol t` | 3e-3 | default | `solve_project` only. Adaptive seam anchors: a seam sample is fixed wherever the seam leaves the straight line between neighbouring anchors by more than `t x` the bbox diagonal. |
 | `--subdiv_relax_curve_anchors N` | 0 (off) | not given | `solve_project` only. Overrides the adaptive anchors with a fixed N anchors per seam. For comparison only. |
