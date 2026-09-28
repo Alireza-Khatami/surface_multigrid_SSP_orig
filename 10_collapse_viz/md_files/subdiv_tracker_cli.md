@@ -151,11 +151,13 @@ or `solve_project`.
 | `subdiv_fine_relaxed_<method>_<stem>.obj` | relaxed | Subdivided mesh after relaxation (the samples the tracker uses). |
 | `subdiv_fine_<stem>.obj` | not relaxed | Subdivided mesh (plain midpoints). |
 | `subdiv_fine_relaxed_solve_project_with_anchors_<stem>.ply` | anchored runs | Relaxed mesh in grey plus a sphere per seam anchor, one colour per seam/boundary structure. |
-| `subdiv_deformed_[relaxed_<method>_]<stem>.obj` | always with samples | Samples at their tracked positions on the simplified mesh (subdivided connectivity). |
+| `subdiv_fine_at_coarse_pos_[relaxed_<method>_]<stem>.obj` | always with samples | **Fine -> coarse.** Subdivided (fine) connectivity; each sample at its tracked position on the simplified mesh. (Was `subdiv_deformed_*.obj`.) |
+| `subdiv_coarse_at_fine_pos_[relaxed_<method>_]<stem>.obj` | always with samples | **Coarse samples -> fine.** Subdivided connectivity; each tracked sample's coarse position replaced by the fine position it came from. Same content as `subdiv_fine_*` for the same run. |
 | `simplified_<stem>.obj` | always | The simplified coarse mesh. The `.sdt` coarse face indices refer to its face order. |
 
-All the OBJs of one run share the same vertex order and faces, so they can be
-compared vertex by vertex.
+Naming: `<topology>_at_<positions>`. All the `subdiv_fine_*` / `subdiv_*_at_*` OBJs of
+one run share the same vertex order and faces, so they can be compared vertex by
+vertex.
 
 ### `.sdt` contents
 

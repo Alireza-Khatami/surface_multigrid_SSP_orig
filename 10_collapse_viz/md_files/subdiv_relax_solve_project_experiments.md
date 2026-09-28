@@ -34,10 +34,10 @@ long-path prefix, so an over-long path can no longer fail.
 | `subdiv_fine_seed_<stem>.obj` | subdivided MAT before relaxation |
 | `subdiv_fine_relaxed_<method>_<stem>.obj` | after relaxation (`<method>` = `newton` or `solve_project`) |
 | `subdiv_fine_relaxed_solve_project_with_anchors_<stem>.ply` | anchored runs only: the relaxed mesh (grey) plus a sphere at every anchor, one color per seam/boundary struct id (38 structs); PLY for vertex colors |
-| `subdiv_deformed_relaxed_<method>_<stem>.obj` | relaxed samples at their tracked positions on the decimated mesh |
+| `subdiv_fine_at_coarse_pos_relaxed_<method>_<stem>.obj` | relaxed samples at their tracked positions on the decimated mesh |
 | `subdiv_graph_<stem>.slg`, `subdiv_<stem>.sdt` | graph and full tracker output |
 
-Files named `subdiv_fine_<stem>.obj` or `subdiv_deformed_<stem>.obj`, with no
+Files named `subdiv_fine_<stem>.obj` or `subdiv_fine_at_coarse_pos_<stem>.obj`, with no
 `relaxed_` tag, are left over from the first runs, before the naming change.
 They are relaxed too, with the same method as their folder.
 

@@ -38,7 +38,7 @@ With `--no_subdiv_relax` it is version 1 with 14 arrays (no `sub_V_seed`), and
 | file | positions |
 |---|---|
 | `subdiv_fine_relaxed_<method>_<stem>.obj` | relaxed subdivided mesh |
-| `subdiv_deformed_relaxed_<method>_<stem>.obj` | relaxed samples at their tracked coarse positions |
+| `subdiv_fine_at_coarse_pos_relaxed_<method>_<stem>.obj` | relaxed samples at their tracked coarse positions |
 | `subdiv_fine_relaxed_solve_project_with_anchors_<stem>.ply` | relaxed mesh plus the seam anchor spheres |
 | `subdiv_fine_seed_<stem>.obj` | before relaxation |
 | `subdiv_graph_<stem>.slg` | before relaxation (the graph is built on the seed) |

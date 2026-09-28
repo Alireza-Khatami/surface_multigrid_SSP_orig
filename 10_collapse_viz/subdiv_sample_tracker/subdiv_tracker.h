@@ -44,9 +44,15 @@ void subdiv_tracker_update(int s, int d);
 // compact coarse mesh.
 void subdiv_tracker_save(const CoarseFaceLookup & lookup, const std::string & path);
 
-// Subdivided connectivity with every vertex at its current coarse position.
+// subdiv_fine_at_coarse_pos_*.obj: subdivided (fine) connectivity with every
+// vertex at its current coarse position.
 // Skipped (with a message) above maxVerts vertices, since OBJ text gets huge.
 void subdiv_tracker_export_deformed_obj(const std::string & path, int64_t maxVerts = 2000000);
+
+// subdiv_coarse_at_fine_pos_*.obj: every tracked sample's coarse position
+// replaced by the fine position it was seeded from. Subdivided connectivity.
+// Same vertices and faces as the fine OBJ. Same size limit.
+void subdiv_tracker_export_coarse_at_fine_obj(const std::string & path, int64_t maxVerts = 2000000);
 
 // The subdivided mesh at its fine-mesh positions (before any collapse).
 // Same vertex order and faces as the deformed OBJ. Same size limit.

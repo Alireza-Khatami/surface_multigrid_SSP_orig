@@ -355,7 +355,9 @@ static void save_simplified_mesh(const CoarseMeshCompaction & cmc, const std::st
 
 // ---- end-of-run exports ----
 // One compaction, built once, feeds every coarse-side writer.
-// --subdiv_obj_max_verts N: largest subdivided mesh written as subdiv_deformed_*.obj
+// Correspondence meshes, named <topology>_at_<positions>:
+//   subdiv_fine_at_coarse_pos_*.obj   subdivided fine mesh, each vertex at its tracked coarse position
+//   subdiv_coarse_at_fine_pos_*.obj   those tracked samples replaced by their fine positions
 static long long gSubdivObjMaxVerts = 2000000;
 
 static bool export_final_outputs(const std::string & out_dir, const std::string & stem)
@@ -381,7 +383,8 @@ static bool export_final_outputs(const std::string & out_dir, const std::string 
     }
 
     subdiv_tracker_save(lookup, out("subdiv_", ".sdt"));
-    subdiv_tracker_export_deformed_obj(out("subdiv_deformed_" + subdiv_tracker_relax_tag(), ".obj"), gSubdivObjMaxVerts);
+    subdiv_tracker_export_deformed_obj(out("subdiv_fine_at_coarse_pos_" + subdiv_tracker_relax_tag(), ".obj"), gSubdivObjMaxVerts);
+    subdiv_tracker_export_coarse_at_fine_obj(out("subdiv_coarse_at_fine_pos_" + subdiv_tracker_relax_tag(), ".obj"), gSubdivObjMaxVerts);
     simp_viz_tracker_write_json(cmc, json);
 
     // Re-read the files and cross-check that they agree on the vertex ordering.
@@ -600,7 +603,7 @@ int main(int argc, char * argv[])
     //                          more than t x bbox diagonal (Douglas-Peucker)
     // [--subdiv_relax_curve_anchors N]  solve_project only, overrides the adaptive anchors with
     //                          N vertices per seam/boundary group, evenly spaced along it
-    // [--subdiv_obj_max_verts N]  default: 2000000 — write subdiv_fine_*.obj / subdiv_deformed_*.obj
+    // [--subdiv_obj_max_verts N]  default: 2000000 — write subdiv_fine_*.obj (incl. subdiv_fine_at_coarse_pos_*.obj)
     //                             only up to N vertices
     // [--track_face_flip F]    face-flip debug tracker on gFO face F (needs --n_subdiv_samples)
     // [--output_dir PATH]      default: .

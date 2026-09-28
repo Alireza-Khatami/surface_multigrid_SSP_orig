@@ -639,7 +639,30 @@ void subdiv_tracker_export_deformed_obj(const std::string & path, int64_t maxVer
     if (!igl::writeOBJ(subdiv_long_path(path), P, gM.F))
         fprintf(stderr, "[subdiv_tracker] writeOBJ failed: %s\n", path.c_str());
     else
-        fprintf(stderr, "[subdiv_tracker] deformed subdivided mesh -> %s\n", path.c_str());
+        fprintf(stderr, "[subdiv_tracker] subdivided fine mesh at coarse positions -> %s\n", path.c_str());
+}
+
+void subdiv_tracker_export_coarse_at_fine_obj(const std::string & path, int64_t maxVerts)
+{
+    if (!gEnabled) return;
+    const int n = (int)gFace.size();
+    if ((int64_t)n > maxVerts) {
+        fprintf(stderr, "[subdiv_tracker] skipping %s: %d vertices > %lld\n", path.c_str(), n, (long long)maxVerts);
+        return;
+    }
+    // Each tracked sample's coarse position replaced by the fine position it was
+    // seeded from (gM.V row); untracked samples are already at gM.V.
+    MatrixXd P;
+    subdiv_tracker_cur_positions(P);
+    int replaced = 0;
+    for (int i = 0; i < n; ++i)
+        if (gFace[i] >= 0) { P.row(i) = gM.V.row(i); ++replaced; }
+
+    if (!igl::writeOBJ(subdiv_long_path(path), P, gM.F))
+        fprintf(stderr, "[subdiv_tracker] writeOBJ failed: %s\n", path.c_str());
+    else
+        fprintf(stderr, "[subdiv_tracker] tracked samples at their fine positions (%d / %d replaced) -> %s\n",
+                replaced, n, path.c_str());
 }
 
 void subdiv_tracker_export_seed_obj(const std::string & path, int64_t maxVerts)

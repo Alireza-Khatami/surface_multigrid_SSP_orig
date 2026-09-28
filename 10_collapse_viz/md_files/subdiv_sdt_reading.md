@@ -215,8 +215,8 @@ relaxation):
 | check | result |
 |---|---|
 | fine positions from `(fine_face, fine_bary)` on `oriented_*.obj` vs `sub_V` | max difference 0 |
-| coarse positions from `(coarse_face, coarse_bary)` on `simplified_*.obj` vs `subdiv_deformed_*.obj` | 7e-12 (OBJ text precision) |
-| `subdiv_deformed_*.obj` faces vs `sub_F` | identical |
+| coarse positions from `(coarse_face, coarse_bary)` on `simplified_*.obj` vs `subdiv_fine_at_coarse_pos_*.obj` | 7e-12 (OBJ text precision) |
+| `subdiv_fine_at_coarse_pos_*.obj` faces vs `sub_F` | identical |
 | `subdiv_fine_relaxed_*.obj` vs `sub_V`, `subdiv_fine_seed_*.obj` vs `sub_V_seed` | 5e-13 / 2e-13 (OBJ text precision) |
 | `level_faces(A, H, 0)` vs the fine faces | identical |
 | `raw_*.obj` vs `oriented_*.obj` | same vertices, same face sets, different corner order |
