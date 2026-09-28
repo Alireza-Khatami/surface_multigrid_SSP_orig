@@ -157,3 +157,81 @@ straight open seams need none, because their junction ends already hold them.
 - **Fixed 50 keeps the best angle percentiles.** It freezes 4.6x more seam
   vertices at their seed positions, and the seed angles near seams were
   already fair. It pays for that with more degenerate and flipped triangles.
+
+## Where the adaptive tolerance breaks (level 3), 2026-09-27
+
+Sweep of `--subdiv_relax_anchor_tol` upward, same setup. Folders are
+`l3_sp_tol<t>`. Mean seed edge length at level 3 = 0.00225 x diag.
+
+| tol (x diag) | anchors | curve chord error max | smallest angle, 1st pct / median (deg) | edge CV | degenerate | flipped |
+|---|---|---|---|---|---|---|
+| 1e-3 | 558 | 0.00099 | 17.9 / 42.5 | 0.354 | 2 | 5 |
+| 3e-3 | 375 | 0.0030 | 17.9 / 42.4 | 0.354 | 2 | 5 |
+| 1e-2 | 202 | 0.0097 | 16.8 / 41.8 | 0.360 | 15 | 17 |
+| **1.25e-2** | 170 | 0.0124 | 12.5 / 41.4 | 0.380 | **139** | **278** |
+| 1.5e-2 | 159 | 0.0143 | 11.1 / 41.3 | 0.386 | 173 | 353 |
+| 1.75e-2 | 146 | 0.0173 | 11.4 / 41.1 | 0.387 | 182 | 358 |
+| 2e-2 | 136 | 0.0194 | 7.8 / 40.6 | 0.413 | 326 | 554 |
+| 5e-2 | 64 | 0.0495 | 0 / 31.8 | 0.748 | 5,684 | 9,472 |
+| 1e-1 | 45 | 0.0752 | 0 / 21.9 | 0.925 | 14,047 | 11,847 |
+| 2e-1 | 39 | 0.134 | 0 / 16.2 | 1.64 | 16,504 | 14,858 |
+| 5e-1 | 31 | 0.26 | 0 / 1.0 | 2.33 | 27,003 | 50,169 |
+| 1 | 26 | 0.117 | 0 / 0 | 2.58 | 79,998 | 71,342 |
+
+- **It breaks between 1e-2 and 1.25e-2 x diag.** Degenerate triangles jump
+  about 9x (15 -> 139) and flipped about 16x (17 -> 278). The 1st-percentile
+  smallest angle drops below the seed (16.1 deg). Beyond that it degrades
+  steadily, and from 5e-2 the result is unusable.
+- **At `tol = 1`, only the one start vertex per closed loop is anchored**, which
+  is the same fixed set as the no-anchor run. It reproduces that run exactly
+  (79,998 degenerate), a consistency check.
+- **In units of sample spacing**, the break is at a chord error of about 4.4-5.6
+  seed edge lengths (0.01 / 0.00225 and 0.0125 / 0.00225). So a tolerance in
+  diag units may not transfer across levels. Each level halves the spacing, so
+  the break may move to about half the tolerance per level. That still has to
+  be tested at level 4. If it holds, the tolerance should be set in sample
+  spacings instead of a fraction of the diagonal.
+- **Safe choices at level 3:** 3e-3 or below, a chord error of about 1.3 edge
+  lengths.
+
+## Does the break scale with sample spacing? Test at level 4, 2026-09-27
+
+**Hypothesis** (from the level-3 sweep): the break is set by sample spacing.
+Level 4 halves the spacing (mean seed edge 0.00112 x diag), so the break
+should move from about 1e-2 to 1.25e-2 down to about 5e-3 to 6.25e-3 x diag.
+
+**Test.** Level 4 (350,016 samples, 695,040 faces), same setup, folders
+`l4_sp_tol<t>`. Degenerate and flipped counts are also given per 100k faces,
+to compare with level 3 (173,760 faces).
+
+| tol (x diag) | anchors | smallest angle, 1st pct / median (deg) | edge CV | degenerate (per 100k faces) | flipped (per 100k) |
+|---|---|---|---|---|---|
+| 2.5e-3 | 401 | 18.0 / 42.5 | 0.354 | 15 (2.2) | 22 (3.2) |
+| 4e-3 | 342 | 17.9 / 42.5 | 0.354 | 19 (2.7) | 27 (3.9) |
+| 5e-3 | 310 | 17.8 / 42.4 | 0.355 | 16 (2.3) | 17 (2.4) |
+| 6.25e-3 | 282 | 17.8 / 42.3 | 0.356 | 16 (2.3) | 19 (2.7) |
+| 7.5e-3 | 251 | 17.3 / 42.2 | 0.357 | 19 (2.7) | 19 (2.7) |
+| 8.75e-3 | 217 | 17.1 / 41.9 | 0.359 | 31 (4.5) | 27 (3.9) |
+| **1e-2** | 202 | 16.8 / 41.8 | 0.362 | **109 (15.7)** | **71 (10.2)** |
+
+The tracker counters were 0 in every run.
+
+For comparison, level 3 per 100k faces: 1e-2 -> 8.6 degenerate / 9.8 flipped;
+1.25e-2 -> 80 / 160.
+
+**Result: the hypothesis is refuted.**
+- At level 4 the break is between about 8.75e-3 and 1e-2 x diag. At level 3 it
+  was between 1e-2 and 1.25e-2. It moved about 20% lower, not the predicted
+  50%.
+- Tolerances of 5e-3 to 6.25e-3, predicted to break, are as good as 2.5e-3.
+- **Why:** the anchors are placed on the seam geometry itself. The same
+  tolerance gives the same anchor count at both levels (202 at 1e-2), because
+  the new subdivided seam vertices lie on the straight MAT polyline segments
+  and change nothing for Douglas-Peucker. So the chord error the solve must
+  absorb is the same in absolute (diag) terms at every level. What changes
+  with the level is only how many samples fall into the bunched zones, which
+  explains the modest shift.
+
+**Consequence.** Keep the tolerance in diag units, not in sample spacings.
+3e-3 to 5e-3 x diag is safe at both levels, with a margin of about 2x to the
+break. The current default is 1e-3.
