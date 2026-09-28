@@ -13,7 +13,6 @@
 #include <Eigen/Geometry>
 #include <Eigen/Sparse>
 #include <Eigen/SparseCholesky>
-#include <Eigen/SparseLU>
 
 #include <algorithm>
 #include <array>
@@ -829,65 +828,10 @@ RelaxReport subdiv_relax_solve_project(SubdivMesh & M, const MatrixXd & VO, cons
     // result is then projected onto the vertex's own structure. Curves do not
     // depend on sheets, so the curve pass comes first and the sheet pass uses
     // the projected curve positions as boundary values.
-    //
-    // opt.jointSolve: instead, one system for all free curve and sheet vertices
-    // at once (non-symmetric, since sheets are pulled by curves but not the
-    // reverse; sparse LU), then every vertex is projected. It differs from the
-    // two passes only in that the sheets see the curves before projection.
-    if (opt.jointSolve) {
-        const double ti = now_s();
-        std::vector<int64_t> list;
-        for (int64_t i = 0; i < Vs; ++i) if (isFree[i]) list.push_back(i);
-        std::vector<int64_t> slot(Vs, -1);
-        for (size_t a = 0; a < list.size(); ++a) slot[list[a]] = (int64_t)a;
-        const int64_t n = (int64_t)list.size();
-        std::vector<Triplet<double>> trip;
-        trip.reserve((size_t)n * 7);
-        MatrixXd rhs = MatrixXd::Zero(n, 3);
-        for (int64_t a = 0; a < n; ++a) {
-            const int64_t i = list[a];
-            trip.emplace_back(a, a, (double)(G.rowOffs[i + 1] - G.rowOffs[i]));
-            for (int64_t q = G.rowOffs[i]; q < G.rowOffs[i + 1]; ++q) {
-                const int j = G.cols[q];
-                if (slot[j] >= 0) trip.emplace_back(a, slot[j], -1.0);
-                else              rhs.row(a) += X.row(j);
-            }
-        }
-        SparseMatrix<double> A(n, n);
-        A.setFromTriplets(trip.begin(), trip.end());
-        trip.clear(); trip.shrink_to_fit();
-        SparseLU<SparseMatrix<double>, COLAMDOrdering<int>> lu;
-        lu.compute(A);
-        if (lu.info() != Success) fail("joint 3D Laplacian factorization failed");
-        const MatrixXd Y = lu.solve(rhs);
-        if (lu.info() != Success || !Y.allFinite()) fail("joint 3D Laplacian solve failed");
-        const double relRes = (A * Y - rhs).norm() / std::max(1e-300, rhs.norm());
-
-        std::vector<double> offDist(list.size(), 0.0);
-        igl::parallel_for(n, [&](int64_t a) {
-            const int64_t i = list[a];
-            const Vector3d y = Y.row(a).transpose();
-            const ProjResult pr = proj.project(setId[i], y, face[i], edge[i]);
-            offDist[a] = (pr.pos - y).norm();
-            move[i] = (pr.pos - X.row(i).transpose()).norm();
-            nX.row(i) = pr.pos.transpose(); nFace[i] = pr.face; nEdge[i] = pr.edge; nBary.row(i) = pr.bary.transpose();
-        }, 1000);
-        const double m = commit(list);
-        R.itersCurve = R.itersSheet = 1;
-        R.deltaCurve = R.deltaSheet = m / diag;
-        double off[2] = { 0, 0 }, offSum[2] = { 0, 0 };
-        int64_t cnt[2] = { 0, 0 };
-        for (int64_t a = 0; a < n; ++a) {
-            const int c = G.role[list[a]] == RELAX_CURVE ? 0 : 1;
-            off[c] = std::max(off[c], offDist[a]); offSum[c] += offDist[a]; ++cnt[c];
-        }
-        if (opt.verbose)
-            fprintf(stderr, "[subdiv_relax] joint: 3D solve of %lld unknowns x 3 (LU, rel. residual %.2g), then projection: "
-                    "off the MAT curves max %.3g mean %.3g, sheets max %.3g mean %.3g (x diag), max move %.3g (x diag) (%.2f s)\n",
-                    (long long)n, relRes, off[0] / diag, cnt[0] ? offSum[0] / cnt[0] / diag : 0.0,
-                    off[1] / diag, cnt[1] ? offSum[1] / cnt[1] / diag : 0.0, m / diag, now_s() - ti);
-    }
-    for (int pass = 0; pass < (opt.jointSolve ? 0 : 2); ++pass) {
+    // (A joint solve of seams + sheets at once was tried and was worse: the
+    // sheets then see the seams before projection. See
+    // md_files/subdiv_relax_solve_project_experiments.md, commit 84b44fc.)
+    for (int pass = 0; pass < 2; ++pass) {
         const double ti = now_s();
         const uint8_t cls = pass == 0 ? RELAX_CURVE : RELAX_SHEET;
         std::vector<int64_t> list;

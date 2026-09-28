@@ -78,9 +78,6 @@ struct RelaxOptions {
     // solve_project experiment only, used when curveAnchors == 0: adaptive anchors,
     // Douglas-Peucker on each seam chain with this tolerance (x bbox diagonal).
     double  curveAnchorTol = 0.0;
-    // solve_project experiment only: one joint solve of curves + sheets instead
-    // of two passes (curves projected before the sheet pass).
-    bool    jointSolve = false;
 };
 
 struct RelaxReport {

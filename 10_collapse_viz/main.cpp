@@ -578,7 +578,6 @@ int main(int argc, char * argv[])
     std::string subdivRelaxMethod = "newton";  // --subdiv_relax_method newton|solve_project
     int         subdivCurveAnchors = 0;        // --subdiv_relax_curve_anchors N (solve_project only; fixed count)
     double      subdivAnchorTol   = 1e-3;      // --subdiv_relax_anchor_tol t (solve_project only; adaptive)
-    bool        subdivRelaxJoint  = false;     // --subdiv_relax_joint (solve_project only)
 
 
     //usage
@@ -595,8 +594,6 @@ int main(int argc, char * argv[])
     // [--subdiv_relax_anchor_tol t]  default 1e-3: solve_project only, adaptive anchors: a seam
     //                          vertex is fixed where the seam leaves the chord between anchors by
     //                          more than t x bbox diagonal (Douglas-Peucker)
-    // [--subdiv_relax_joint]   solve_project only: one joint solve of seams + sheets instead of
-    //                          seams first (projected), then sheets
     // [--subdiv_relax_curve_anchors N]  solve_project only, overrides the adaptive anchors with
     //                          N vertices per seam/boundary group, evenly spaced along it
     // [--subdiv_obj_max_verts N]  default: 2000000 — write subdiv_fine_*.obj / subdiv_deformed_*.obj
@@ -615,8 +612,6 @@ int main(int argc, char * argv[])
             matStructCheck = true;
         } else if (a == "--no_subdiv_relax") {
             subdivRelax = false;
-        } else if (a == "--subdiv_relax_joint") {
-            subdivRelaxJoint = true;
         } else if (i + 1 < argc) {
             if      (a == "--mesh_path")        meshPath          = argv[i+1];
             else if (a == "--target_faces")     targetFaces       = std::stoi(argv[i+1]);
@@ -838,7 +833,7 @@ int main(int argc, char * argv[])
     if (nSubdivSamples >= 0) {
         try {
             subdiv_tracker_init(nSubdivSamples, gHaveMatStruct ? &gMatStruct : nullptr, subdivRelax,
-                                subdivRelaxMethod, subdivCurveAnchors, subdivAnchorTol, subdivRelaxJoint);
+                                subdivRelaxMethod, subdivCurveAnchors, subdivAnchorTol);
             const std::string tag = subdiv_tracker_relax_tag();  // "relaxed_<method>_" or ""
             subdiv_tracker_export_fine_obj(out_dir + "subdiv_fine_" + tag + stem + ".obj", gSubdivObjMaxVerts);
             subdiv_tracker_export_anchor_ply(out_dir + "subdiv_fine_" + tag + "with_anchors_" + stem + ".ply",

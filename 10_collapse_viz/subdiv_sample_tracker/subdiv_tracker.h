@@ -30,7 +30,7 @@
 // otherwise curveAnchorTol > 0 places anchors adaptively (Douglas-Peucker, x diag).
 void subdiv_tracker_init(int64_t nTarget, const MatStruct * ms, bool relax = true,
                          const std::string & method = "newton", int curveAnchors = 0,
-                         double curveAnchorTol = 1e-3, bool jointSolve = false);
+                         double curveAnchorTol = 1e-3);
 
 bool subdiv_tracker_enabled();
 

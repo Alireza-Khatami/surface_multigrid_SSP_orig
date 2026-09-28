@@ -276,3 +276,7 @@ in every run.
 - Projecting the seams between the two passes is what keeps the sheet rims on
   the real seams. So the two-pass order is not only cheaper, it is what makes
   this method work.
+
+**Decision (2026-09-27): keep the two passes.** The joint option was removed from the
+code after commit 84b44fc (which still has it). A re-run of L3 tol 3e-3 after the
+removal gives a byte-identical `.sdt`.
