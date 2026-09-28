@@ -5,16 +5,26 @@ coarse_2_fine_samples_viz_with_query.py
     and map each to the fine mesh via the SSP C2F query.
 
 Visualization:
-  fine_mesh          grey transparent at Z=0      (target / background)
+  fine_mesh          grey transparent at Z=0      (target / background); face
+                     quantities "landings" / "landings per area"
+  fine_uncovered     red faces at Z=0              (fine faces no sample landed on although
+                                                    their area share expected >= 15: holes)
+  fine_uncovered_low_expectation   pink faces      (empty, but expected < 15: too few samples)
   coarse_mesh_src    green at Z=z_offset           (source mesh)
+  coarse_at_fine     coarse connectivity, each coarse vertex at its fine
+                     correspondence from the bundle (off by default)
+  stale_chains       coarse stale-chain polylines at Z=z_offset (v7 bundles)
   coarse_samples     blue dots at Z=z_offset       (sampled coarse positions)
   fine_landings      orange dots at Z=0            (C2F landed positions on fine)
   sample_arrows      yellow ambient arrows          (coarse sample → fine landing)
 
+"Old query (stale-UV bug)" reruns the query without the survivor fix
+(10_collapse_viz/md_files/c2f_query_stale_uv_post.md) to compare coverage.
+
 Click a sample point to print its BC, face, and landing info.
 
 Usage:
-    python coarse_2_fine_samples_viz_with_query.py  <bundle.c2f>
+    python coarse_2_fine_samples_viz_with_query.py  [bundle.c2f]
 
 Dependencies:
     pip install polyscope numpy
@@ -27,7 +37,13 @@ import numpy as np
 import polyscope as ps
 import polyscope.imgui as psim
 
+import c2f_query
 from c2f_query import load_bundle, query_coarse_to_fine
+
+DEFAULT_BUNDLE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', '10_collapse_viz', 'output', 'relaxation_experiments',
+    'c2f_fix_final',
+    'correspondence_mat_01_00040057_f8f78dbd17414efda75bc437_trimesh_000.obj__2025-05-06_02_38_00.c2f')
 
 # ---------------------------------------------------------------------------
 # Structure names
@@ -40,6 +56,11 @@ FINE_LANDING_PC  = "fine_landings"
 ARROWS_PC        = "sample_arrows"
 SEL_COARSE_PC    = "sel_coarse_dot"
 SEL_FINE_PC      = "sel_fine_dot"
+UNCOVERED_MESH   = "fine_uncovered"
+UNCOVERED_NOISE  = "fine_uncovered_low_expectation"
+GAP_MIN_EXPECTED = 15.0  # empty fine face counts as a gap if it expected >= this many landings
+COARSE_AT_FINE   = "coarse_at_fine"
+STALE_CHAINS_CN  = "stale_chains"
 
 # ---------------------------------------------------------------------------
 # Mutable state
@@ -50,7 +71,7 @@ _bundle_dir  = ""
 _z_offset    = 1.0
 _mesh_span   = 1.0
 
-_n_samples   = 1000
+_n_samples   = 50000
 _seed        = 42
 
 # per-sample data (set by _compute_c2f_samples)
@@ -59,6 +80,13 @@ _sample_bcs        = None   # (N, 3) barycentric coords on coarse face (source)
 _coarse_sample_pts = None   # (N, 3) 3-D position on coarse mesh at Z=0
 _fine_landing_pts  = None   # (N, 3) fine-mesh landing position at Z=0
 _fine_landing_bfs  = None   # (N, 3) global fine vertex indices of each landing tri
+_fine_landing_faces = None  # (N,)  fine face each sample landed on
+_fine_hits          = None  # (FF,) samples landed per fine face
+_fine_expected      = None  # (FF,) landings expected from the face's share of fine area
+
+_old_query           = False  # rerun without the survivor fix (c2f_query.post_corners)
+_show_uncovered      = True
+_show_coarse_at_fine = False
 
 _show_arrows       = True
 _show_coarse_dots  = True
@@ -97,6 +125,7 @@ def _compute_c2f_samples():
     """
     global _sample_face_ids, _sample_bcs
     global _coarse_sample_pts, _fine_landing_pts, _fine_landing_bfs
+    global _fine_landing_faces, _fine_hits, _fine_expected
 
     b = _bundle
     if b is None or not b.has_ssp_data:
@@ -145,7 +174,13 @@ def _compute_c2f_samples():
                   bc[:, 2:3] * b.coarseV[b.coarseF[face_ids, 2]])
 
     # Run the C2F query — modifies BC and BF in-place
-    query_coarse_to_fine(b.decInfo, b.decIM, b.faceSheetID, BC, BF, FIdx)
+    fixed_post_corners = c2f_query.post_corners
+    if _old_query:
+        c2f_query.post_corners = lambda sd, v0, v1, v2: (int(v0), int(v1), int(v2))
+    try:
+        query_coarse_to_fine(b.decInfo, b.decIM, b.faceSheetID, BC, BF, FIdx)
+    finally:
+        c2f_query.post_corners = fixed_post_corners
 
     # Fine landing positions (BC/BF now refer to fine mesh)
     fine_pts = (BC[:, 0:1] * b.fineV[BF[:, 0]] +
@@ -157,10 +192,29 @@ def _compute_c2f_samples():
     _coarse_sample_pts = coarse_pts
     _fine_landing_pts  = fine_pts
     _fine_landing_bfs  = BF.copy()
+    _fine_landing_faces = FIdx.copy()
+    _fine_hits = np.bincount(FIdx, minlength=b.fineF.shape[0])
+    # Landings a fine face should get if the map spread samples by area.
+    fv, ff = b.fineV, b.fineF
+    farea = 0.5 * np.linalg.norm(np.cross(fv[ff[:, 1]] - fv[ff[:, 0]], fv[ff[:, 2]] - fv[ff[:, 0]]), axis=1)
+    _fine_expected = N * farea / max(farea.sum(), 1e-30)
 
+    gaps, noise = _uncovered_split()
     print(f"[samples] {N} total samples, area-weighted across {FC} faces  "
-          f"(area range [{areas.min():.4g}, {areas.max():.4g}], total={total_area:.4g})  seed={_seed}")
+          f"(area range [{areas.min():.4g}, {areas.max():.4g}], total={total_area:.4g})  seed={_seed}  "
+          f"query={'OLD (stale-UV bug)' if _old_query else 'fixed'}")
+    print(f"[samples] fine faces with no landing: {len(gaps)} expected >= {GAP_MIN_EXPECTED} (gaps), "
+          f"{len(noise)} expected fewer (sampling noise), of {b.fineF.shape[0]}")
     return True
+
+
+def _uncovered_split():
+    """Fine faces with no landing: (gaps, noise). A gap expected >= GAP_MIN_EXPECTED landings
+    by area share; the map stretches area locally by ~0.5-2x, so even at half that density an
+    empty gap is very unlikely to be chance: it is a hole in the map, not too few samples."""
+    empty = _fine_hits == 0
+    return (np.where(empty & (_fine_expected >= GAP_MIN_EXPECTED))[0],
+            np.where(empty & (_fine_expected < GAP_MIN_EXPECTED))[0])
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +235,63 @@ def _rebuild_meshes():
     cm.set_edge_width(1.0)
     cm.set_smooth_shade(False)
     cm.set_transparency(0.55)
+
+    if _fine_hits is not None:
+        fv, ff = _bundle.fineV, _bundle.fineF
+        farea = 0.5 * np.linalg.norm(np.cross(fv[ff[:, 1]] - fv[ff[:, 0]], fv[ff[:, 2]] - fv[ff[:, 0]]), axis=1)
+        fm.add_scalar_quantity("landings per area", _fine_hits / np.maximum(farea, 1e-30),
+                               defined_on="faces", cmap="viridis")
+        fm.add_scalar_quantity("landings", _fine_hits.astype(np.float64), defined_on="faces", cmap="viridis")
+
+    _rebuild_uncovered()
+    _rebuild_coarse_at_fine()
+    _rebuild_stale_chains()
+
+
+def _rebuild_uncovered():
+    """Fine faces that no coarse sample landed on: gaps solid red, sampling noise pale pink."""
+    for name in (UNCOVERED_MESH, UNCOVERED_NOISE):
+        if ps.has_surface_mesh(name):
+            ps.remove_surface_mesh(name)
+    if not _show_uncovered or _fine_hits is None:
+        return
+    gaps, noise = _uncovered_split()
+    for name, faces, color in ((UNCOVERED_MESH, gaps, (0.9, 0.1, 0.1)),
+                               (UNCOVERED_NOISE, noise, (1.0, 0.75, 0.8))):
+        if len(faces) == 0:
+            continue
+        um = ps.register_surface_mesh(name, _bundle.fineV, _bundle.fineF[faces])
+        um.set_color(color)
+        um.set_edge_width(1.0)
+        um.set_smooth_shade(False)
+
+
+def _rebuild_coarse_at_fine():
+    """Coarse connectivity with every coarse vertex at its fine correspondence (bundle corrBC/corrFV)."""
+    if ps.has_surface_mesh(COARSE_AT_FINE):
+        ps.remove_surface_mesh(COARSE_AT_FINE)
+    if not _show_coarse_at_fine or len(_bundle.corrBC) == 0:
+        return
+    pos = (_bundle.corrBC[:, :, None] * _bundle.fineV[_bundle.corrFV]).sum(axis=1)
+    cm = ps.register_surface_mesh(COARSE_AT_FINE, pos, _bundle.coarseF)
+    cm.set_color((0.2, 0.4, 0.95))
+    cm.set_edge_width(1.0)
+    cm.set_smooth_shade(False)
+    cm.set_transparency(0.6)
+
+
+def _rebuild_stale_chains():
+    """v7 stale chains (naked coarse polylines), lifted with the coarse mesh."""
+    if ps.has_curve_network(STALE_CHAINS_CN):
+        ps.remove_curve_network(STALE_CHAINS_CN)
+    edges = [(c[k], c[k + 1]) for c in _bundle.staleChains for k in range(len(c) - 1)]
+    if not edges:
+        return
+    cv = _bundle.coarseV.copy()
+    cv[:, 2] += _z_offset
+    cn = ps.register_curve_network(STALE_CHAINS_CN, cv, np.array(edges, dtype=np.int64))
+    cn.set_color((0.85, 0.2, 0.85))
+    cn.set_radius(0.003, relative=True)
 
 
 def _active_mask():
@@ -265,12 +376,12 @@ def _rebuild_all():
 def ui_callback():
     global _z_offset, _mesh_span, _n_samples, _seed
     global _show_arrows, _show_coarse_dots, _show_fine_dots, _selected_sample
-    global _pick_face_mode, _selected_face
+    global _pick_face_mode, _selected_face, _old_query, _show_uncovered, _show_coarse_at_fine
 
     changed = False
 
     try:
-        psim.SetNextWindowSize((340, 320), psim.ImGuiCond_FirstUseEver)
+        psim.SetNextWindowSize((380, 480), psim.ImGuiCond_FirstUseEver)
     except Exception:
         pass
     psim.Begin("Coarse -> Fine (Face Samples)", True)
@@ -289,7 +400,14 @@ def ui_callback():
 
     c, v = psim.InputInt("Total samples", _n_samples)
     if c:
-        _n_samples = max(1, min(v, 100000))
+        _n_samples = max(1, min(v, 300000))
+
+    c, v = psim.Checkbox("Old query (stale-UV bug)", _old_query)
+    if c:
+        _old_query = v
+        if _compute_c2f_samples():
+            _selected_sample = -1
+            _rebuild_all()
 
     c, v = psim.InputInt("Seed", _seed)
     if c:
@@ -305,6 +423,14 @@ def ui_callback():
         N  = len(_coarse_sample_pts)
         FC = _bundle.coarseF.shape[0]
         psim.TextUnformatted(f"{N} samples across {FC} faces (area-weighted)")
+        FF = _bundle.fineF.shape[0]
+        gaps, noise = _uncovered_split()
+        psim.TextUnformatted(f"Query: {'OLD (stale-UV bug)' if _old_query else 'fixed'}")
+        psim.TextUnformatted(f"Fine faces with no landing, of {FF}:")
+        psim.TextUnformatted(f"  gaps (expected >= {GAP_MIN_EXPECTED:g}, red): {len(gaps)}")
+        psim.TextUnformatted(f"  low expectation (pink, add samples): {len(noise)}")
+        psim.TextUnformatted(f"Landings per fine face: median {int(np.median(_fine_hits))}, "
+                             f"min {int(_fine_hits.min())}")
 
     psim.Separator()
     psim.TextUnformatted("Face Filter")
@@ -350,6 +476,20 @@ def ui_callback():
     if c:
         _show_arrows = v
         _rebuild_arrows()
+
+    c, v = psim.Checkbox("Show fine faces with no landing", _show_uncovered)
+    if c:
+        _show_uncovered = v
+        _rebuild_uncovered()
+
+    c, v = psim.Checkbox("Show coarse mesh at fine correspondences", _show_coarse_at_fine)
+    if c:
+        _show_coarse_at_fine = v
+        _rebuild_coarse_at_fine()
+
+    if _bundle.staleChains:
+        psim.TextUnformatted(f"Stale chains: {len(_bundle.staleChains)} "
+                             f"({len(_bundle.coarseV) - _bundle.NC} naked vertices)")
 
     psim.Separator()
     if _selected_sample >= 0 and _coarse_sample_pts is not None:
@@ -431,7 +571,7 @@ def ui_callback():
 def main():
     global _bundle, _bundle_dir, _z_offset, _mesh_span
 
-    c2f_path    = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\01_00040057_f8f78dbd17414efda75bc437_trimesh_000\\correspondence_01_00040057_f8f78dbd17414efda75bc437_trimesh_000_mat_initial.c2f"
+    c2f_path    = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_BUNDLE
     # c2f_path  = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\0002000_partstudio_14_model_ste_00_1024\\correspondence_0002000_partstudio_14_model_ste_00_1024.c2f"
     # c2f_path  = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\hand\\correspondence_hand.c2f"
     # c2f_path  = rf"C:\\Users\\alirz\\Projects\\Graphics\\Neural QMAT\\external\\surf_subgrid_SSP_orig\\10_collapse_viz\\output\\subDiv_cube\\correspondence_subDiv_cube.c2f"

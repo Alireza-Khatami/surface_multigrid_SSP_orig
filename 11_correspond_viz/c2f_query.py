@@ -52,8 +52,9 @@ class CollapseData:
 
 @dataclass
 class Bundle:
-    # Compact coarse mesh
-    coarseV: np.ndarray      # (NC, 3) float64
+    # Compact coarse mesh. Rows 0..NC-1 are face-referenced; v7 appends the
+    # naked stale-chain vertices as rows NC..NCE-1 (never in coarseF).
+    coarseV: np.ndarray      # (NCE, 3) float64
     coarseF: np.ndarray      # (FC, 3) int32
 
     # Original fine mesh
@@ -69,11 +70,17 @@ class Bundle:
     has_ssp_data: bool = False
     nV_total: int = 0        # global SSP vertex count (includes infVtx)
     nF_total: int = 0        # original face count (= nFO)
-    vtxMap: Optional[np.ndarray] = None    # (NC,) int32  compact→global vertex
+    vtxMap: Optional[np.ndarray] = None    # (NCE,) int32  compact→global vertex
     faceMap: Optional[np.ndarray] = None   # (FC,) int32  compact→global face
     faceSheetID: Optional[np.ndarray] = None   # (nFO,) int32
     decIM: List[List[int]] = field(default_factory=list)
     decInfo: List[CollapseData] = field(default_factory=list)
+
+    # v7: face-referenced coarse vertex count (NCE = len(coarseV) >= NC) and the
+    # stale chains as polylines of compact coarse vertex indices.
+    NC: int = 0
+    staleChains: List[List[int]] = field(default_factory=list)
+    version: int = 1
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +131,8 @@ class _Reader:
 
 def load_bundle(path: str) -> Bundle:
     """
-    Read a .c2f bundle file (v1 or v2) and return a Bundle.
+    Read a .c2f bundle file (v1..v7) and return a Bundle.
+    v7 layout delta: 10_collapse_viz/md_files/c2f_bundle_v7_stale_chains.md
 
     Raises:
         ValueError  on bad magic or read errors.
@@ -135,21 +143,25 @@ def load_bundle(path: str) -> Bundle:
     r = _Reader(data)
 
     magic = r.u32()
-    if magic not in (0xC2F50001, 0xC2F50002, 0xC2F50003, 0xC2F50004, 0xC2F50005, 0xC2F50006):
+    if not 0xC2F50001 <= magic <= 0xC2F50007:
         raise ValueError(f'Bad magic: 0x{magic:08X}')
-    v2 = (magic == 0xC2F50002)
-    v3 = (magic == 0xC2F50003)
-    v4 = (magic == 0xC2F50004)
-    v5 = (magic == 0xC2F50005)
-    v6 = (magic == 0xC2F50006)
+    ver = magic - 0xC2F50000
+    v7 = (ver == 7)
+    # v7's SSP data is laid out like v6's (after the v7-only stale-chain block)
+    v2 = (ver == 2)
+    v3 = (ver == 3)
+    v4 = (ver == 4)
+    v5 = (ver == 5)
+    v6 = (ver in (6, 7))
 
     NC = r.u32()
     FC = r.u32()
     NF = r.u32()
     FF = r.u32()
+    NCE = r.u32() if v7 else NC   # + naked stale-chain vertices
 
     # Coarse mesh
-    coarseV = r.f64_array(NC * 3).reshape(NC, 3)
+    coarseV = r.f64_array(NCE * 3).reshape(NCE, 3)
     coarseF = r.u32_array(FC * 3).reshape(FC, 3)
 
     # Fine mesh
@@ -170,7 +182,8 @@ def load_bundle(path: str) -> Bundle:
 
     b = Bundle(coarseV=coarseV, coarseF=coarseF,
                fineV=fineV, fineF=fineF,
-               corrVec=corrVec, corrBC=corrBC, corrFV=corrFV)
+               corrVec=corrVec, corrBC=corrBC, corrFV=corrFV,
+               NC=NC, version=ver)
 
     if not v2 and not v3 and not v4 and not v5 and not v6:
         print(f'[bundle] Loaded v1  NC={NC} FC={FC} NF={NF} FF={FF}')
@@ -184,7 +197,11 @@ def load_bundle(path: str) -> Bundle:
     b.nV_total = nV_total
     b.nF_total = nF_decIM
 
-    b.vtxMap      = r.i32_array(NC)
+    b.vtxMap      = r.i32_array(NCE)
+    if v7:
+        nStale = r.u32()
+        for _ in range(nStale):
+            b.staleChains.append(r.u32_array(r.u32()).astype(np.int64).tolist())
     b.faceMap     = r.i32_array(FC)
     b.faceSheetID = r.i32_array(nFO)
 
@@ -276,9 +293,9 @@ def load_bundle(path: str) -> Bundle:
         b.decInfo.append(cd)
 
     b.has_ssp_data = True
-    ver = 6 if v6 else (5 if v5 else (4 if v4 else (3 if v3 else 2)))
     print(f'[bundle] Loaded v{ver}  NC={NC} FC={FC} NF={NF} FF={FF}'
-          f'  nDec={nDec}  nFO={nFO}')
+          f'  nDec={nDec}  nFO={nFO}'
+          + (f'  NCE={NCE}  staleChains={len(b.staleChains)}' if v7 else ''))
 
     # Confirm whether sd.b (survivor/absorbed vertex pair) is present
     total_sheets = sum(len(cd.sheets) for cd in b.decInfo)
@@ -294,6 +311,16 @@ def load_bundle(path: str) -> Bundle:
 # ---------------------------------------------------------------------------
 # compute_barycentric_2d
 # ---------------------------------------------------------------------------
+
+def post_corners(sd: SheetData, v0: int, v1: int, v2: int):
+    """FUV_pre corners of a face as they are AFTER the collapse: the survivor b[0]
+    replaces the absorbed b[1]. UV_post[b[1]] is still b[1]'s pre-collapse UV.
+    See 10_collapse_viz/md_files/c2f_query_stale_uv_post.md."""
+    if len(sd.b) >= 2:
+        s, d = int(sd.b[0]), int(sd.b[1])
+        v0, v1, v2 = (s if int(v) == d else int(v) for v in (v0, v1, v2))
+    return v0, v1, v2
+
 
 def compute_barycentric_2d(p: np.ndarray,
                             UV: np.ndarray,
@@ -400,7 +427,7 @@ def query_coarse_to_fine(
                 continue
 
             # Project BC through UV_post → UV query point
-            v0, v1, v2 = sd.FUV_pre[pre_row]
+            v0, v1, v2 = post_corners(sd, *sd.FUV_pre[pre_row])
             uv_query = (BC[q, 0] * sd.UV_post[v0] +
                         BC[q, 1] * sd.UV_post[v1] +
                         BC[q, 2] * sd.UV_post[v2])
@@ -496,7 +523,7 @@ def query_point_with_intermediates(
         if sd is None or pre_row < 0:
             continue
 
-        v0, v1, v2 = sd.FUV_pre[pre_row]
+        v0, v1, v2 = post_corners(sd, *sd.FUV_pre[pre_row])
         uv_q = (BC[0] * sd.UV_post[v0] +
                 BC[1] * sd.UV_post[v1] +
                 BC[2] * sd.UV_post[v2])
