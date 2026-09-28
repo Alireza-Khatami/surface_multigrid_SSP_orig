@@ -45,6 +45,9 @@ constexpr double kSeamPinVkX = kSeamPinViX, kSeamPinVkY = kSeamPinViY;
 
 } // namespace
 
+// Seam pin placement along the y = 0 seam line (see joint_lscm_pinned.h).
+bool gSeamPinArcLength = true;
+
 // ---------------------------------------------------------------------------
 // check_valid_UV_lscm's checks (src/joint_lscm.cpp:1357-1560), split into 3
 // separate, independently reusable functions — mirroring that function's
@@ -284,6 +287,28 @@ void joint_lscm_double_cover_pinned(
     int pin_left  = B_glued[0];
     int pin_right = B_glued[1];
 
+    // x targets of vj, vi and vk on the seam line; left / right stay at -1 / +1.
+    // Fixed mode: vj -0.5, vi +0.5, vk = vi, whatever the 3D spacing.
+    // Arc-length mode: each at its fraction of the 3D seam length, pre-collapse
+    // along left-vj-vi-right, post-collapse along left-vk-right. A point at a
+    // fraction phi of the pre seam then maps to the same fraction phi of the
+    // post seam, so samples keep an even spacing along seams. The targets use
+    // only the shared seam vertices, so every sheet still gets identical pins.
+    double xVj = kSeamPinVjX, xVi = kSeamPinViX, xVk = kSeamPinVkX;
+    if (gSeamPinArcLength) {
+        const double L1 = (Vjoint.row(vj) - Vjoint.row(pin_left)).norm();
+        const double L2 = (Vjoint.row(vi) - Vjoint.row(vj)).norm();
+        const double L3 = (Vjoint.row(pin_right) - Vjoint.row(vi)).norm();
+        const double M1 = (Vjoint.row(nV) - Vjoint.row(pin_left)).norm();
+        const double M2 = (Vjoint.row(pin_right) - Vjoint.row(nV)).norm();
+        const double T = L1 + L2 + L3, U = M1 + M2;
+        if (T > 0 && U > 0 && L1 > 0 && L2 > 0 && L3 > 0 && M1 > 0 && M2 > 0) {
+            xVj = -1.0 + 2.0 * L1 / T;
+            xVi = -1.0 + 2.0 * (L1 + L2) / T;
+            xVk = -1.0 + 2.0 * M1 / U;
+        }
+    }
+
     VectorXi b_UV(10);
     VectorXd bc_UV(10);
     b_UV  << pin_left,              nVjoint_dc + pin_left,
@@ -293,16 +318,16 @@ void joint_lscm_double_cover_pinned(
              nV,                    nVjoint_dc + nV;
     bc_UV << 0.0,                  -1.0,               // pin_left  : y=0, x=-1
              0.0,                   1.0,               // pin_right : y=0, x=+1
-             kSeamPinViY,           kSeamPinViX,        // vi        : y=0, x=-0.5
-             kSeamPinVjY,           kSeamPinVjX,        // vj        : y=0, x=+0.5
-             kSeamPinVkY,           kSeamPinVkX;        // vk (nV)   : same as vi
+             kSeamPinViY,           xVi,                // vi        : y=0
+             kSeamPinVjY,           xVj,                // vj        : y=0
+             kSeamPinVkY,           xVk;                // vk (nV)   : y=0
 
     if (isDebug) {
         fprintf(seam_pin_log(),
             "[SEAM-PIN] vi=%d vj=%d  B_glued=(%d,%d)->((-1,0),(1,0))  "
             "vi->(%.2f,%.2f)  vj->(%.2f,%.2f)  vk(nV=%d)->(%.2f,%.2f)\n",
             vi, vj, pin_left, pin_right,
-            kSeamPinViX, kSeamPinViY, kSeamPinVjX, kSeamPinVjY, nV, kSeamPinVkX, kSeamPinVkY);
+            xVi, kSeamPinViY, xVj, kSeamPinVjY, nV, xVk, kSeamPinVkY);
         fflush(seam_pin_log());
     }
 

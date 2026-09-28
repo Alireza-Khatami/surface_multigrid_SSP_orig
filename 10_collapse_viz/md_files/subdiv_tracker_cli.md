@@ -133,6 +133,7 @@ unrelaxed subdivision):
 | flag | default | meaning |
 |---|---|---|
 | `--track_face_flip F` | off | Face-flip debug tracker on fine face F. Needs `--n_subdiv_samples`. |
+| `--seam_pin_fixed` | off | Seam collapses pin vj / vi / the merged point at the old fixed UV targets (-0.5, +0.5, +0.5) instead of at their 3D arc-length fractions. The old targets stretch seam samples unevenly (up to about 50x). For comparison only. |
 
 Unknown flags are ignored silently; `--trace_vertices`, still in some launch
 entries, is no longer parsed. Check flag spelling in the caller.
@@ -192,6 +193,9 @@ Little-endian. Version 1 has 14 arrays (no relaxation); version 2 has 15
 - **Tracker counters.** The log line
   `[subdiv_tracker] ... collapses ... | order!=FUV_pre 0 | corner mismatch 0 | ...`
   should show all zeros. Callers can grep it as a health check.
+  `outside post ring` may show a few samples at float-noise size (max
+  about 1e-12); anything larger is a real tracking error, and each affected
+  collapse is then logged as `[subdiv_tracker] outside: collapse ...`.
 
 ## Paths
 

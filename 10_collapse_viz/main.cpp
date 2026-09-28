@@ -587,6 +587,9 @@ int main(int argc, char * argv[])
     // [--n_subdiv_samples N]   optional — subdivide the fine mesh until it has >= N vertices
     //                          and track every one of them (subdiv_sample_tracker/); omit to disable
     // [--matstruct_path PATH]  .ma_struct file: struct IDs (collapse gate, subdivided-vertex struct sets)
+    // [--seam_pin_fixed]       seam collapses pin vj/vi/merged point to the old fixed UV targets
+    //                          instead of their 3D arc-length fractions (default); the fixed
+    //                          targets stretch samples unevenly along seams
     // [--no_subdiv_relax]      skip the structure-aware relaxation of the subdivided vertices
     //                          (md_files/subdiv_relax_plan.md); output then matches the plain subdivision
     // [--subdiv_relax_method M] solve_project (default: one 3D solve of L x = 0 per pass, then
@@ -611,6 +614,10 @@ int main(int argc, char * argv[])
             validityChecks = true;
         } else if (a == "--mat_struct_check") {
             matStructCheck = true;
+        } else if (a == "--seam_pin_fixed") {
+#ifdef SSP_SEAM_UV_PINNING
+            gSeamPinArcLength = false;
+#endif
         } else if (a == "--no_subdiv_relax") {
             subdivRelax = false;
         } else if (i + 1 < argc) {

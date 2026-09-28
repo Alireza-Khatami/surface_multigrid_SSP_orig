@@ -87,5 +87,12 @@ bool joint_lscm_seam_pinned(
 // Open/close this file's own diagnostic log ([SEAM-PIN-*] lines). Falls
 // back to stderr if never opened. Separate from joint_lscm.cpp's dc_log()
 // because that accessor is `static` (not exported).
+// Where vj, vi and the merged point are pinned on the seam line in a seam
+// collapse. true (default): at their fractions of the 3D seam arc length, so
+// samples tracked through the collapse keep an even spacing along the seam.
+// false: the original fixed targets (vj -0.5, vi +0.5, merged = vi), which
+// ignore 3D spacing and stretch seam samples unevenly (up to ~50x measured).
+extern bool gSeamPinArcLength;
+
 void seam_uv_pinned_log_open(const char * path);
 void seam_uv_pinned_log_close();

@@ -1578,8 +1578,14 @@ bool SSP_collapse_edge(
           sd_naf.FUV_post.resize(1, 3); sd_naf.FUV_post << 0, 1, 2;
           sd_naf.FIdx_pre.resize(1);    sd_naf.FIdx_pre(0)  = f;
           sd_naf.FIdx_post.resize(1);   sd_naf.FIdx_post(0) = f;
+          // UV_post = UV_pre: the face keeps its barycentrics while d's corner
+          // moves to p. Its own embedding (UV_post above) uses a different
+          // frame whenever d is corner 0 or 1, and a different shape always,
+          // so casting a UV_pre point into it lands elsewhere or outside.
+          // Keeping barycentrics is also continuous across neighbouring faces.
           sd_naf.UV_pre  = UV_pre;
-          sd_naf.UV_post = UV_post;
+          sd_naf.UV_post = UV_pre;
+          (void)UV_post;
 
           // b: [local_s_idx, local_d_idx] in subsetVIdx — used by vertex fixup.
           sd_naf.b.resize(2);

@@ -68,6 +68,7 @@ struct Stats {
 } gStats;
 
 int gLogBudget = 20;
+int gOutsideLogBudget = 200;        // per (collapse, sheet) lines for samples outside the post ring
 #define TRK_LOG(...) do { if (gLogBudget > 0) { --gLogBudget; fprintf(stderr, __VA_ARGS__); } } while (0)
 
 int resolve(int v)
@@ -92,6 +93,7 @@ void subdiv_tracker_init(int64_t nTarget, const MatStruct * ms, bool relax, cons
     gStats = Stats();
     gCollapses = 0;
     gLogBudget = 20;
+    gOutsideLogBudget = 200;
     gRequested = nTarget;
 
     const int nFO = (int)gFO.rows();
@@ -245,6 +247,7 @@ void subdiv_tracker_update(int s, int d)
             pden[j] = pd00[j] * pd11[j] - pd01[j] * pd01[j];
         }
 
+        int64_t nOutHere = 0; double maxOutHere = 0.0;
         for (const auto & it : items) {
             const int32_t si = it.first;
             const int r = it.second;
@@ -302,6 +305,7 @@ void subdiv_tracker_update(int s, int d)
             if (minD > 1e-12) {
                 ++gStats.outside;
                 gStats.maxOutside = std::max(gStats.maxOutside, minD);
+                ++nOutHere; maxOutHere = std::max(maxOutHere, minD);
             }
 
             double B[3] = { std::max(0.0, bu), std::max(0.0, bv), std::max(0.0, bw) };
@@ -316,6 +320,32 @@ void subdiv_tracker_update(int s, int d)
             }
             gBucket[nf].push_back(si);
             ++gStats.casts;
+        }
+
+        // Where do samples fall outside the post ring? Signed UV areas of the
+        // pre and post patches (they should match) and inverted post faces.
+        if (nOutHere > 0 && gOutsideLogBudget > 0) {
+            --gOutsideLogBudget;
+            auto triArea = [](const MatrixXd & UV, int a, int b, int c) {
+                return 0.5 * ((UV(b, 0) - UV(a, 0)) * (UV(c, 1) - UV(a, 1)) - (UV(c, 0) - UV(a, 0)) * (UV(b, 1) - UV(a, 1)));
+            };
+            double aPre = 0, aPost = 0, minPre = 1e300, minPost = 1e300;
+            int invPre = 0, invPost = 0;
+            for (int r = 0; r < nPre; ++r) {
+                const double a = triArea(sd.UV_pre, sd.FUV_pre(r, 0), sd.FUV_pre(r, 1), sd.FUV_pre(r, 2));
+                aPre += a; minPre = std::min(minPre, a); invPre += a <= 0;
+            }
+            for (int j = 0; j < nPost; ++j) {
+                const double a = triArea(sd.UV_post, sd.FUV_post(j, 0), sd.FUV_post(j, 1), sd.FUV_post(j, 2));
+                aPost += a; minPost = std::min(minPost, a); invPost += a <= 0;
+            }
+            fprintf(stderr,
+                "[subdiv_tracker] outside: collapse %d (s %d, d %d) sheet %d | %lld of %zu samples outside, max %.3g | "
+                "lscm_case %d flap %d dc %d sym %d | pre %d faces area %.6g (min %.3g, inverted %d) | "
+                "post %d faces area %.6g (min %.3g, inverted %d)\n",
+                ci, s, d, sd.global_sheet_id, (long long)nOutHere, items.size(), maxOutHere,
+                D.lscm_case ? *D.lscm_case : -1, D.numFlapFaces, (int)sd.has_double_cover, sd.dc_uv_symmetric,
+                nPre, aPre, minPre, invPre, nPost, aPost, minPost, invPost);
         }
     }
 
