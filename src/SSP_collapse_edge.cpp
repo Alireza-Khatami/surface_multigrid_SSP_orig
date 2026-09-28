@@ -474,6 +474,26 @@ bool SSP_collapse_edge(
     if (sheets_Ndf.count(kv.first) && !sheets_Ndf[kv.first].empty())
       active_sheets.insert(kv.first);
 
+  // Reject when d has a real face in a non-active local sheet (one without s).
+  // That face would only get d's corner moved to p, with no joint LSCM of its
+  // own, so its samples could not be tracked consistently.
+  // Happens at non-manifold edges the .ma_struct does not tag (dangling fins).
+  {
+    const vector<int> & dfaces = (!eflip ? Nsf : Ndf);
+    for (int f : dfaces) {
+      if (null_face(f) || f >= numOrigFaces) continue;
+      const auto it = face_localSheetID.find(f);
+      if (it != face_localSheetID.end() && active_sheets.count(it->second)) continue;
+      bool inf = false;
+      for (int c = 0; c < 3; c++) if (std::isinf(V(F(f,c), 0))) inf = true;
+      if (inf) continue;
+      if (FILE* lf = SSP_rej_log_file())
+        fprintf(lf, "[NON-ACTIVE-FACE] collapse=#%d  e=(%d,%d)  s=%d  d=%d  face=%d  sheet=%d\n",
+                SSP_rej_get_collapse_num(), E(e,0), E(e,1), s, d, f, (int)faceSheetID(f));
+      return false;
+    }
+  }
+
   const bool is_seam_collapse = (active_sheets.size() > 1);
   if (is_seam_collapse)
     SEAM_LOG("[SEAM-TRY]  e=(%d,%d) vi=%d vj=%d  active_sheets=%zu\n",
@@ -1497,36 +1517,16 @@ bool SSP_collapse_edge(
     fflush(s_seam_uv_log ? s_seam_uv_log : stderr);
   }
 
-  // [NON-ACTIVE-SHEET] Real faces of d that Pass 2 will remap (d→s in gF)
-  // but that are NOT in any active sheet's one-ring.
-  // Build a minimal SheetData for each so they get decIM entries and proper
-  // UV-based BC remap in sample_tracker_update / query_coarse_to_fine.
+  // [NON-ACTIVE-SHEET] Faces of d that Pass 2 will remap (d→s in gF) but that
+  // are NOT in any active sheet's one-ring. Only infinity faces get here: a
+  // real such face rejects the collapse (after the active-sheet detection), so
+  // no per-face UV is ever needed. Recorded for diagnostics only.
   {
     const vector<int> & nV2Fd_check = (!eflip ? Nsf : Ndf);
     int nas_count = 0;
 #ifdef SSP_LSCM_LOG
     static int nas_log = 0;
 #endif
-
-    // Local helper: flat 2D embedding of a triangle (q0→origin, q1 along x).
-    auto embed_tri = [](const Vector3d& q0,
-                        const Vector3d& q1,
-                        const Vector3d& q2) -> MatrixXd {
-      MatrixXd UV(3, 2);
-      Vector3d e1 = q1 - q0;
-      double len = e1.norm();
-      if (len < 1e-12) { UV.setZero(); return UV; }
-      e1 /= len;
-      Vector3d n  = (q1 - q0).cross(q2 - q0);
-      Vector3d e2 = n.cross(e1);
-      double e2n  = e2.norm();
-      if (e2n < 1e-12) { UV.setZero(); return UV; }
-      e2 /= e2n;
-      UV.row(0) = RowVector2d(0.0, 0.0);
-      UV.row(1) = RowVector2d((q1-q0).dot(e1), (q1-q0).dot(e2));
-      UV.row(2) = RowVector2d((q2-q0).dot(e1), (q2-q0).dot(e2));
-      return UV;
-    };
 
     for (int f : nV2Fd_check) {
       if (null_face(f) || f >= numOrigFaces) continue;
@@ -1543,66 +1543,6 @@ bool SSP_collapse_edge(
       naf.p2 = V.row(F(f,2)).head<3>().transpose();
       data.non_active_faces.push_back(naf);
 
-      if (!naf.is_infinity_face) {
-        // Find which corner holds the absorbed vertex d.
-        int d_local = -1;
-        for (int c = 0; c < 3; c++)
-          if (F(f, c) == d) { d_local = c; break; }
-
-        if (d_local >= 0) {
-          // UV_pre: face with d at its original position.
-          MatrixXd UV_pre = embed_tri(naf.p0, naf.p1, naf.p2);
-
-          // UV_post: same face but d's corner moved to the collapse placement p.
-          Vector3d post_p0 = naf.p0, post_p1 = naf.p1, post_p2 = naf.p2;
-          Vector3d pp = p.head<3>();
-          if      (d_local == 0) post_p0 = pp;
-          else if (d_local == 1) post_p1 = pp;
-          else                   post_p2 = pp;
-          MatrixXd UV_post = embed_tri(post_p0, post_p1, post_p2);
-
-          SheetData sd_naf;
-          sd_naf.global_sheet_id = naf.sheet_id;
-
-          // subsetVIdx: the 3 face vertices + s appended at index 3.
-          // Index 3 (= s) is only used by the vertex-fixup loop in
-          // sample_tracker_update to patch cur_BF entries d→s.
-          sd_naf.subsetVIdx.resize(4);
-          sd_naf.subsetVIdx(0) = F(f, 0);
-          sd_naf.subsetVIdx(1) = F(f, 1);
-          sd_naf.subsetVIdx(2) = F(f, 2);
-          sd_naf.subsetVIdx(3) = s;
-
-          // Single-triangle connectivity (local indices 0,1,2).
-          sd_naf.FUV_pre.resize(1, 3);  sd_naf.FUV_pre  << 0, 1, 2;
-          sd_naf.FUV_post.resize(1, 3); sd_naf.FUV_post << 0, 1, 2;
-          sd_naf.FIdx_pre.resize(1);    sd_naf.FIdx_pre(0)  = f;
-          sd_naf.FIdx_post.resize(1);   sd_naf.FIdx_post(0) = f;
-          // UV_post = UV_pre: the face keeps its barycentrics while d's corner
-          // moves to p. Its own embedding (UV_post above) uses a different
-          // frame whenever d is corner 0 or 1, and a different shape always,
-          // so casting a UV_pre point into it lands elsewhere or outside.
-          // Keeping barycentrics is also continuous across neighbouring faces.
-          sd_naf.UV_pre  = UV_pre;
-          sd_naf.UV_post = UV_pre;
-          (void)UV_post;
-
-          // b: [local_s_idx, local_d_idx] in subsetVIdx — used by vertex fixup.
-          sd_naf.b.resize(2);
-          sd_naf.b(0) = 3;       // subsetVIdx(3) = s (survivor)
-          sd_naf.b(1) = d_local; // subsetVIdx(d_local) = d (absorbed)
-
-          // v5: 3D ring geometry (3 rows matching UV_pre/UV_post from embed_tri)
-          sd_naf.V_pre.resize(3, 3);
-          sd_naf.V_pre.row(0) = naf.p0; sd_naf.V_pre.row(1) = naf.p1; sd_naf.V_pre.row(2) = naf.p2;
-          sd_naf.V_post.resize(3, 3);
-          sd_naf.V_post.row(0) = post_p0; sd_naf.V_post.row(1) = post_p1; sd_naf.V_post.row(2) = post_p2;
-
-          data.sheets.push_back(sd_naf);
-          FIdx_combined.insert(f);
-        }
-      }
-
 #ifdef SSP_LSCM_LOG
       if (nas_log < 30) {
         nas_log++;
@@ -1617,7 +1557,7 @@ bool SSP_collapse_edge(
             "d=%d s=%d  active_sheets=[",
             decInfo.size(), f, naf.sheet_id, d, s);
           for (int sid : active_sheets) fprintf(stderr, "%d ", sid);
-          fprintf(stderr, "]  → SheetData + decIM entry added\n");
+          fprintf(stderr, "]  (unexpected: real faces reject the collapse)\n");
         }
       }
 #endif
