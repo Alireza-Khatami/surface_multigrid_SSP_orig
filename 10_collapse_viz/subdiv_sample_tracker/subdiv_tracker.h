@@ -24,13 +24,14 @@
 // it stops changing (relax = true; subdiv_relax.h) and seed every vertex on its
 // fine face. Call once after init_ssp() and load_matstruct(). Throws on invalid
 // input or if the relaxation does not converge.
-// method: "newton" (default; runs until one relaxation step moves nothing) or
-// "solve_project" (experiment: one 3D solve of L x = 0, then projection).
+// method: "solve_project" (default: one 3D solve of L x = 0 per pass, then
+// projection, with adaptive seam anchors) or "newton" (runs until one
+// relaxation step moves nothing; much slower).
 // solve_project only: curveAnchors > 0 fixes that many vertices per curve group;
 // otherwise curveAnchorTol > 0 places anchors adaptively (Douglas-Peucker, x diag).
 void subdiv_tracker_init(int64_t nTarget, const MatStruct * ms, bool relax = true,
-                         const std::string & method = "newton", int curveAnchors = 0,
-                         double curveAnchorTol = 1e-3);
+                         const std::string & method = "solve_project", int curveAnchors = 0,
+                         double curveAnchorTol = 3e-3);
 
 bool subdiv_tracker_enabled();
 

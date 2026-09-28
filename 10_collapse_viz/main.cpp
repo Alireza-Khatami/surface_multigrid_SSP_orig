@@ -575,9 +575,9 @@ int main(int argc, char * argv[])
     int         trackFaceFlip     = -1;  // --track_face_flip <idx>
     long long   nSubdivSamples   = -1;   // --n_subdiv_samples N; -1 = subdivided-mesh tracker off
     bool        subdivRelax      = true; // --no_subdiv_relax: keep the exact midpoint positions
-    std::string subdivRelaxMethod = "newton";  // --subdiv_relax_method newton|solve_project
+    std::string subdivRelaxMethod = "solve_project";  // --subdiv_relax_method solve_project|newton
     int         subdivCurveAnchors = 0;        // --subdiv_relax_curve_anchors N (solve_project only; fixed count)
-    double      subdivAnchorTol   = 1e-3;      // --subdiv_relax_anchor_tol t (solve_project only; adaptive)
+    double      subdivAnchorTol   = 3e-3;      // --subdiv_relax_anchor_tol t (solve_project only; adaptive)
 
 
     //usage
@@ -589,9 +589,10 @@ int main(int argc, char * argv[])
     // [--matstruct_path PATH]  .ma_struct file: struct IDs (collapse gate, subdivided-vertex struct sets)
     // [--no_subdiv_relax]      skip the structure-aware relaxation of the subdivided vertices
     //                          (md_files/subdiv_relax_plan.md); output then matches the plain subdivision
-    // [--subdiv_relax_method M] newton (default) | solve_project (experiment: one 3D solve of
-    //                          L x = 0, then projection; see subdiv_relax_solve_project.cpp)
-    // [--subdiv_relax_anchor_tol t]  default 1e-3: solve_project only, adaptive anchors: a seam
+    // [--subdiv_relax_method M] solve_project (default: one 3D solve of L x = 0 per pass, then
+    //                          projection; subdiv_relax_solve_project.cpp) | newton (exact resting
+    //                          state, much slower; subdiv_relax.cpp). See md_files/subdiv_tracker_cli.md
+    // [--subdiv_relax_anchor_tol t]  default 3e-3: solve_project only, adaptive anchors: a seam
     //                          vertex is fixed where the seam leaves the chord between anchors by
     //                          more than t x bbox diagonal (Douglas-Peucker)
     // [--subdiv_relax_curve_anchors N]  solve_project only, overrides the adaptive anchors with
