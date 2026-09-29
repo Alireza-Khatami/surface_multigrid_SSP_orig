@@ -186,6 +186,18 @@ void simp_viz_tracker_init(const MatStruct* ms, int n_initial)
 #endif
 }
 
+const std::unordered_set<int>& simp_viz_tracker_ancestors(int gv)
+{
+    static const std::unordered_set<int> kEmpty;
+    return (gv >= 0 && gv < (int)gAncestors.size()) ? gAncestors[gv] : kEmpty;
+}
+
+const std::set<int>& simp_viz_tracker_struct_ids(int gv)
+{
+    static const std::set<int> kEmpty;
+    return (gv >= 0 && gv < (int)gStructIds.size()) ? gStructIds[gv] : kEmpty;
+}
+
 void simp_viz_tracker_on_collapse(int s, int d)
 {
     int needed = std::max(s, d) + 1;

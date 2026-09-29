@@ -59,6 +59,7 @@
 #endif
 #include "coarse_fine_viz.h"
 #include "coarse_subdiv_c2f.h"
+#include "coarse_subdiv_relax.h"
 
 #include "load_matstruct.h"
 #include "subdiv_sample_tracker/subdiv_tracker.h"
@@ -361,10 +362,18 @@ static void save_simplified_mesh(const CoarseMeshCompaction & cmc, const std::st
 //   subdiv_coarse_at_fine_pos_*.obj   those tracked samples replaced by their fine positions
 //   coarse_subdiv_*.obj               the simplified mesh subdivided (build_subdiv_mesh)
 //   coarse_subdiv_at_fine_pos_*.obj   its vertices mapped to fine with query_coarse_to_fine
+//   coarse_subdiv_at_fine_pos_relaxed_solve_project_*.obj
+//                                     those vertices relaxed on the fine MAT (coarse_subdiv_relax)
 static long long gSubdivObjMaxVerts = 2000000;
 // --n_coarse_subdiv_samples N: subdivide the simplified mesh to >= N vertices and map
 // them to fine (default: --n_subdiv_samples; -1 = off)
 static long long gCoarseSubdivSamples = -1;
+// --no_coarse_subdiv_relax: skip relaxing the subdivided coarse mesh on the fine MAT
+static bool   gCoarseSubdivRelax = true;
+static bool   gStructGateOn = false;         // --mat_struct_check (the relaxation needs it)
+static double gRelaxAnchorTol = 3e-3;        // --subdiv_relax_anchor_tol
+static std::string gCoarseSubdivRelaxMethod = "newton";  // --coarse_subdiv_relax_method newton|solve_project
+static long long gCoarseSubdivRelaxMaxIter = -1;         // --coarse_subdiv_relax_max_iter N (-1: until converged)
 
 static bool export_final_outputs(const std::string & out_dir, const std::string & stem)
 {
@@ -391,9 +400,18 @@ static bool export_final_outputs(const std::string & out_dir, const std::string 
     subdiv_tracker_save(lookup, out("subdiv_", ".sdt"));
     subdiv_tracker_export_deformed_obj(out("subdiv_fine_at_coarse_pos_" + subdiv_tracker_relax_tag(), ".obj"), gSubdivObjMaxVerts);
     subdiv_tracker_export_coarse_at_fine_obj(out("subdiv_coarse_at_fine_pos_" + subdiv_tracker_relax_tag(), ".obj"), gSubdivObjMaxVerts);
-    if (gCoarseSubdivSamples >= 0)
-        coarse_subdiv_c2f_export(cmc, gCoarseSubdivSamples, gSubdivObjMaxVerts,
-                                 out("coarse_subdiv_", ".obj"), out("coarse_subdiv_at_fine_pos_", ".obj"));
+    if (gCoarseSubdivSamples >= 0) {
+        const CoarseSubdivC2F csub = coarse_subdiv_c2f_build(cmc, gCoarseSubdivSamples);
+        coarse_subdiv_c2f_write(csub, gSubdivObjMaxVerts,
+                                out("coarse_subdiv_", ".obj"), out("coarse_subdiv_at_fine_pos_", ".obj"));
+        if (gCoarseSubdivRelax && (!gHaveMatStruct || !gStructGateOn))
+            fprintf(stderr, "[coarse_subdiv_relax] skipped: needs --matstruct_path and --mat_struct_check "
+                            "(struct IDs of the coarse vertices)\n");
+        else if (gCoarseSubdivRelax)
+            coarse_subdiv_relax_export(cmc, csub, gMatStruct, gCoarseSubdivRelaxMethod, gRelaxAnchorTol,
+                                       gCoarseSubdivRelaxMaxIter, gSubdivObjMaxVerts,
+                                       out("coarse_subdiv_at_fine_pos_relaxed_" + gCoarseSubdivRelaxMethod + "_", ".obj"));
+    }
     simp_viz_tracker_write_json(cmc, json);
 
     // Re-read the files and cross-check that they agree on the vertex ordering.
@@ -616,6 +634,9 @@ int main(int argc, char * argv[])
     // [--n_coarse_subdiv_samples N]  default: --n_subdiv_samples. After decimation, subdivide the
     //                          simplified mesh until it has >= N vertices, map every vertex to the fine
     //                          mesh (query_coarse_to_fine), write coarse_subdiv_[at_fine_pos_]*.obj
+    // [--no_coarse_subdiv_relax]  skip relaxing those vertices on the fine MAT (on by default; needs
+    //                          --matstruct_path and --mat_struct_check); relaxed result:
+    //                          coarse_subdiv_at_fine_pos_relaxed_solve_project_*.obj
     // [--subdiv_obj_max_verts N]  default: 2000000 — write subdiv_fine_*.obj (incl. subdiv_fine_at_coarse_pos_*.obj)
     //                             only up to N vertices
     // [--track_face_flip F]    face-flip debug tracker on gFO face F (needs --n_subdiv_samples)
@@ -638,6 +659,8 @@ int main(int argc, char * argv[])
             subdivRelax = true;
         } else if (a == "--no_subdiv_relax") {
             subdivRelax = false;
+        } else if (a == "--no_coarse_subdiv_relax") {
+            gCoarseSubdivRelax = false;
         } else if (i + 1 < argc) {
             if      (a == "--mesh_path")        meshPath          = argv[i+1];
             else if (a == "--target_faces")     targetFaces       = std::stoi(argv[i+1]);
@@ -649,6 +672,8 @@ int main(int argc, char * argv[])
             else if (a == "--subdiv_obj_max_verts") gSubdivObjMaxVerts = std::stoll(argv[i+1]);
             else if (a == "--n_coarse_subdiv_samples") gCoarseSubdivSamples = std::stoll(argv[i+1]);
             else if (a == "--subdiv_relax_method") subdivRelaxMethod = argv[i+1];
+            else if (a == "--coarse_subdiv_relax_method") gCoarseSubdivRelaxMethod = argv[i+1];
+            else if (a == "--coarse_subdiv_relax_max_iter") gCoarseSubdivRelaxMaxIter = std::stoll(argv[i+1]);
             else if (a == "--subdiv_relax_curve_anchors") subdivCurveAnchors = std::stoi(argv[i+1]);
             else if (a == "--subdiv_relax_anchor_tol") subdivAnchorTol = std::stod(argv[i+1]);
             else { continue; }
@@ -858,6 +883,8 @@ int main(int argc, char * argv[])
     }
 
     if (gCoarseSubdivSamples < 0) gCoarseSubdivSamples = nSubdivSamples;
+    gStructGateOn   = matStructCheck;
+    gRelaxAnchorTol = subdivAnchorTol;
     if (nSubdivSamples >= 0) {
         try {
             subdiv_tracker_init(nSubdivSamples, gHaveMatStruct ? &gMatStruct : nullptr, subdivRelax,

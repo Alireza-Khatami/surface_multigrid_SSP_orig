@@ -1,7 +1,9 @@
 #pragma once
 #include "../coarse_mesh_compaction.h"
 #include "../load_matstruct.h"
+#include <set>
 #include <string>
+#include <unordered_set>
 
 // Initialize tracking: call once after init_ssp() and after load_matstruct().
 // ms: the parsed .ma_struct (nullptr = none) — used here to derive per-vertex
@@ -15,6 +17,11 @@ void simp_viz_tracker_on_collapse(int s, int d);
 
 // Write *_simp_visualize_info.json to `path`; vertices[i] is cmc vertex i.
 void simp_viz_tracker_write_json(const CoarseMeshCompaction& cmc, const std::string& path);
+
+// What the json writes for gV vertex gv: the original (fine) vertices merged
+// into it, and its struct IDs. Valid for any gV id (empty sets if never seen).
+const std::unordered_set<int>& simp_viz_tracker_ancestors(int gv);
+const std::set<int>&           simp_viz_tracker_struct_ids(int gv);
 
 #ifdef C2F_VIZ_DIAGNOSTIC
 // Register / refresh the "simp_viz_verts" point cloud (colored by topo type).

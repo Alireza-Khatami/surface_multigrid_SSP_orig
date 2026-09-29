@@ -68,6 +68,9 @@ slower.
 | `--n_subdiv_samples N` | off (no samples) | 50000-200000 | Subdivide until there are at least N samples. Without this flag, no samples are created and every sampling flag below is ignored. |
 | `--subdiv_obj_max_verts N` | 2000000 | default | OBJ/PLY exports of the subdivided mesh are skipped above N vertices. The `.sdt` is always written. |
 | `--n_coarse_subdiv_samples N` | `--n_subdiv_samples` | default | After decimation, subdivide the simplified mesh (same midpoint subdivision) until it has at least N vertices and map every vertex to the fine MAT with `query_coarse_to_fine`. Writes `coarse_subdiv_*.obj`. |
+| `--no_coarse_subdiv_relax` | relaxation on | not given | Skip relaxing the subdivided coarse mesh on the fine MAT (`coarse_subdiv_relax.cpp`). The relaxation needs `--matstruct_path` and `--mat_struct_check`; without them it is skipped with a message. |
+| `--coarse_subdiv_relax_method M` | `newton` | default | `newton` or `solve_project`. See `md_files/coarse_subdiv_relax_results.md`. |
+| `--coarse_subdiv_relax_max_iter N` | -1 (until converged) | not given | Newton iterations per class. Fewer iterations fold more (results doc). |
 
 Each level multiplies the sample count by about 4, so N only selects the
 level. Levels on ABC 00040057 (1,506 MAT vertices):
@@ -159,6 +162,7 @@ or `solve_project`.
 | `simplified_<stem>.obj` | always | The simplified coarse mesh. The `.sdt` coarse face indices refer to its face order. |
 | `coarse_subdiv_<stem>.obj` | with samples | The simplified mesh subdivided (midpoint 1->4) to at least `--n_coarse_subdiv_samples` vertices. Its first vertices are the `simplified_<stem>.obj` vertices, in order. |
 | `coarse_subdiv_at_fine_pos_<stem>.obj` | with samples | **Coarse -> fine.** Same vertices and faces as `coarse_subdiv_<stem>.obj`; each vertex at its fine-MAT correspondence from `query_coarse_to_fine`. |
+| `coarse_subdiv_at_fine_pos_relaxed_<method>_<stem>.obj` | with samples, `.ma_struct` and gate | Same vertices and faces, relaxed on the fine MAT: each vertex projected onto its own fine structure. **Currently folds** (see `md_files/coarse_subdiv_relax_results.md`). |
 
 Naming: `<topology>_at_<positions>`. All the `subdiv_fine_*` / `subdiv_*_at_*` OBJs of
 one run share the same vertex order and faces, so they can be compared vertex by

@@ -1,5 +1,5 @@
 #include "coarse_subdiv_c2f.h"
-#include "subdiv_sample_tracker/subdiv_mesh.h"
+#include "subdiv_sample_tracker/subdiv_relax.h"  // subdiv_long_path
 
 #include <query_coarse_to_fine.h>
 #include <single_collapse_data.h>
@@ -23,16 +23,17 @@ extern std::vector<single_collapse_data> gDecInfo;
 
 static void write_obj(const std::string & path, const MatrixXd & V, const MatrixXi & F, const char * what)
 {
-    if (!igl::writeOBJ(path, V, F))
+    if (!igl::writeOBJ(subdiv_long_path(path), V, F))
         fprintf(stderr, "[coarse_subdiv] writeOBJ failed: %s\n", path.c_str());
     else
         fprintf(stderr, "[coarse_subdiv] %s -> %s\n", what, path.c_str());
 }
 
-void coarse_subdiv_c2f_export(const CoarseMeshCompaction & cmc, int64_t nTarget, int64_t maxObjVerts,
-                              const std::string & coarseObjPath, const std::string & fineObjPath)
+CoarseSubdivC2F coarse_subdiv_c2f_build(const CoarseMeshCompaction & cmc, int64_t nTarget)
 {
-    const SubdivMesh S = build_subdiv_mesh(cmc.Vbase, cmc.Fout, nTarget);
+    CoarseSubdivC2F C;
+    C.S = build_subdiv_mesh(cmc.Vbase, cmc.Fout, nTarget);
+    const SubdivMesh & S = C.S;
     const int n    = (int)S.V.rows();
     const int nDec = (int)gDecInfo.size();
 
@@ -99,15 +100,20 @@ void coarse_subdiv_c2f_export(const CoarseMeshCompaction & cmc, int64_t nTarget,
     query_coarse_to_fine(gDecInfo, IM, gDecIM, IMF, gFaceSheetID, BC, BF, FIdx);
 
     // Fine positions; vertices not queried keep their coarse position.
-    MatrixXd P = S.V;
+    C.P = S.V;
+    C.fineFace.assign(n, -1);
+    C.fineBary = MatrixXd::Zero(n, 3);
     int nOffFace = 0;  // query ended with corners that are not its fine face's corners
     for (int q = 0; q < nq; ++q) {
-        P.row(qVert[q]) = BC(q, 0) * gVO.row(BF(q, 0)).leftCols(3)
-                        + BC(q, 1) * gVO.row(BF(q, 1)).leftCols(3)
-                        + BC(q, 2) * gVO.row(BF(q, 2)).leftCols(3);
+        const int i = qVert[q];
+        C.P.row(i) = BC(q, 0) * gVO.row(BF(q, 0)).leftCols(3)
+                   + BC(q, 1) * gVO.row(BF(q, 1)).leftCols(3)
+                   + BC(q, 2) * gVO.row(BF(q, 2)).leftCols(3);
         const bool onFace = FIdx(q) >= 0 && FIdx(q) < gFO.rows() &&
                             BF(q, 0) == gFO(FIdx(q), 0) && BF(q, 1) == gFO(FIdx(q), 1) && BF(q, 2) == gFO(FIdx(q), 2);
-        nOffFace += !onFace;
+        if (!onFace) { ++nOffFace; continue; }
+        C.fineFace[i] = FIdx(q);
+        C.fineBary.row(i) = BC.row(q);
     }
 
     fprintf(stderr,
@@ -115,11 +121,17 @@ void coarse_subdiv_c2f_export(const CoarseMeshCompaction & cmc, int64_t nTarget,
         "%d mapped to fine, %d on no coarse face, %d unmatched, %d ended off their fine face\n",
         S.nLevels, (long long)cmc.Vbase.rows(), n, (long long)cmc.Fout.rows(), (long long)S.F.rows(),
         (long long)nTarget, nq, n - nq - nUnmatched, nUnmatched, nOffFace);
+    return C;
+}
 
-    if ((int64_t)n > maxObjVerts) {
-        fprintf(stderr, "[coarse_subdiv] skipping OBJs: %d vertices > %lld\n", n, (long long)maxObjVerts);
+void coarse_subdiv_c2f_write(const CoarseSubdivC2F & C, int64_t maxObjVerts,
+                             const std::string & coarseObjPath, const std::string & fineObjPath)
+{
+    const int64_t n = C.S.V.rows();
+    if (n > maxObjVerts) {
+        fprintf(stderr, "[coarse_subdiv] skipping OBJs: %lld vertices > %lld\n", (long long)n, (long long)maxObjVerts);
         return;
     }
-    write_obj(coarseObjPath, S.V, S.F, "subdivided coarse mesh");
-    write_obj(fineObjPath,   P,   S.F, "subdivided coarse mesh at fine correspondences");
+    write_obj(coarseObjPath, C.S.V, C.S.F, "subdivided coarse mesh");
+    write_obj(fineObjPath,   C.P,   C.S.F, "subdivided coarse mesh at fine correspondences");
 }
