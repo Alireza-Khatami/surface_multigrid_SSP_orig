@@ -43,6 +43,7 @@ still missing is the even spacing.
 | explicit + no new folds, lambda 1.0 (1,000 it.) | `lam1` | 2,568 | 37 | 1.027 |
 | explicit + no new folds, cotan weights (5,000 it.) | `cotan_nofold` | 2,568 | 34 | 1.135 |
 | explicit + no new folds, mean-value weights (5,000 it.) | `mv_nofold` | 2,906 | 35 | 1.080 |
+| explicit + no new folds, directed graph (5,000 it.) | `nofold_dir` | 2,487 | 109 | 0.994 |
 | explicit, iteration 10 | `explicit` (`_it10`) | 3,722 | 47 | 1.062 |
 | explicit, iteration 100 | `explicit` (`_it100`) | 4,357 | 655 | 1.020 |
 | explicit, final (20,000) | `explicit` | 11,347 | 4,764 | 0.867 |
@@ -95,6 +96,8 @@ still missing is the even spacing.
 12. **Curves should feel the sheets.** With the directed graph (curves ignore
     sheets) the explicit relaxation ends close to Newton (14,333 folded, 9,036
     degenerate), worse than the symmetric graph in every band from the seams.
+    With the no-new-folds rule the gap shrinks (2,487 vs 2,383 folded) but stays,
+    all of it at the seams (109 vs 33 degenerate).
 
 ### Recommended next step
 
@@ -271,6 +274,20 @@ Directed run over time (`snapshot_table.py`):
   neighbours; with the directed graph the sheets absorb the mismatch next to the
   seams. Directed is worse in every band from the seams (table below), at the
   seam itself 4.77% / 4.48% folded / degenerate vs 4.41% / 3.59%.
+With the no-new-folds rule (lambda 0.5, 5,000 iterations; `nofold_dir` vs
+`nofold`):
+
+| run | folder | folded | removed | new | degenerate | edge CV | median smallest angle |
+|---|---|---|---|---|---|---|---|
+| seed | any run | 5,168 | - | - | 0 | 1.084 | 14.7 |
+| symmetric graph | `nofold` | **2,383** | 2,799 | 14 | **33** | 1.014 | **17.5** |
+| directed graph | `nofold_dir` | 2,487 | 2,733 | 52 | 109 | **0.994** | 14.9 |
+
+- The gap is much smaller than without the rule, and it sits entirely at the
+  seams (ring 0: 1.07% / 0.44% vs 0.69% / 0.13%); from ring 1 on the rates match.
+- The "new" folds (52, 14) are the scripts' recount (majority orientation per
+  mesh); the solver's own count, with the seed's majority, only decreases
+  (5,168 -> 2,435 and -> 2,369).
 - **Keep the symmetric graph.**
 
 ### Newton stopped early
@@ -305,6 +322,7 @@ seam/boundary/junction vertex (`test_scripts/seam_distance_folds.py`):
 | explicit | `explicit` | 4.41% / 3.59% | 3.88% / 2.06% | 3.55% / 1.82% | 2.90% / 0.98% | 1.67% / 0.32% |
 | explicit, directed graph | `explicit_dir` | 4.77% / 4.48% | 4.60% / 3.47% | 4.19% / 3.32% | 3.79% / 2.27% | 2.38% / 0.85% |
 | **explicit + no new folds** | `nofold` | 0.69% / 0.13% | 0.75% / 0.00% | 0.67% / 0.00% | 0.63% / 0.00% | 0.43% / 0.00% |
+| explicit + no new folds, directed graph | `nofold_dir` | 1.07% / 0.44% | 0.77% / 0.01% | 0.67% / 0.00% | 0.64% / 0.00% | 0.43% / 0.00% |
 | explicit + no new folds, mean-value | `mv_nofold` | 1.00% / 0.15% | 0.88% / 0.00% | 0.77% / 0.00% | 0.74% / 0.00% | 0.55% / 0.00% |
 | Newton, per coarse face | `coarse_subdiv_relax_newton_perface` | 3.12% / 1.49% | 3.00% / 0.56% | 3.39% / 0.33% | 4.59% / 0.13% | 5.71% / 0.07% |
 | solve_project, per coarse face | `coarse_subdiv_relax_sp_perface` | 5.02% / 4.18% | 4.90% / 3.28% | 4.78% / 2.42% | 5.31% / 1.11% | 5.98% / 0.29% |
@@ -404,7 +422,6 @@ The options are collected in `CoarseSubdivRelaxConfig` (`coarse_subdiv_relax.h`)
 - **No-new-folds with Newton**: implemented, no run finished (with the explicit
   method it is done, see section 2).
 - **Joint Newton pass**: implemented, the run was stopped before it finished.
-- **Explicit + no new folds with the directed graph**: run stopped (`nofold_dir`).
 - **Regression check** of the default Newton path after the projector
   consolidation (expected byte-identical to `base_newton`): not run yet. Newton
   with local projection on reproduces the same quality, which suggests the shared
@@ -437,7 +454,7 @@ also writes `<folder>/experiment_config.txt` with the parameters of the run.
 | `lam1`, `lam025`, `lam01` | explicit + no new folds, lambda 1.0 / 0.25 / 0.1 | done |
 | `cotan_nofold` | explicit + no new folds, cotangent weights | done |
 | `mv_nofold` | explicit + no new folds, mean-value weights | done |
-| `nofold_dir` | explicit + no new folds, directed graph | **stopped, incomplete: not results** |
+| `nofold_dir` | explicit + no new folds, directed graph, lambda 0.5, 5,000 iterations (has `experiment_config.txt`) | done |
 | `nf_newton`, `nf_newton_pf` | Newton with no-new-folds (+ per face) | **stopped, incomplete: not results** |
 | `joint_newton` | Newton, joint pass | **stopped, incomplete: not results** |
 | `projector_extract_{before,after}` | projector refactor check (2026-09-28) | done |
