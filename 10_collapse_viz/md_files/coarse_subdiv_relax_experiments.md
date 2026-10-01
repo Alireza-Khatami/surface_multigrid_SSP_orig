@@ -6,6 +6,66 @@ coarse mesh 261 vertices / 400 faces, subdivided to 207,000 vertices / 409,600
 faces (1024 per coarse face). Runs in `output/relaxation_experiments/<name>/`,
 analysis scripts in `test_scripts/` (see its README).
 
+## Summary: best method so far
+
+**The explicit relaxation (small Laplacian steps on everything at once) is the
+best, but no method fully works yet.**
+
+- **Stopped early (~10 iterations),** it is the only setting better than the
+  seed: 28% fewer folds (3,722 vs 5,168) and almost no degenerate triangles
+  (47). It barely evens out the spacing, though (edge CV 1.084 -> 1.062).
+- **Run to the end,** it beats every other method (11,347 folds, 4,764
+  degenerate), but is still worse than the seed.
+- **Newton evens out the spacing most** (edge CV 0.837), but leaves 15,381 folds
+  and 10,606 degenerate triangles.
+
+No method yet both evens out the spacing and keeps folds below the seed.
+
+| method | folded | degenerate | edge CV |
+|---|---|---|---|
+| seed (no relaxation) | 5,168 | 0 | 1.084 |
+| **explicit, iteration 10** | **3,722** | **47** | 1.062 |
+| explicit, iteration 100 | 4,357 | 655 | 1.020 |
+| explicit, final (20,000) | 11,347 | 4,764 | 0.867 |
+| Newton | 15,381 | 10,606 | **0.837** |
+| Newton, local projection | 15,353 | 10,636 | 0.837 |
+| Newton, per coarse face | 18,512 | 1,105 | 1.080 |
+| solve_project, per coarse face | 22,104 | 6,030 | 1.085 |
+| solve_project, two passes | 55,738 | 71,431 | 1.020 |
+| solve_project, joint solve | 64,985 | 85,090 | 1.021 |
+
+### What we learned
+
+1. **"Flipped vs seed" was the wrong measure.** The seed already has 5,168
+   folds from the noisy coarse -> fine mapping, and removing them is the goal.
+   Every method removes 55-80% of them, but most create many more new ones.
+2. **Folds come from the uniform Laplacian's resting state, not the
+   projection.** At rest, the Laplacian evens out vertex *counts*. Every coarse
+   face has 1,024 triangles while their areas differ ~2,000x, so large faces get
+   squeezed. In the explicit run, the early steps remove noise and the late
+   steps create folds.
+3. **The projection is correct.** Its BVHs (over the fine MAT) match brute force
+   exactly; the local projection gave identical quality; projecting onto a
+   level-4 subdivided fine mesh would give the same points.
+4. **Damage is densest next to seams.** Relaxing everything at once in small
+   steps reduces it everywhere. Solving everything at once in one linear system
+   makes it worse at the seams, because the sheets then lean on the seam
+   positions before projection.
+5. **One-shot linear solves don't suit this case.** solve_project places sheet
+   vertices off the curved MAT and then piles them up when projecting back.
+6. **Per-coarse-face relaxation** cuts degenerate triangles but doesn't reduce
+   folds, and it barely evens out the spacing.
+
+### Recommended next step
+
+Run the **explicit relaxation with the no-new-folds rule**
+(`--coarse_subdiv_relax_method explicit --coarse_subdiv_relax_no_new_folds`),
+implemented but never run. Folds can then only go down: it keeps the early
+unfolding (<= 5,168) and blocks the later squeezing. Then see how far it evens
+out the spacing. If spacing stays poor, the next lever is the Laplacian weights
+(area or cotangent weights instead of uniform), which goes after the root cause
+in point 2.
+
 ## 1. How folds are measured now
 
 The goal of the relaxation is to smooth the noise of the coarse -> fine mapping.
