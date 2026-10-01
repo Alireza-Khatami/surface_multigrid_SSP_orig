@@ -27,6 +27,7 @@ No method yet both evens out the spacing and keeps folds below the seed.
 | **explicit, iteration 10** | **3,722** | **47** | 1.062 |
 | explicit, iteration 100 | 4,357 | 655 | 1.020 |
 | explicit, final (20,000) | 11,347 | 4,764 | 0.867 |
+| Newton, 20 iterations per class | 14,663 | 9,782 | 0.839 |
 | Newton | 15,381 | 10,606 | **0.837** |
 | Newton, local projection | 15,353 | 10,636 | 0.837 |
 | Newton, per coarse face | 18,512 | 1,105 | 1.080 |
@@ -120,6 +121,24 @@ Laplacian, which evens out vertex **counts**; that squeezes the large coarse
 faces (areas differ ~2000x, all have 1024 triangles) and folds them. The early
 improvement is not kept at convergence.
 
+### Newton stopped early
+
+The Newton runs capped at N iterations per class
+(`--coarse_subdiv_relax_max_iter N`, from `coarse_subdiv_relax_results.md`),
+re-measured with the fold measure of section 1:
+
+| Newton iterations per class | folded | removed | kept | new | degenerate | edge CV |
+|---|---|---|---|---|---|---|
+| 1 | 59,518 | 2,604 | 2,564 | 56,954 | 75,624 | 0.944 |
+| 2 | 48,009 | 2,943 | 2,225 | 45,784 | 50,490 | 0.901 |
+| 5 | 21,629 | 3,438 | 1,730 | 19,899 | 20,610 | 0.858 |
+| **20** | **14,663** | 3,845 | 1,323 | 13,340 | **9,782** | 0.839 |
+| until converged | 15,381 | 3,874 | 1,294 | 14,087 | 10,606 | 0.837 |
+
+Unlike the explicit method, Newton gets better with more iterations: its first
+iteration is a full linear solve with a large step and folds the most. 20
+iterations are slightly better than convergence, but never close to the seed.
+
 ### Distance from the seams
 
 Folded / degenerate rate by ring distance of a triangle from the nearest
@@ -130,11 +149,26 @@ seam/boundary/junction vertex (`test_scripts/seam_distance_folds.py`):
 | triangles | 23,688 | 47,424 | 71,256 | 119,080 | 148,152 |
 | seed | 1.29% / 0% | 1.32% / 0% | 1.28% / 0% | 1.29% / 0% | 1.21% / 0% |
 | Newton | 4.66% / 4.81% | 4.82% / 3.70% | 4.44% / 3.48% | 4.10% / 2.71% | 2.66% / 1.35% |
+| Newton, local projection | 4.66% / 4.81% | 4.79% / 3.71% | 4.44% / 3.50% | 4.11% / 2.71% | 2.64% / 1.36% |
 | explicit | 4.41% / 3.59% | 3.88% / 2.06% | 3.55% / 1.82% | 2.90% / 0.98% | 1.67% / 0.32% |
+| Newton, per coarse face | 3.12% / 1.49% | 3.00% / 0.56% | 3.39% / 0.33% | 4.59% / 0.13% | 5.71% / 0.07% |
+| solve_project, per coarse face | 5.02% / 4.18% | 4.90% / 3.28% | 4.78% / 2.42% | 5.31% / 1.11% | 5.98% / 0.29% |
 
 The relaxation's damage is densest at the seams (Newton: 1.7x the folds and
 3.6x the degenerate triangles of the far interior), but not confined to them.
 Relaxing everything at once lowers it in every band, least at the seam itself.
+Per coarse face reverses the pattern: the seams (on coarse edges, held fixed)
+fold least, and the folds move into the interiors of the coarse faces, which are
+still squeezed toward even vertex counts within each face.
+
+### Reproducibility
+
+The relaxed OBJs of `coarse_subdiv_relax_newton` (2026-09-28),
+`coarse_subdiv_relax_newton_graphcheck` and `base_newton` (2026-09-30) are
+byte-identical, so the graph PLY export, the BVH check, `holdFixed` and the
+fold-rule code (switched off) do not change the default Newton result.
+`base_newton` was run before the projector consolidation, so it does not cover
+that change (section 5).
 
 ### solve_project: one joint solve instead of two passes
 
@@ -222,3 +256,29 @@ The options are collected in `CoarseSubdivRelaxConfig` (`coarse_subdiv_relax.h`)
 - Long run-folder names exceed the Windows 260-character path limit and make the
   end-of-run `[SANITY]` check fail to read the JSON (it does not use the
   long-path form); keep run names short.
+
+## 6. Run index
+
+Coarse-subdivision runs in `output/relaxation_experiments/` (each folder has a
+`<name>.log` next to it):
+
+| folder | what | status |
+|---|---|---|
+| `coarse_subdiv_relax` | solve_project, two passes (2026-09-28) | done |
+| `coarse_subdiv_relax_newton` | Newton (2026-09-28) | done |
+| `coarse_subdiv_relax_newton_it{1,2,5,20}` | Newton capped at N iterations per class | done |
+| `coarse_subdiv_relax_newton_graphcheck` | Newton rerun with graph PLY export + BVH check | done, identical to `coarse_subdiv_relax_newton` |
+| `coarse_subdiv_relax_newton_perface` | Newton, per coarse face | done (end-of-run `[SANITY]` failed: long path) |
+| `coarse_subdiv_relax_sp_perface` | solve_project, per coarse face | done |
+| `base_newton` | Newton, with the projection jump counter | done, identical to `coarse_subdiv_relax_newton` |
+| `local_newton` | Newton, local projection | done |
+| `explicit` | explicit, 20,000 iterations, with `_it<N>` snapshots | done (not converged) |
+| `sp` | solve_project, two passes (rerun) | done |
+| `sp_joint` | solve_project, joint solve | done |
+| `nf_newton`, `nf_newton_pf` | Newton with no-new-folds (+ per face) | **stopped, incomplete: not results** |
+| `joint_newton` | Newton, joint pass | **stopped, incomplete: not results** |
+| `projector_extract_{before,after}` | projector refactor check (2026-09-28) | done |
+
+The other folders (`l3_*`, `l4_*`, `m563_*`, `relax_*`, `c2f_*`, ...) belong to
+the fine-subdivision relaxation and the coarse -> fine query work, documented in
+their own md files (e.g. `subdiv_relax_solve_project_experiments.md`).
