@@ -12,6 +12,7 @@ Run them from this folder; a `<run_dir>` is one run's `--output_dir`, e.g.
 | `seam_distance_folds.py` | folded / degenerate rates by ring distance from the nearest seam/boundary vertex |
 | `orientation_vs_coarse.py` | why "flipped vs seed" and "flipped vs coarse normal" mislead (whole coarse faces oriented against the fine sheet) |
 | `snapshot_table.py` | explicit runs: folded / removed / new / degenerate / edge CV at every `_it<N>` snapshot |
+| `step_size_table.py` | explicit runs with different lambda: folded / degenerate / energy at equal lambda x iterations, from the logs |
 | `check_graph_ply.py` | validates the `laplacian_graph/*.ply` files of a run |
 | `relax_metrics_common.py` | shared loaders and metrics |
 

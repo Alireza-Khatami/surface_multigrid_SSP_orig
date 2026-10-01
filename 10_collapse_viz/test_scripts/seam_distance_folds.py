@@ -27,7 +27,14 @@ for kind in ('curves', 'junctions'):
     p = find(runs[0], f'laplacian_graph/{kind}_*.ply')
     if p is None:
         sys.exit(f'{runs[0]}: no laplacian_graph/{kind}_*.ply')
-    src |= set(read_graph_ply(p)[0]['vid'].tolist())
+    v, e = read_graph_ply(p)
+    if kind == 'junctions':
+        src |= set(v['vid'].tolist())
+    else:
+        # Only edges with a seam/boundary id: in the symmetric graph (explicit and
+        # joint runs) curve rows also hold their sheet neighbours, id -1.
+        keep = e['id'] >= 0
+        src |= set(v['vid'][e['ab'][keep].ravel()].tolist())
 
 adj = [[] for _ in range(nV)]
 for a, b, c in F:
