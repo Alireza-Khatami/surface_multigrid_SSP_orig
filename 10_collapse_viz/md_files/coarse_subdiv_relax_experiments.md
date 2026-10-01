@@ -89,6 +89,9 @@ weights aim for). For the second, try **mean-value weights** (always positive, n
 clamping, reproduce the coarse layout on flat regions) as a third value of
 `--coarse_subdiv_relax_weights`, keeping the no-new-folds rule.
 
+Theory of positive weights (mean-value, intrinsic Delaunay, ...) and of fixing
+the remaining fold-overs: `positive_weights_and_fold_repair.md`.
+
 ## 1. How folds are measured now
 
 The goal of the relaxation is to smooth the noise of the coarse -> fine mapping.
