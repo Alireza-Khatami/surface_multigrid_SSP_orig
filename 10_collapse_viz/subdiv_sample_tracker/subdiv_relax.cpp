@@ -570,6 +570,7 @@ RelaxReport subdiv_relax(SubdivMesh & M, const MatrixXd & VO, const MatrixXi & F
     RelaxReport R;
     const int64_t Vs = M.V.rows();
     if ((int64_t)G.role.size() != Vs) fail("graph / mesh size mismatch");
+    if (!opt.holdFixed.empty() && (int64_t)opt.holdFixed.size() != Vs) fail("holdFixed / mesh size mismatch");
     const double diag = (VO.leftCols(3).colwise().maxCoeff() - VO.leftCols(3).colwise().minCoeff()).norm();
     const double tolAbs = opt.tol * diag;
 
@@ -592,7 +593,8 @@ RelaxReport subdiv_relax(SubdivMesh & M, const MatrixXd & VO, const MatrixXi & F
     std::vector<uint8_t> isFree(Vs, 0);
     for (int64_t i = 0; i < Vs; ++i) {
         const bool f = G.role[i] != RELAX_JUNCTION && face[i] >= 0
-                    && G.rowOffs[i + 1] > G.rowOffs[i] && !proj.targets[setId[i]].empty();
+                    && G.rowOffs[i + 1] > G.rowOffs[i] && !proj.targets[setId[i]].empty()
+                    && (opt.holdFixed.empty() || !opt.holdFixed[i]);
         isFree[i] = f;
         if (f) ++R.nFree; else ++R.nFixed;
     }

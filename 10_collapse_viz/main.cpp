@@ -374,6 +374,7 @@ static bool   gStructGateOn = false;         // --mat_struct_check (the relaxati
 static double gRelaxAnchorTol = 3e-3;        // --subdiv_relax_anchor_tol
 static std::string gCoarseSubdivRelaxMethod = "newton";  // --coarse_subdiv_relax_method newton|solve_project
 static long long gCoarseSubdivRelaxMaxIter = -1;         // --coarse_subdiv_relax_max_iter N (-1: until converged)
+static bool gCoarseSubdivRelaxPerFace = false;           // --coarse_subdiv_relax_per_face
 
 static bool export_final_outputs(const std::string & out_dir, const std::string & stem)
 {
@@ -409,8 +410,10 @@ static bool export_final_outputs(const std::string & out_dir, const std::string 
                             "(struct IDs of the coarse vertices)\n");
         else if (gCoarseSubdivRelax)
             coarse_subdiv_relax_export(cmc, csub, gMatStruct, gCoarseSubdivRelaxMethod, gRelaxAnchorTol,
-                                       gCoarseSubdivRelaxMaxIter, gSubdivObjMaxVerts,
-                                       out("coarse_subdiv_at_fine_pos_relaxed_" + gCoarseSubdivRelaxMethod + "_", ".obj"));
+                                       gCoarseSubdivRelaxMaxIter, gCoarseSubdivRelaxPerFace, gSubdivObjMaxVerts,
+                                       out("coarse_subdiv_at_fine_pos_relaxed_" + gCoarseSubdivRelaxMethod
+                                           + (gCoarseSubdivRelaxPerFace ? "_perface" : "") + "_", ".obj"),
+                                       out_dir + "laplacian_graph", "coarse_subdiv_" + stem);
     }
     simp_viz_tracker_write_json(cmc, json);
 
@@ -636,7 +639,9 @@ int main(int argc, char * argv[])
     //                          mesh (query_coarse_to_fine), write coarse_subdiv_[at_fine_pos_]*.obj
     // [--no_coarse_subdiv_relax]  skip relaxing those vertices on the fine MAT (on by default; needs
     //                          --matstruct_path and --mat_struct_check); relaxed result:
-    //                          coarse_subdiv_at_fine_pos_relaxed_solve_project_*.obj
+    //                          coarse_subdiv_at_fine_pos_relaxed_<method>_*.obj
+    // [--coarse_subdiv_relax_per_face]  hold the vertices on coarse vertices / edges at their
+    //                          seeds and relax only each coarse face's interior (*_<method>_perface_*.obj)
     // [--subdiv_obj_max_verts N]  default: 2000000 — write subdiv_fine_*.obj (incl. subdiv_fine_at_coarse_pos_*.obj)
     //                             only up to N vertices
     // [--track_face_flip F]    face-flip debug tracker on gFO face F (needs --n_subdiv_samples)
@@ -661,6 +666,8 @@ int main(int argc, char * argv[])
             subdivRelax = false;
         } else if (a == "--no_coarse_subdiv_relax") {
             gCoarseSubdivRelax = false;
+        } else if (a == "--coarse_subdiv_relax_per_face") {
+            gCoarseSubdivRelaxPerFace = true;
         } else if (i + 1 < argc) {
             if      (a == "--mesh_path")        meshPath          = argv[i+1];
             else if (a == "--target_faces")     targetFaces       = std::stoi(argv[i+1]);

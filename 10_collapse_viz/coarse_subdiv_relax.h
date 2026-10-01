@@ -28,9 +28,14 @@
 // which keeps the coarse vertices' struct IDs exact. method: "newton" (subdiv_relax)
 // or "solve_project" (subdiv_relax_solve_project). curveAnchorTol: adaptive seam
 // anchors, solve_project only, as --subdiv_relax_anchor_tol. maxIter: newton
-// iterations per class (-1: until converged). Throws if a
-// consistency check fails.
+// iterations per class (-1: until converged). perCoarseFace: hold every vertex on
+// a coarse vertex or coarse edge at its seed, so only the interior of each coarse
+// face relaxes (no vertices shift between coarse faces). graphDir (empty: skip):
+// the relaxation graph at the seed positions as sheets_/curves_/junctions_<graphStem>.ply
+// (coloured by structure id). Also checks the projector's BVHs against brute force.
+// Throws if a consistency check fails.
 void coarse_subdiv_relax_export(const CoarseMeshCompaction & cmc, const CoarseSubdivC2F & C,
                                 const MatStruct & ms, const std::string & method, double curveAnchorTol,
-                                int64_t maxIter,
-                                int64_t maxObjVerts, const std::string & objPath);
+                                int64_t maxIter, bool perCoarseFace,
+                                int64_t maxObjVerts, const std::string & objPath,
+                                const std::string & graphDir, const std::string & graphStem);
