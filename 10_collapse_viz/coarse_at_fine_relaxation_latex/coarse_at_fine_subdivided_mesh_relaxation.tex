@@ -1,0 +1,134 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{lmodern}
+
+\hypersetup{colorlinks=true, linkcolor=blue!70!black, citecolor=green!60!black, urlcolor=blue!70!black}
+\setlist{itemsep=2pt, topsep=4pt}
+
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Fine}{\mathcal{M}_0}
+\newcommand{\Coarse}{\mathcal{M}_C}
+\newcommand{\Subdiv}{\mathcal{S}_C}
+\newcommand{\Proj}{\Pi}
+\newcommand{\x}{\mathbf{x}}
+\newcommand{\X}{\mathbf{X}}
+\newcommand{\m}{\mathbf{m}}
+\newcommand{\n}{\mathbf{n}}
+
+\title{\textbf{Relaxing the Subdivided Coarse Mesh on the Fine MAT}}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Setting}
+
+\begin{itemize}
+    \item $\Fine = (V_0, F_0)$: the fine MAT mesh. It decomposes into 0D \emph{junctions} $\mathcal{J}$, 1D \emph{curves} $\mathcal{C}$ (seams and boundaries) and 2D \emph{sheets} $\mathcal{S}$.
+    \item $\Coarse = (V_C, F_C)$: the coarse mesh obtained by decimating $\Fine$.
+    \item $\Subdiv = (V_s, F_s)$: $\Coarse$ after $L$ levels of $1 \to 4$ midpoint subdivision. Every coarse face holds $4^L$ triangles, and every subdivided vertex $v_i$ has exact barycentric coordinates $\mathbf{b}_i$ in a coarse face $f_C$.
+    \item $E_s$: the edges of $\Subdiv$; $\mathcal{N}(i)$ the mesh neighbours of $v_i$ and $\deg(i) = |\mathcal{N}(i)|$.
+\end{itemize}
+
+\textbf{Goal.} Place every vertex of $\Subdiv$ on $\Fine$ (each on its own structure) so that the result is evenly spaced and has no folded triangles.
+
+\section{Coarse-to-Fine Correspondence}
+
+During decimation, each edge collapse $k$ records a local 2D chart of its 1-ring before and after the collapse, $\mathbf{u}^{\text{pre}}_k$ and $\mathbf{u}^{\text{post}}_k$ (conformal parameterisations). A point $(f, \mathbf{b})$ on the coarse mesh is pulled back to $\Fine$ by undoing the collapses that touched its face, from the last one to the first:
+\begin{enumerate}
+    \item map the point into the post-collapse chart: $\mathbf{u} = \sum_{c} b_c \, \mathbf{u}^{\text{post}}_k(v_c)$;
+    \item find the pre-collapse chart triangle $f'$ containing $\mathbf{u}$ (or the closest one) and its barycentric coordinates $\mathbf{b}'$, clamped to the triangle;
+    \item continue with $(f, \mathbf{b}) \leftarrow (f', \mathbf{b}')$.
+\end{enumerate}
+The walk ends on a fine triangle $f_0$ with coordinates $\boldsymbol{\beta}$, giving the fine position
+\begin{equation}
+    \mathbf{P}_i = \sum_{c=0}^{2} \beta_c \, \mathbf{v}_{f_0(c)} \in \Fine .
+\end{equation}
+Replacing the coarse positions of $\Subdiv$ by $\mathbf{P}$ gives the \emph{deformed mesh} $(\mathbf{P}, F_s)$: the subdivided connectivity on the fine surface. Because the composed charts are only approximately consistent, $\mathbf{P}$ is \emph{noisy}: its spacing is uneven and some of its triangles are folded. The relaxation below removes this noise.
+
+\section{Structures}
+
+Each subdivided vertex takes the structure IDs of the coarse vertex, edge or face it lies on, and is classified as:
+\begin{itemize}
+    \item a \textbf{junction} vertex if it has a junction ID: it is fixed;
+    \item a \textbf{curve} vertex if it has a curve ID: it must stay on its curve (the fine edges with that ID);
+    \item a \textbf{sheet} vertex otherwise: it must stay on its sheet (the fine triangles with that ID).
+\end{itemize}
+$\Proj_i(\mathbf{y})$ is the closest point to $\mathbf{y}$ on the curve or sheet of vertex $i$. The relaxation starts from $\X^{(0)} = \Proj(\mathbf{P})$: every vertex of the deformed mesh moved to the closest point on its own curve or sheet.
+
+\section{Explicit Laplacian Relaxation}
+
+\subsection{The update}
+All non-junction vertices move at the same time, curve and sheet vertices together, toward the average of all their mesh neighbours. With the neighbour average $\m_i(\X) = \frac{1}{\deg(i)} \sum_{j \in \mathcal{N}(i)} \x_j$, one step is
+\begin{equation}
+\label{eq:step}
+    \x_i^{(k+1)} = \Proj_i\!\left( \x_i^{(k)} + \lambda \left( \m_i(\X^{(k)}) - \x_i^{(k)} \right) \right), \qquad \lambda \in (0, 1].
+\end{equation}
+No linear system is solved: each step is a small move, followed by the projection back onto the vertex's curve or sheet. A curve vertex is also pulled by its sheet neighbours, but the projection keeps it on its curve.
+
+\subsection{Energy}
+Each step is a gradient step, followed by the projection, on the energy
+\begin{equation}
+    E(\X) = \frac{1}{2} \sum_{(i,j) \in E_s} \|\x_i - \x_j\|^2, \qquad \nabla_i E = \deg(i) \left( \x_i - \m_i \right),
+\end{equation}
+since $\x_i + \lambda(\m_i - \x_i) = \x_i - \frac{\lambda}{\deg(i)} \nabla_i E$: moving a vertex toward its neighbour average lowers the total squared edge length. The relaxation stops when no vertex can move along its sheet (or curve), i.e.\ when each pull $\m_i - \x_i$ is perpendicular to the sheet (or curve).
+
+Because every edge pulls equally, the end state tends to give neighbouring triangles the same size. Every coarse face has the same number of triangles ($4^L$) regardless of its area, so triangles of small coarse faces spread out and those of large coarse faces are compressed; the compression is what folds triangles.
+
+\subsection{No new folds}
+A subdivided triangle $t$ is \emph{folded} when it points the wrong way: its normal disagrees with the normal $\n_C(f)$ of the coarse face $f$ it belongs to, $\n(t; \X) \cdot \n_C(f) \le 0$. ($\n_C(f)$ is oriented to agree with most of the seed's triangles in $f$, since a coarse face may be oriented against the sheet it maps onto.) $\Phi(\X)$ is the set of folded triangles.
+
+\textbf{Rule.} Compute the step \eqref{eq:step} for all vertices. If it would fold a triangle that is not folded now, the vertices of that triangle do not move in this step. Repeat this check until no triangle would newly fold, then accept the step.
+
+A triangle that is already folded may unfold, but no triangle can become folded, so the number of folded triangles only goes down and the result never has more folds than the seed. The relaxation keeps removing the seed's folds while the moves that would create new ones are blocked. The price is that blocked vertices stop early, so the spacing evens out less than without the rule.
+
+\subsection{Step size}
+Without the projection, \eqref{eq:step} is $\X^{(k+1)} = (\mathbf{I} - \lambda \mathbf{D}^{-1}\mathbf{L}) \X^{(k)}$ plus fixed terms, with $\mathbf{L}$ the graph Laplacian and $\mathbf{D} = \operatorname{diag}(\deg(i))$. The eigenvalues $\mu$ of $\mathbf{D}^{-1}\mathbf{L}$ lie in $[0, 2]$, and a mode of eigenvalue $\mu$ is multiplied by $1 - \lambda\mu$ per step:
+\begin{itemize}
+    \item $\lambda = 1$: the highest modes get a factor near $-1$; they oscillate instead of decaying (overshoot).
+    \item $\lambda \le \frac12$: all factors lie in $[0, 1]$; every mode decays smoothly, like $e^{-\mu t}$ with $t = \lambda k$. The result depends only on $t$, so a smaller $\lambda$ just needs more steps.
+\end{itemize}
+The noise of the correspondence is high-frequency (large $\mu$) and disappears in the first few steps; the squeezing of large coarse faces is low-frequency and happens only later. That is why the relaxation first removes folds and only later creates them, and why the no-new-folds rule, which blocks only the second, works well. We use $\lambda = \frac12$.
+
+\section{Quality Measures}
+\begin{itemize}
+    \item \textbf{Folded triangles} $|\Phi(\X)|$, together with how many of the seed's folds were removed and how many new ones appeared.
+    \item \textbf{Degenerate triangles}: area $\le 10^{-14}\,\text{diag}(\Fine)^2$.
+    \item \textbf{Edge spacing}: $CV_e = \sigma(\ell)/\mu(\ell)$, the coefficient of variation of all edge lengths (lower = more even).
+    \item \textbf{Smallest angle} of each triangle (median and low percentiles).
+\end{itemize}
+
+\section{Results}
+Test model: $207{,}000$ vertices and $409{,}600$ triangles after subdivision.
+
+\begin{center}
+\begin{tabular}{lrrc}
+\toprule
+ & folded & degenerate & $CV_e$ \\
+\midrule
+seed (no relaxation) & 5{,}168 & 0 & 1.084 \\
+no rule, after 10 steps & 3{,}722 & 47 & 1.062 \\
+no rule, to the end & 11{,}347 & 4{,}764 & 0.867 \\
+\textbf{with the no-new-folds rule} & \textbf{2{,}383} & \textbf{33} & 1.014 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{itemize}
+    \item With the rule, the relaxation removes $54\%$ of the seed's folds, creates almost none (14), and raises the median smallest angle from $14.7^\circ$ to $17.5^\circ$. The spacing improves only a little.
+    \item Without the rule, the result is better than the seed after a few steps but worse at the end, as explained in the step-size section.
+    \item $\lambda = 0.5, 0.25, 0.1$ give the same result at equal $t = \lambda k$; $\lambda = 1$ is worse.
+\end{itemize}
+
+\textbf{Open problem.} Even out the spacing more without folding. The limit is that the relaxation evens out vertex counts, not areas.
+
+\end{document}

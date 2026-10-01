@@ -40,8 +40,14 @@ struct CoarseSubdivRelaxConfig {
     int64_t explicitMaxIter = 20000;
     double  explicitTol = 1e-7;
     bool    explicitGlobalProj = false;  // global closest point instead of local
-    // explicit: "uniform" (w_ij = 1) or "cotan" (cotangent weights of the
+    // explicit: keep the directed structure graph (curve vertices pulled only by
+    // curve / junction neighbours; sheet vertices by all) instead of the symmetric
+    // mesh graph. All vertices still move in every step.
+    bool    explicitDirected = false;
+    // explicit: "uniform" (w_ij = 1), "cotan" (cotangent weights of the
     // subdivided coarse mesh at its coarse positions, negative ones clamped to 0)
+    // or "meanvalue" (mean-value weights at the coarse positions: positive, not
+    // symmetric)
     std::string weights = "uniform";
 };
 

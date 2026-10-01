@@ -418,7 +418,8 @@ static bool export_final_outputs(const std::string & out_dir, const std::string 
                                            + (c.jointPass ? "_joint" : "")
                                            + (c.jointSolve ? "_jointsolve" : "")
                                            + (c.weights != "uniform" ? "_" + c.weights : std::string())
-                                           + (c.method == "explicit" && c.explicitGlobalProj ? "_global" : "") + "_", ".obj"),
+                                           + (c.method == "explicit" && c.explicitGlobalProj ? "_global" : "")
+                                           + (c.method == "explicit" && c.explicitDirected ? "_directed" : "") + "_", ".obj"),
                                        out_dir + "laplacian_graph", "coarse_subdiv_" + stem);
         }
     }
@@ -662,8 +663,11 @@ int main(int argc, char * argv[])
     //                          (coarse_subdiv_relax_explicit.cpp); snapshots *_it<N>.obj
     // [--explicit_lambda L]    default 0.5   [--explicit_max_iter N] default 20000
     // [--explicit_tol T]       default 1e-7 (x diag)   [--explicit_global_proj] global closest point
-    // [--coarse_subdiv_relax_weights uniform|cotan]  explicit only, default uniform; cotan = cotangent
-    //                          weights of the subdivided coarse mesh at coarse positions (*_cotan_*.obj)
+    // [--explicit_directed_graph]  explicit: curves pulled only by curve/junction neighbours (directed
+    //                          structure graph), sheets by all; default: symmetric mesh graph (*_directed_*.obj)
+    // [--coarse_subdiv_relax_weights uniform|cotan|meanvalue]  explicit only, default uniform; cotan =
+    //                          cotangent weights of the subdivided coarse mesh at coarse positions (negatives
+    //                          clamped to 0), meanvalue = mean-value weights there (*_cotan_* / *_meanvalue_*.obj)
     // [--subdiv_obj_max_verts N]  default: 2000000 — write subdiv_fine_*.obj (incl. subdiv_fine_at_coarse_pos_*.obj)
     //                             only up to N vertices
     // [--track_face_flip F]    face-flip debug tracker on gFO face F (needs --n_subdiv_samples)
@@ -698,6 +702,8 @@ int main(int argc, char * argv[])
             gCoarseRelax.jointPass = true;
         } else if (a == "--coarse_subdiv_relax_joint_solve") {
             gCoarseRelax.jointSolve = true;
+        } else if (a == "--explicit_directed_graph") {
+            gCoarseRelax.explicitDirected = true;
         } else if (a == "--explicit_global_proj") {
             gCoarseRelax.explicitGlobalProj = true;
         } else if (i + 1 < argc) {

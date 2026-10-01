@@ -309,6 +309,48 @@ static std::vector<double> cotan_weights(const MatrixXd & P, const MatrixXi & F,
     return w;
 }
 
+// Mean-value weights (Floater 2003) for the entries of graph G (aligned with
+// G.cols) from the triangles F at positions P: for row i and neighbour j,
+// w_ij = sum over the triangles containing edge ij of tan(theta/2) / |x_i - x_j|,
+// theta = that triangle's angle at i. Positive for every non-degenerate triangle
+// (no clamping) and not symmetric (w_ij != w_ji). Entries of G that are not mesh
+// edges get 0.
+static std::vector<double> meanvalue_weights(const MatrixXd & P, const MatrixXi & F, const RelaxGraph & G)
+{
+    std::unordered_map<uint64_t, double> we;  // directed key i -> j
+    we.reserve((size_t)F.rows() * 6);
+    auto key = [](int64_t i, int64_t j) { return ((uint64_t)i << 32) | (uint64_t)j; };
+    int64_t degenerate = 0;
+    for (int64_t f = 0; f < F.rows(); ++f)
+        for (int c = 0; c < 3; ++c) {
+            const int i = F(f, c), a = F(f, (c + 1) % 3), b = F(f, (c + 2) % 3);
+            const Vector3d u = P.row(a).transpose() - P.row(i).transpose();
+            const Vector3d v = P.row(b).transpose() - P.row(i).transpose();
+            const double lu = u.norm(), lv = v.norm(), s = u.cross(v).norm();
+            if (!(s > 0) || !(lu > 0) || !(lv > 0)) { ++degenerate; continue; }
+            const double t = (lu * lv - u.dot(v)) / s;  // tan(theta / 2)
+            we[key(i, a)] += t / lu;
+            we[key(i, b)] += t / lv;
+        }
+    std::vector<double> w(G.cols.size(), 0.0);
+    int64_t n = 0, missing = 0;
+    double wmin = std::numeric_limits<double>::infinity(), wmax = 0.0;
+    for (int64_t i = 0; i + 1 < (int64_t)G.rowOffs.size(); ++i)
+        for (int64_t q = G.rowOffs[i]; q < G.rowOffs[i + 1]; ++q) {
+            auto it = we.find(key(i, G.cols[q]));
+            const double x = it == we.end() ? 0.0 : it->second;
+            if (it == we.end()) ++missing;
+            ++n;
+            w[q] = x;
+            wmin = std::min(wmin, x);
+            wmax = std::max(wmax, x);
+        }
+    fprintf(stderr, "[coarse_subdiv_relax] mean-value weights from the coarse positions: %lld entries (%lld not a mesh "
+                    "edge), %lld degenerate corners skipped, range %.3g .. %.3g\n",
+            (long long)n, (long long)missing, (long long)degenerate, wmin, wmax);
+    return w;
+}
+
 void coarse_subdiv_relax_export(const CoarseMeshCompaction & cmc, const CoarseSubdivC2F & C,
                                 const MatStruct & ms, const CoarseSubdivRelaxConfig & cfg,
                                 int64_t maxObjVerts, const std::string & objPath,
@@ -397,7 +439,7 @@ void coarse_subdiv_relax_export(const CoarseMeshCompaction & cmc, const CoarseSu
 
     // 4. Relax with the existing graph and solver.
     RelaxGraph G = build_relax_graph(M, pal, setId, &ms);
-    if (cfg.jointPass || isExplicit) {
+    if (cfg.jointPass || (isExplicit && !cfg.explicitDirected)) {
         // Symmetric graph: every row holds all its mesh neighbours (the plain
         // two-way adjacency), roles kept. Curve vertices then also feel the
         // sheet vertices next to them; they still only slide along their curve.
@@ -466,7 +508,8 @@ void coarse_subdiv_relax_export(const CoarseMeshCompaction & cmc, const CoarseSu
             fixed[i] = G.role[i] == RELAX_JUNCTION || (!opt.holdFixed.empty() && opt.holdFixed[i]);
         export_relax_graph_ply(graphDir, graphStem, G, M.V, pal, S, setId, ms, fixed);
     }
-    if (cfg.weights != "uniform" && cfg.weights != "cotan") relax_fail("unknown weights " + cfg.weights);
+    if (cfg.weights != "uniform" && cfg.weights != "cotan" && cfg.weights != "meanvalue")
+        relax_fail("unknown weights " + cfg.weights);
     if (cfg.weights != "uniform" && !isExplicit)
         fprintf(stderr, "[coarse_subdiv_relax] WARNING: %s weights are explicit only; %s uses uniform\n",
                 cfg.weights.c_str(), method.c_str());
@@ -482,6 +525,7 @@ void coarse_subdiv_relax_export(const CoarseMeshCompaction & cmc, const CoarseSu
         eo.foldRef = foldRef;
         eo.snapshotPrefix = objPath.substr(0, objPath.size() - 4) + "_";
         if (cfg.weights == "cotan") eo.weights = cotan_weights(C.S.V, M.F, G);
+        if (cfg.weights == "meanvalue") eo.weights = meanvalue_weights(C.S.V, M.F, G);
         R = subdiv_relax_explicit(M, gVO, gFO, &ms, pal, setId, G, eo);
     } else {
         R = method == "newton" ? subdiv_relax(M, gVO, gFO, &ms, pal, setId, G, opt)
@@ -495,7 +539,8 @@ void coarse_subdiv_relax_export(const CoarseMeshCompaction & cmc, const CoarseSu
         (method + (cfg.perCoarseFace ? ", per coarse face" : "") + (cfg.noNewFolds ? ", no new folds" : "")
          + (cfg.localProjection ? ", local projection" : "") + (cfg.jointPass ? ", joint pass" : "")
          + (cfg.jointSolve ? ", joint solve" : "")
-         + (cfg.weights != "uniform" ? ", " + cfg.weights + " weights" : std::string())).c_str(), q0.edgeCV, q1.edgeCV, q0.minAngle, q1.minAngle, q0.p1, q1.p1, q0.p5, q1.p5, q0.median, q1.median,
+         + (cfg.weights != "uniform" ? ", " + cfg.weights + " weights" : std::string())
+         + (isExplicit && cfg.explicitDirected ? ", directed graph" : "")).c_str(), q0.edgeCV, q1.edgeCV, q0.minAngle, q1.minAngle, q0.p1, q1.p1, q0.p5, q1.p5, q0.median, q1.median,
         (long long)q0.degenerate, (long long)q1.degenerate, (long long)q1.flippedVsRef, R.maxMove, R.meanMove);
     if (R.seedOffStructure || R.fixedMoved || R.posMismatch || R.badBary || R.offStructure)
         relax_fail("relaxation consistency checks failed");
