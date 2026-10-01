@@ -1,4 +1,5 @@
 #include "subdiv_relax.h"
+#include "subdiv_relax_projector.h"
 
 #include <igl/parallel_for.h>
 #include <Eigen/Dense>
@@ -32,372 +33,10 @@ double now_s()
     return duration<double>(steady_clock::now().time_since_epoch()).count();
 }
 
-// ---------------------------------------------------------------- palette helpers
-
-// Per palette set: its sheet ids and its seam/boundary ids, sorted.
-struct SetIds {
-    std::vector<std::vector<int>> sheet, curve;
-};
-
-SetIds split_palette(const StructPalette & pal, const MatStruct * ms)
-{
-    SetIds S;
-    S.sheet.resize(pal.size());
-    S.curve.resize(pal.size());
-    if (!ms) return S;
-    for (int k = 0; k < pal.size(); ++k)
-        for (int32_t a = pal.offsets[k]; a < pal.offsets[k + 1]; ++a) {
-            const int id = pal.ids[a];
-            const int t = ms->structType.at(id);
-            if (t == 0) S.sheet[k].push_back(id);
-            else if (t == 1 || t == 2) S.curve[k].push_back(id);
-        }
-    return S;  // palette ids are sorted within a set, so these are too
-}
-
-bool intersects(const std::vector<int> & a, const std::vector<int> & b)
-{
-    size_t i = 0, j = 0;
-    while (i < a.size() && j < b.size()) {
-        if (a[i] == b[j]) return true;
-        if (a[i] < b[j]) ++i; else ++j;
-    }
-    return false;
-}
-
-uint8_t role_of(uint8_t mask)
-{
-    if (mask & STRUCT_MASK_JUNCTION) return RELAX_JUNCTION;
-    if (mask & (STRUCT_MASK_SEAM | STRUCT_MASK_BOUNDARY)) return RELAX_CURVE;
-    return RELAX_SHEET;
-}
-
-// ---------------------------------------------------------------- closest points
-
-inline Vector3d P3(const MatrixXd & V, int i) { return V.row(i).leftCols<3>().transpose(); }
-
-// Closest point on segment ab: parameter t in [0,1] (point = (1-t) a + t b).
-inline double seg_t(const Vector3d & p, const Vector3d & a, const Vector3d & b)
-{
-    const Vector3d ab = b - a;
-    const double l2 = ab.squaredNorm();
-    if (!(l2 > 0.0)) return 0.0;
-    return std::min(1.0, std::max(0.0, (p - a).dot(ab) / l2));
-}
-
-// Closest point on triangle abc as barycentric (Ericson, RTCD 5.1.5), robust
-// to degenerate triangles (then the best of the three edges).
-Vector3d tri_bary(const Vector3d & p, const Vector3d & a, const Vector3d & b, const Vector3d & c)
-{
-    const Vector3d ab = b - a, ac = c - a;
-    const double lmax = std::max({ ab.squaredNorm(), ac.squaredNorm(), (c - b).squaredNorm() });
-    if (!(ab.cross(ac).squaredNorm() > 1e-24 * lmax * lmax)) {
-        Vector3d best(1, 0, 0);
-        double bd = std::numeric_limits<double>::infinity();
-        const Vector3d * P[3] = { &a, &b, &c };
-        for (int e = 0; e < 3; ++e) {
-            const int i = e, j = (e + 1) % 3;
-            const double t = seg_t(p, *P[i], *P[j]);
-            const double d = (p - ((1 - t) * *P[i] + t * *P[j])).squaredNorm();
-            if (d < bd) { bd = d; best.setZero(); best(i) = 1 - t; best(j) = t; }
-        }
-        return best;
-    }
-    const Vector3d ap = p - a;
-    const double d1 = ab.dot(ap), d2 = ac.dot(ap);
-    if (d1 <= 0 && d2 <= 0) return Vector3d(1, 0, 0);
-    const Vector3d bp = p - b;
-    const double d3 = ab.dot(bp), d4 = ac.dot(bp);
-    if (d3 >= 0 && d4 <= d3) return Vector3d(0, 1, 0);
-    const double vc = d1 * d4 - d3 * d2;
-    if (vc <= 0 && d1 >= 0 && d3 <= 0) { const double v = d1 / (d1 - d3); return Vector3d(1 - v, v, 0); }
-    const Vector3d cp = p - c;
-    const double d5 = ab.dot(cp), d6 = ac.dot(cp);
-    if (d6 >= 0 && d5 <= d6) return Vector3d(0, 0, 1);
-    const double vb = d5 * d2 - d1 * d6;
-    if (vb <= 0 && d2 >= 0 && d6 <= 0) { const double w = d2 / (d2 - d6); return Vector3d(1 - w, 0, w); }
-    const double va = d3 * d6 - d5 * d4;
-    if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) {
-        const double w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
-        return Vector3d(0, 1 - w, w);
-    }
-    const double denom = 1.0 / (va + vb + vc);
-    const double v = vb * denom, w = vc * denom;
-    return Vector3d(1 - v - w, v, w);
-}
-
-// Position of (face, bary) exactly as build_subdiv_mesh computes it.
-inline Vector3d interp(const MatrixXd & VO, const MatrixXi & FO, int f, const Vector3d & b)
-{
-    return (b(0) * VO.row(FO(f, 0)).leftCols<3>()
-          + b(1) * VO.row(FO(f, 1)).leftCols<3>()
-          + b(2) * VO.row(FO(f, 2)).leftCols<3>()).transpose();
-}
-
-// ---------------------------------------------------------------- BVH
-
-// Bounding-volume hierarchy over triangles or segments (c2 < 0). Queries are
-// exact nearest (squared distance, ties broken by the lower global id), so the
-// result does not depend on traversal order.
-struct PrimBVH {
-    std::vector<std::array<int32_t, 3>> corner;
-    std::vector<int32_t> gid;           // FO row (triangles) / origEdges row (segments)
-    struct Node { AlignedBox3d box; int32_t left = -1, right = -1, begin = 0, end = 0; };
-    std::vector<Node> nodes;
-    std::vector<int32_t> order;
-
-    void build(const MatrixXd & V)
-    {
-        const int n = (int)gid.size();
-        order.resize(n);
-        for (int i = 0; i < n; ++i) order[i] = i;
-        std::vector<AlignedBox3d> pb(n);
-        std::vector<Vector3d> cen(n);
-        for (int i = 0; i < n; ++i) {
-            AlignedBox3d b;
-            for (int c = 0; c < 3; ++c) if (corner[i][c] >= 0) b.extend(P3(V, corner[i][c]));
-            pb[i] = b;
-            cen[i] = b.center();
-        }
-        nodes.clear();
-        nodes.reserve(2 * (size_t)n / 3 + 2);
-        if (n == 0) return;
-        build_rec(0, n, pb, cen);
-    }
-
-    int build_rec(int begin, int end, const std::vector<AlignedBox3d> & pb, const std::vector<Vector3d> & cen)
-    {
-        const int id = (int)nodes.size();
-        nodes.emplace_back();
-        AlignedBox3d box, cbox;
-        for (int i = begin; i < end; ++i) { box.extend(pb[order[i]]); cbox.extend(cen[order[i]]); }
-        nodes[id].box = box;
-        nodes[id].begin = begin;
-        nodes[id].end = end;
-        if (end - begin <= 4) return id;
-        int axis;
-        cbox.sizes().maxCoeff(&axis);
-        const int mid = (begin + end) / 2;
-        std::nth_element(order.begin() + begin, order.begin() + mid, order.begin() + end,
-            [&](int a, int b) { return cen[a](axis) < cen[b](axis) || (cen[a](axis) == cen[b](axis) && a < b); });
-        const int l = build_rec(begin, mid, pb, cen);
-        const int r = build_rec(mid, end, pb, cen);
-        nodes[id].left = l;
-        nodes[id].right = r;
-        return id;
-    }
-
-    // Closest primitive to p. On entry (bestD, bestGid) is the incumbent (use
-    // +inf / INT_MAX for none); updated only by a strictly better candidate.
-    // Returns the local primitive index or -1 if the incumbent stands.
-    int query(const MatrixXd & V, const Vector3d & p, double & bestD, int & bestGid, Vector3d & bestBary) const
-    {
-        if (nodes.empty()) return -1;
-        int found = -1;
-        int stack[128];
-        int sp = 0;
-        stack[sp++] = 0;
-        while (sp) {
-            const Node & nd = nodes[stack[--sp]];
-            if (nd.box.squaredExteriorDistance(p) > bestD) continue;
-            if (nd.left < 0) {
-                for (int k = nd.begin; k < nd.end; ++k) {
-                    const int i = order[k];
-                    Vector3d b;
-                    Vector3d q;
-                    const auto & c = corner[i];
-                    if (c[2] < 0) {
-                        const Vector3d a = P3(V, c[0]), bb = P3(V, c[1]);
-                        const double t = seg_t(p, a, bb);
-                        b = Vector3d(1 - t, t, 0);
-                        q = (1 - t) * a + t * bb;
-                    } else {
-                        const Vector3d a = P3(V, c[0]), bb = P3(V, c[1]), cc = P3(V, c[2]);
-                        b = tri_bary(p, a, bb, cc);
-                        q = b(0) * a + b(1) * bb + b(2) * cc;
-                    }
-                    const double d = (p - q).squaredNorm();
-                    if (d < bestD || (d == bestD && gid[i] < bestGid)) {
-                        bestD = d; bestGid = gid[i]; bestBary = b; found = i;
-                    }
-                }
-            } else {
-                if (sp + 2 > 128) fail("BVH too deep");
-                // Visit the nearer child first (pushed last).
-                const double dl = nodes[nd.left].box.squaredExteriorDistance(p);
-                const double dr = nodes[nd.right].box.squaredExteriorDistance(p);
-                if (dl <= dr) { stack[sp++] = nd.right; stack[sp++] = nd.left; }
-                else          { stack[sp++] = nd.left;  stack[sp++] = nd.right; }
-            }
-        }
-        return found;
-    }
-};
-
-// ---------------------------------------------------------------- projector
-
-struct ProjResult {
-    int face = -1;         // FO row
-    Vector3d bary;         // in FO.row(face) corner order
-    int edge = -1;         // origEdges row (curve vertices)
-    Vector3d pos;
-};
-
-struct Projector {
-    const MatrixXd & VO;
-    const MatrixXi & FO;
-    const MatrixXi & origEdges;
-    std::vector<int32_t> edgeFace;              // lowest-index face on each orig edge
-    std::vector<PrimBVH> trees;
-    std::unordered_map<int, int> sheetTree, curveTree;  // struct id -> tree
-    int globalTree = -1;
-    std::vector<std::vector<int>> targets;      // per palette set: trees to project onto
-    std::vector<uint8_t> isCurveSet;            // per palette set: targets are curve trees
-    const MatStruct * ms;
-    const SetIds & S;
-    std::vector<std::vector<int>> faceSheets;   // FO row -> sheet ids (sorted), for membership tests
-    std::vector<std::vector<int>> edgeCurves;   // orig edge -> curve ids (sorted)
-    // Incidence, for choosing the active element at a corner / crease.
-    std::vector<std::vector<int32_t>> vertFaces;   // VO row -> faces using it
-    std::vector<std::vector<int32_t>> edgeFaces;   // orig edge -> faces on it
-    std::vector<std::vector<int32_t>> vertEdges;   // VO row -> orig edges on it
-
-    Projector(const MatrixXd & VO_, const MatrixXi & FO_, const MatrixXi & E_, const MatStruct * ms_,
-              const StructPalette & pal, const SetIds & S_, const std::vector<uint8_t> & setRole)
-        : VO(VO_), FO(FO_), origEdges(E_), ms(ms_), S(S_)
-    {
-        const int nF = (int)FO.rows(), nE = (int)origEdges.rows();
-        edgeFace.assign(nE, -1);
-        edgeFaces.assign(nE, {});
-        vertFaces.assign(VO.rows(), {});
-        vertEdges.assign(VO.rows(), {});
-        for (int f = 0; f < nF; ++f)
-            for (int c = 0; c < 3; ++c) {
-                const int e = subdiv_find_edge(origEdges, FO(f, c), FO(f, (c + 1) % 3));
-                if (e < 0) fail("face edge missing from origEdges");
-                if (edgeFace[e] < 0) edgeFace[e] = f;
-                edgeFaces[e].push_back(f);
-                vertFaces[FO(f, c)].push_back(f);
-            }
-        for (int e = 0; e < nE; ++e) {
-            vertEdges[origEdges(e, 0)].push_back(e);
-            vertEdges[origEdges(e, 1)].push_back(e);
-        }
-
-        faceSheets.assign(nF, {});
-        edgeCurves.assign(nE, {});
-        if (ms) {
-            for (int f = 0; f < nF; ++f) faceSheets[f] = ms->faceIds[f];
-            for (int e = 0; e < nE; ++e) {
-                auto it = ms->edgeIds.find(matstruct_edge_key(origEdges(e, 0), origEdges(e, 1)));
-                if (it != ms->edgeIds.end()) edgeCurves[e] = it->second;
-            }
-        }
-
-        std::unordered_map<int, std::vector<int>> sheetFaces, curveEdges;
-        for (int f = 0; f < nF; ++f) for (int id : faceSheets[f]) sheetFaces[id].push_back(f);
-        for (int e = 0; e < nE; ++e) for (int id : edgeCurves[e]) curveEdges[id].push_back(e);
-
-        auto add_tree = [&](const std::vector<int> & prims, bool seg) {
-            PrimBVH t;
-            for (int p : prims) {
-                if (seg) t.corner.push_back({ origEdges(p, 0), origEdges(p, 1), -1 });
-                else     t.corner.push_back({ FO(p, 0), FO(p, 1), FO(p, 2) });
-                t.gid.push_back(p);
-            }
-            t.build(VO);
-            trees.push_back(std::move(t));
-            return (int)trees.size() - 1;
-        };
-        std::vector<int> ids;
-        for (auto & kv : sheetFaces) ids.push_back(kv.first);
-        std::sort(ids.begin(), ids.end());
-        for (int id : ids) sheetTree[id] = add_tree(sheetFaces[id], false);
-        ids.clear();
-        for (auto & kv : curveEdges) ids.push_back(kv.first);
-        std::sort(ids.begin(), ids.end());
-        for (int id : ids) curveTree[id] = add_tree(curveEdges[id], true);
-
-        targets.assign(pal.size(), {});
-        isCurveSet.assign(pal.size(), 0);
-        for (int k = 0; k < pal.size(); ++k) {
-            if (setRole[k] == RELAX_CURVE) {
-                isCurveSet[k] = 1;
-                for (int id : S.curve[k]) { auto it = curveTree.find(id); if (it != curveTree.end()) targets[k].push_back(it->second); }
-            } else if (setRole[k] == RELAX_SHEET) {
-                for (int id : S.sheet[k]) { auto it = sheetTree.find(id); if (it != sheetTree.end()) targets[k].push_back(it->second); }
-                if (S.sheet[k].empty()) {
-                    if (globalTree < 0) {
-                        std::vector<int> all(nF);
-                        for (int f = 0; f < nF; ++f) all[f] = f;
-                        globalTree = add_tree(all, false);
-                    }
-                    targets[k].push_back(globalTree);
-                }
-            }
-        }
-    }
-
-    // Is face f / edge e part of palette set k's targets?
-    bool face_in(int k, int f) const
-    {
-        if (S.sheet[k].empty()) return true;  // global tree
-        return intersects(faceSheets[f], S.sheet[k]);
-    }
-    bool edge_in(int k, int e) const { return intersects(edgeCurves[e], S.curve[k]); }
-
-    // Project p for a vertex of set k. (curFace, curEdge) is the current
-    // location, used as the initial incumbent when it is a valid target.
-    ProjResult project(int k, const Vector3d & p, int curFace, int curEdge) const
-    {
-        ProjResult R;
-        double bestD = std::numeric_limits<double>::infinity();
-        int bestGid = std::numeric_limits<int>::max();
-        Vector3d bestBary(1, 0, 0);
-        const bool curve = isCurveSet[k] != 0;
-
-        if (curve) {
-            if (curEdge >= 0 && edge_in(k, curEdge)) {
-                const Vector3d a = P3(VO, origEdges(curEdge, 0)), b = P3(VO, origEdges(curEdge, 1));
-                const double t = seg_t(p, a, b);
-                bestD = (p - ((1 - t) * a + t * b)).squaredNorm();
-                bestGid = curEdge;
-                bestBary = Vector3d(1 - t, t, 0);
-            }
-        } else if (curFace >= 0 && face_in(k, curFace)) {
-            const Vector3d a = P3(VO, FO(curFace, 0)), b = P3(VO, FO(curFace, 1)), c = P3(VO, FO(curFace, 2));
-            bestBary = tri_bary(p, a, b, c);
-            bestD = (p - (bestBary(0) * a + bestBary(1) * b + bestBary(2) * c)).squaredNorm();
-            bestGid = curFace;
-        }
-        for (int t : targets[k]) trees[t].query(VO, p, bestD, bestGid, bestBary);
-        if (bestGid == std::numeric_limits<int>::max()) fail("projection found no target");
-
-        if (curve) {
-            const int e = bestGid;
-            const int f = edgeFace[e];
-            R.edge = e;
-            R.face = f;
-            R.bary.setZero();
-            for (int c = 0; c < 3; ++c) {
-                if (FO(f, c) == origEdges(e, 0)) R.bary(c) = bestBary(0);
-                if (FO(f, c) == origEdges(e, 1)) R.bary(c) = bestBary(1);
-            }
-        } else {
-            R.face = bestGid;
-            R.bary = bestBary;
-        }
-        // Clean rounding: no negatives, exact sum 1 is not representable in
-        // general, so only renormalise when off by more than an ulp-level.
-        for (int c = 0; c < 3; ++c) if (R.bary(c) < 0) R.bary(c) = 0;
-        const double s = R.bary.sum();
-        if (std::abs(s - 1.0) > 1e-15) R.bary /= s;
-        R.pos = interp(VO, FO, R.face, R.bary);
-        return R;
-    }
-};
 
 } // namespace
+
+using namespace subdiv_proj;
 
 // ---------------------------------------------------------------- graph
 
@@ -571,6 +210,7 @@ RelaxReport subdiv_relax(SubdivMesh & M, const MatrixXd & VO, const MatrixXi & F
     const int64_t Vs = M.V.rows();
     if ((int64_t)G.role.size() != Vs) fail("graph / mesh size mismatch");
     if (!opt.holdFixed.empty() && (int64_t)opt.holdFixed.size() != Vs) fail("holdFixed / mesh size mismatch");
+    if (opt.foldRef.size() && (opt.foldRef.rows() != M.F.rows() || opt.foldRef.cols() != 3)) fail("foldRef / face count mismatch");
     const double diag = (VO.leftCols(3).colwise().maxCoeff() - VO.leftCols(3).colwise().minCoeff()).norm();
     const double tolAbs = opt.tol * diag;
 
@@ -581,6 +221,10 @@ RelaxReport subdiv_relax(SubdivMesh & M, const MatrixXd & VO, const MatrixXi & F
     const Projector proj(VO, FO, M.origEdges, ms, pal, S, setRole);
     if (opt.verbose)
         fprintf(stderr, "[subdiv_relax] projector: %zu trees (%.2f s)\n", proj.trees.size(), now_s() - tp);
+    // Projection of a step (not the seed check): global or local closest point.
+    auto project_step = [&](int k, const Vector3d & y, int f, int e) {
+        return opt.localProjection ? proj.project_local(k, y, f, e) : proj.project(k, y, f, e);
+    };
 
     const MatrixXd Vseed = M.V;
     MatrixXd X = M.V;
@@ -617,7 +261,7 @@ RelaxReport subdiv_relax(SubdivMesh & M, const MatrixXd & VO, const MatrixXi & F
                 lowest = std::min(lowest, v);
                 for (int64_t q = G.rowOffs[v]; q < G.rowOffs[v + 1]; ++q) {
                     const int j = G.cols[q];
-                    if (!isFree[j] || G.role[j] != cls) { anchored = true; continue; }
+                    if (!isFree[j] || (!opt.jointPass && G.role[j] != cls)) { anchored = true; continue; }
                     if (!seen[j]) { seen[j] = 1; st.push_back(j); }
                 }
             }
@@ -792,22 +436,52 @@ RelaxReport subdiv_relax(SubdivMesh & M, const MatrixXd & VO, const MatrixXi & F
     std::vector<int32_t> nFace(Vs), nEdge(Vs);
     MatrixXd nX(Vs, 3), nBary(Vs, 3);
 
+    // Fine faces f and g share a vertex (same face, or neighbours around a vertex).
+    auto shares_vertex = [&](int f, int g) {
+        for (int a = 0; a < 3; ++a) for (int b = 0; b < 3; ++b) if (FO(f, a) == FO(g, b)) return true;
+        return false;
+    };
     // Commit projected candidates for the listed vertices; returns max move.
     auto commit = [&](const std::vector<int64_t> & list) {
         double m = 0.0;
         for (int64_t i : list) {
             m = std::max(m, move[i]);
+            if (move[i] > 0) {
+                ++R.projMoves;
+                if (!shares_vertex(face[i], nFace[i])) {
+                    ++R.projJumps;
+                    R.projJumpMax = std::max(R.projJumpMax, move[i] / diag);
+                }
+            }
             X.row(i) = nX.row(i); face[i] = nFace[i]; edge[i] = nEdge[i]; bary.row(i) = nBary.row(i);
         }
         return m;
     };
 
+    // No-new-folds rule (opt.foldRef): triangle f is folded when n_f . ref_f <= 0.
+    const bool foldRule = opt.foldRef.size() > 0;
+    const int64_t nF = M.F.rows();
+    auto tri_n = [&](const MatrixXd & P, int64_t f) {
+        const Vector3d a = P.row(M.F(f, 0)).transpose(), b = P.row(M.F(f, 1)).transpose(), c = P.row(M.F(f, 2)).transpose();
+        return Vector3d((b - a).cross(c - a));
+    };
+    auto count_folded = [&](const MatrixXd & P) {
+        int64_t n = 0;
+        for (int64_t f = 0; f < nF; ++f) if (tri_n(P, f).dot(opt.foldRef.row(f).transpose()) <= 0) ++n;
+        return n;
+    };
+    if (foldRule) R.foldedSeed = count_folded(X);
+
     if (opt.solver == RelaxSolver::Newton) {
         const int64_t maxIter = opt.maxIter > 0 ? opt.maxIter : 100000;
-        for (int pass = 0; pass < 2; ++pass) {
+        // Two passes (curves, then sheets with the curves fixed), or one joint pass.
+        const int nPass = opt.jointPass ? 1 : 2;
+        for (int pass = 0; pass < nPass; ++pass) {
             const uint8_t cls = pass == 0 ? RELAX_CURVE : RELAX_SHEET;
+            const char * passName = opt.jointPass ? "joint" : pass == 0 ? "curve" : "sheet";
             std::vector<int64_t> list;
-            for (int64_t i = 0; i < Vs; ++i) if (isFree[i] && G.role[i] == cls) list.push_back(i);
+            for (int64_t i = 0; i < Vs; ++i)
+                if (isFree[i] && (opt.jointPass ? G.role[i] != RELAX_JUNCTION : G.role[i] == cls)) list.push_back(i);
             int64_t & iters = pass == 0 ? R.itersCurve : R.itersSheet;
             double & delta = pass == 0 ? R.deltaCurve : R.deltaSheet;
             bool conv = list.empty();
@@ -816,6 +490,46 @@ RelaxReport subdiv_relax(SubdivMesh & M, const MatrixXd & VO, const MatrixXi & F
             std::vector<int64_t> var(Vs, -1), slot(Vs, -1);
             for (size_t a = 0; a < list.size(); ++a) slot[list[a]] = (int64_t)a;
             std::vector<Matrix<double, 3, Dynamic>> T(list.size());
+
+            // No-new-folds rule: hold back (to X) every moved listed vertex of a
+            // triangle that is unfolded at X but folded at the candidate nX, until
+            // there is none. Holding a whole triangle back restores it, so this
+            // terminates. Returns the number of vertices held back.
+            std::vector<int64_t> watched;  // faces a move of this pass can change
+            if (foldRule)
+                for (int64_t f = 0; f < nF; ++f)
+                    for (int c = 0; c < 3; ++c) if (slot[M.F(f, c)] >= 0) { watched.push_back(f); break; }
+            std::vector<uint8_t> newFold(watched.size());
+            auto block_new_folds = [&]() -> int64_t {
+                if (!foldRule) return 0;
+                int64_t held = 0;
+                for (;;) {
+                    igl::parallel_for((int64_t)watched.size(), [&](int64_t w) {
+                        const int64_t f = watched[w];
+                        const Vector3d ref = opt.foldRef.row(f).transpose();
+                        if (!(tri_n(X, f).dot(ref) > 0)) { newFold[w] = 0; return; }
+                        Vector3d q[3];
+                        for (int c = 0; c < 3; ++c) {
+                            const int v = M.F(f, c);
+                            q[c] = slot[v] >= 0 ? Vector3d(nX.row(v).transpose()) : Vector3d(X.row(v).transpose());
+                        }
+                        newFold[w] = (q[1] - q[0]).cross(q[2] - q[0]).dot(ref) <= 0;
+                    }, 1000);
+                    int64_t n = 0;
+                    for (size_t w = 0; w < watched.size(); ++w) {
+                        if (!newFold[w]) continue;
+                        for (int c = 0; c < 3; ++c) {
+                            const int v = M.F(watched[w], c);
+                            if (slot[v] < 0 || nX.row(v) == X.row(v)) continue;
+                            nX.row(v) = X.row(v); nFace[v] = face[v]; nEdge[v] = edge[v]; nBary.row(v) = bary.row(v);
+                            move[v] = 0.0;
+                            ++n;
+                        }
+                    }
+                    if (!n) return held;
+                    held += n;
+                }
+            };
             SimplicialLDLT<SparseMatrix<double>> ldlt;
             bool analyzed = false;
             std::vector<int> lastDims;
@@ -852,7 +566,7 @@ RelaxReport subdiv_relax(SubdivMesh & M, const MatrixXd & VO, const MatrixXi & F
                     for (int64_t q = G.rowOffs[i]; q < G.rowOffs[i + 1]; ++q) mean += X.row(G.cols[q]).transpose();
                     mean /= (double)(G.rowOffs[i + 1] - G.rowOffs[i]);
                     const Vector3d x = X.row(i).transpose();
-                    const ProjResult pr = proj.project(setId[i], x + 0.5 * (mean - x), face[i], edge[i]);
+                    const ProjResult pr = project_step(setId[i], x + 0.5 * (mean - x), face[i], edge[i]);
                     move[i] = (pr.pos - x).norm();
                     nX.row(i) = pr.pos.transpose(); nFace[i] = pr.face; nEdge[i] = pr.edge; nBary.row(i) = pr.bary.transpose();
                 }, 1000);
@@ -932,15 +646,19 @@ RelaxReport subdiv_relax(SubdivMesh & M, const MatrixXd & VO, const MatrixXi & F
                     igl::parallel_for((int64_t)list.size(), [&](int64_t a) {
                         const int64_t i = list[a];
                         const Vector3d y = X.row(i).transpose() + alpha * (T[a] * u.segment(var[i], dims[a]));
-                        const ProjResult pr = proj.project(setId[i], y, face[i], edge[i]);
+                        const ProjResult pr = project_step(setId[i], y, face[i], edge[i]);
                         move[i] = (pr.pos - X.row(i).transpose()).norm();
                         nX.row(i) = pr.pos.transpose(); nFace[i] = pr.face; nEdge[i] = pr.edge; nBary.row(i) = pr.bary.transpose();
                     }, 1000);
+                    const int64_t held = block_new_folds();
+                    R.foldReverts += held;
                     m = 0.0;
                     for (int64_t i : list) m = std::max(m, move[i]);
                     if (halvings == 0 && m <= tolAbs) { accepted = true; break; }  // full step moves nothing
                     dE = energy_change();
-                    if (dE <= -1e-4 * alpha * slope) { accepted = true; break; }
+                    // Held-back vertices leave a partial step, for which the Armijo
+                    // slope does not apply; any decrease is accepted then.
+                    if (dE <= -1e-4 * alpha * slope || (held > 0 && dE < 0)) { accepted = true; break; }
                 }
                 ++iters;
                 if (!accepted) {
@@ -958,11 +676,16 @@ RelaxReport subdiv_relax(SubdivMesh & M, const MatrixXd & VO, const MatrixXi & F
                 if (opt.verbose && (iters <= 10 || iters % 10 == 0 || conv))
                     fprintf(stderr, "[subdiv_relax] %s iter %lld: %lld free, %lld unknowns, max move %.3g (x diag), "
                             "step %.3g, dE %.3g (%.2f s)\n",
-                            pass == 0 ? "curve" : "sheet", (long long)iters, (long long)list.size(),
+                            passName, (long long)iters, (long long)list.size(),
                             (long long)nVar, delta, alpha, dE, now_s() - ti);
             }
             if (list.empty()) break;
-            const double mp = plain_step();
+            double mp = plain_step();
+            if (foldRule) {
+                R.foldReverts += block_new_folds();
+                mp = 0.0;
+                for (int64_t i : list) mp = std::max(mp, move[i]);
+            }
             delta = mp / diag;
             if (mp <= tolAbs) { conv = true; break; }
             if (iters >= maxIter) { conv = false; break; }
@@ -971,11 +694,11 @@ RelaxReport subdiv_relax(SubdivMesh & M, const MatrixXd & VO, const MatrixXi & F
             ++R.plainSteps;
             if (opt.verbose && R.plainSteps % 100 == 1)
                 fprintf(stderr, "[subdiv_relax] %s iter %lld: plain step, max move %.3g (x diag)\n",
-                        pass == 0 ? "curve" : "sheet", (long long)iters, delta);
+                        passName, (long long)iters, delta);
             }
             if (!conv) {
                 fprintf(stderr, "[subdiv_relax] WARNING: %s pass did not converge in %lld iterations (last max move %.3g x diag)\n",
-                        pass == 0 ? "curve" : "sheet", (long long)maxIter, delta);
+                        passName, (long long)maxIter, delta);
                 std::vector<int64_t> top = list;
                 std::sort(top.begin(), top.end(), [&](int64_t a, int64_t b) { return move[a] > move[b]; });
                 for (size_t t = 0; t < std::min<size_t>(8, top.size()); ++t) {
@@ -999,7 +722,7 @@ RelaxReport subdiv_relax(SubdivMesh & M, const MatrixXd & VO, const MatrixXi & F
                 for (int64_t q = G.rowOffs[i]; q < G.rowOffs[i + 1]; ++q) mean += X.row(G.cols[q]).transpose();
                 mean /= (double)(G.rowOffs[i + 1] - G.rowOffs[i]);
                 const Vector3d x = X.row(i).transpose();
-                const ProjResult pr = proj.project(setId[i], x + opt.lambda * (mean - x), face[i], edge[i]);
+                const ProjResult pr = project_step(setId[i], x + opt.lambda * (mean - x), face[i], edge[i]);
                 move[i] = (pr.pos - x).norm();
                 nX.row(i) = pr.pos.transpose(); nFace[i] = pr.face; nEdge[i] = pr.edge; nBary.row(i) = pr.bary.transpose();
             }, 1000);
@@ -1019,6 +742,8 @@ RelaxReport subdiv_relax(SubdivMesh & M, const MatrixXd & VO, const MatrixXi & F
     M.V = X;
     M.fineFace = face;
     M.fineBary = bary;
+    if (foldRule) R.foldedResult = count_folded(X);
+    R.localCalls = proj.nLocal; R.localGrown = proj.nLocalGrown; R.localGlobal = proj.nLocalGlobal;
 
     // ---- checks ----
     double sumMove = 0.0;
@@ -1056,7 +781,7 @@ RelaxReport subdiv_relax(SubdivMesh & M, const MatrixXd & VO, const MatrixXi & F
             for (int64_t q = G.rowOffs[i]; q < G.rowOffs[i + 1]; ++q) mean += X.row(G.cols[q]).transpose();
             mean /= (double)(G.rowOffs[i + 1] - G.rowOffs[i]);
             const Vector3d x = X.row(i).transpose();
-            mv[i] = (proj.project(setId[i], x + 0.5 * (mean - x), face[i], edge[i]).pos - x).norm();
+            mv[i] = (project_step(setId[i], x + 0.5 * (mean - x), face[i], edge[i]).pos - x).norm();
         }, 1000);
         for (int64_t i = 0; i < Vs; ++i) {
             if (mv[i] > R.jacobiStepMove) { R.jacobiStepMove = mv[i]; R.jacobiStepVertex = i; }
@@ -1099,14 +824,21 @@ RelaxReport subdiv_relax(SubdivMesh & M, const MatrixXd & VO, const MatrixXi & F
         "[subdiv_relax]   one step x <- Pi(x + 0.5 L x) from the result: max move %.3g (x diag) at v %lld\n"
         "[subdiv_relax]   fixed-point residual |T^T L x| / edge: sheet %.3g (%lld interior), curve %.3g (%lld interior)\n"
         "[subdiv_relax]   checks: seed off structure %lld, fixed moved %lld, pos != interp %lld, bad bary %lld, "
-        "off own structure %lld\n",
+        "off own structure %lld\n"
+        "[subdiv_relax]   projection: %lld vertex moves, %lld jumps (new fine face shares no vertex with the old), "
+        "largest jump %.3g (x diag)\n"
+        "[subdiv_relax]   no-new-folds rule: %s, folded triangles seed %lld -> result %lld, moves held back %lld\n"
+        "[subdiv_relax]   local projection: %s, %lld calls, %lld grew past the first ring, %lld fell back to global\n",
         opt.solver == RelaxSolver::Newton ? "newton" : "jacobi", R.converged ? "converged" : "NOT CONVERGED",
         (long long)R.itersCurve, R.deltaCurve, (long long)R.itersSheet, R.deltaSheet,
         (long long)R.nFree, (long long)R.nFixed, R.maxMove, R.meanMove,
         (long long)R.halvings, (long long)R.lineSearchStalls, (long long)R.plainSteps, (long long)R.nPinned, now_s() - tStart,
         R.jacobiStepMove, (long long)R.jacobiStepVertex,
         R.residualSheet, (long long)R.nResidualSheet, R.residualCurve, (long long)R.nResidualCurve,
-        (long long)R.seedOffStructure, (long long)R.fixedMoved, (long long)R.posMismatch, (long long)R.badBary, (long long)R.offStructure);
+        (long long)R.seedOffStructure, (long long)R.fixedMoved, (long long)R.posMismatch, (long long)R.badBary, (long long)R.offStructure,
+        (long long)R.projMoves, (long long)R.projJumps, R.projJumpMax,
+        foldRule ? "on" : "off", (long long)R.foldedSeed, (long long)R.foldedResult, (long long)R.foldReverts,
+        opt.localProjection ? "on" : "off", (long long)R.localCalls, (long long)R.localGrown, (long long)R.localGlobal);
     return R;
 }
 

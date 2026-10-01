@@ -81,6 +81,20 @@ struct RelaxOptions {
     // Optional, one entry per vertex: nonzero = held at its seed (counted as fixed).
     // Empty: none extra.
     std::vector<uint8_t> holdFixed;
+    // Newton only. Optional, one row per face of M.F: a reference normal. Triangle
+    // f counts as folded when n_f . foldRef_f <= 0. Non-empty: no step may fold a
+    // triangle that is not folded (folded ones may unfold); vertices of a triangle
+    // a step would fold keep their current position for that step.
+    Eigen::MatrixXd foldRef;
+    // Newton / Jacobi steps project with Projector::project_local (closest point
+    // reachable from the current location) instead of the global closest point.
+    bool localProjection = false;
+    // Newton only: one pass over all free vertices (curves and sheets together)
+    // instead of curves first, then sheets. Needs a symmetric graph (curve rows
+    // that also hold their sheet neighbours, e.g. build_relax_graph with ms =
+    // nullptr and the roles kept), otherwise the curves ignore the sheets and the
+    // result equals the two passes.
+    bool jointPass = false;
 };
 
 struct RelaxReport {
@@ -94,6 +108,14 @@ struct RelaxReport {
     int64_t nCurveAnchors = 0;    // solve_project experiment: extra fixed curve vertices
     std::vector<int64_t> anchors; // solve_project experiment: every anchor vertex chosen  // one vertex per group nothing fixed pulls on
     int64_t plainSteps = 0;       // Newton: plain projected steps taken between Newton rounds
+    int64_t foldReverts = 0;      // Newton + foldRef: vertex moves held back because they would fold a triangle
+    int64_t foldedSeed = -1, foldedResult = -1;  // foldRef: folded triangles at the seed / result
+    // Projection locality, over committed steps: a vertex "jumps" when its new fine
+    // face shares no vertex with its old fine face (it did not slide to the same
+    // or a neighbouring face).
+    int64_t projMoves = 0, projJumps = 0;
+    double  projJumpMax = 0.0;    // largest move of a jump / diagonal
+    int64_t localCalls = 0, localGrown = 0, localGlobal = 0;  // localProjection: project_local counters
     int64_t seedOffStructure = 0; // seed not on its own structure (kept fixed; expected 0)
     double  maxMove = 0.0, meanMove = 0.0;       // |relaxed - seed| / diagonal
     // Fixed-point check: max |tangential (L x)_i| / mean edge length, over free

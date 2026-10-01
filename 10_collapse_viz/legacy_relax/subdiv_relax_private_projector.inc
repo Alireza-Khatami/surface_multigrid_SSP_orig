@@ -1,33 +1,8 @@
-#pragma once
-// Projection of a point onto its own MAT structure (sheet faces / seam and
-// boundary edges), plus the palette helpers it needs. Extracted from
-// subdiv_relax_solve_project.cpp so the coarse-subdivision relaxation
-// (coarse_subdiv_relax.cpp) can use the same projector. Header-only: every
-// function is inline, so each user includes it without duplicate definitions.
-#include "subdiv_relax.h"
-
-#include <Eigen/Dense>
-#include <Eigen/Geometry>
-
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <cstdint>
-#include <cmath>
-#include <limits>
-#include <stdexcept>
-#include <string>
-#include <unordered_map>
-#include <vector>
-
-namespace subdiv_proj {
-
-using Eigen::AlignedBox3d;
-using Eigen::MatrixXd;
-using Eigen::MatrixXi;
-using Eigen::Vector3d;
-
-inline void proj_fail(const std::string & msg) { throw std::runtime_error("[subdiv_relax] " + msg); }
+// RETIRED (2026-09-30): the private copy of the projector that subdiv_relax.cpp
+// carried in its anonymous namespace. It was identical to
+// subdiv_sample_tracker/subdiv_relax_projector.h (namespace subdiv_proj) apart from
+// the error function name; subdiv_relax.cpp now includes that header instead.
+// Not part of the build.
 
 // ---------------------------------------------------------------- palette helpers
 
@@ -36,7 +11,7 @@ struct SetIds {
     std::vector<std::vector<int>> sheet, curve;
 };
 
-inline SetIds split_palette(const StructPalette & pal, const MatStruct * ms)
+SetIds split_palette(const StructPalette & pal, const MatStruct * ms)
 {
     SetIds S;
     S.sheet.resize(pal.size());
@@ -52,7 +27,7 @@ inline SetIds split_palette(const StructPalette & pal, const MatStruct * ms)
     return S;  // palette ids are sorted within a set, so these are too
 }
 
-inline bool intersects(const std::vector<int> & a, const std::vector<int> & b)
+bool intersects(const std::vector<int> & a, const std::vector<int> & b)
 {
     size_t i = 0, j = 0;
     while (i < a.size() && j < b.size()) {
@@ -62,7 +37,7 @@ inline bool intersects(const std::vector<int> & a, const std::vector<int> & b)
     return false;
 }
 
-inline uint8_t role_of(uint8_t mask)
+uint8_t role_of(uint8_t mask)
 {
     if (mask & STRUCT_MASK_JUNCTION) return RELAX_JUNCTION;
     if (mask & (STRUCT_MASK_SEAM | STRUCT_MASK_BOUNDARY)) return RELAX_CURVE;
@@ -84,7 +59,7 @@ inline double seg_t(const Vector3d & p, const Vector3d & a, const Vector3d & b)
 
 // Closest point on triangle abc as barycentric (Ericson, RTCD 5.1.5), robust
 // to degenerate triangles (then the best of the three edges).
-inline Vector3d tri_bary(const Vector3d & p, const Vector3d & a, const Vector3d & b, const Vector3d & c)
+Vector3d tri_bary(const Vector3d & p, const Vector3d & a, const Vector3d & b, const Vector3d & c)
 {
     const Vector3d ab = b - a, ac = c - a;
     const double lmax = std::max({ ab.squaredNorm(), ac.squaredNorm(), (c - b).squaredNorm() });
@@ -219,7 +194,7 @@ struct PrimBVH {
                     }
                 }
             } else {
-                if (sp + 2 > 128) proj_fail("BVH too deep");
+                if (sp + 2 > 128) fail("BVH too deep");
                 // Visit the nearer child first (pushed last).
                 const double dl = nodes[nd.left].box.squaredExteriorDistance(p);
                 const double dr = nodes[nd.right].box.squaredExteriorDistance(p);
@@ -228,60 +203,6 @@ struct PrimBVH {
             }
         }
         return found;
-    }
-
-    // Structural self-check; returns the number of violations (expected 0):
-    // order is a permutation, every child box lies inside its parent's box, the
-    // children split the parent's range, and every leaf box contains the boxes
-    // of its primitives.
-    int64_t structure_errors(const MatrixXd & V) const
-    {
-        const int n = (int)gid.size();
-        int64_t err = 0;
-        std::vector<uint8_t> seen(n, 0);
-        for (int k : order) { if (k < 0 || k >= n || seen[k]) ++err; else seen[k] = 1; }
-        if ((int)order.size() != n) ++err;
-        if (n == 0) return err;
-        if (nodes.empty() || nodes[0].begin != 0 || nodes[0].end != n) ++err;
-        std::vector<uint8_t> covered(n, 0);
-        for (const Node & nd : nodes) {
-            if (nd.left < 0) {
-                for (int k = nd.begin; k < nd.end; ++k) {
-                    const int i = order[k];
-                    ++covered[i];
-                    AlignedBox3d b;
-                    for (int c = 0; c < 3; ++c) if (corner[i][c] >= 0) b.extend(P3(V, corner[i][c]));
-                    if (!nd.box.contains(b)) ++err;
-                }
-            } else {
-                const Node & l = nodes[nd.left], & r = nodes[nd.right];
-                if (!nd.box.contains(l.box) || !nd.box.contains(r.box)) ++err;
-                if (l.begin != nd.begin || l.end != r.begin || r.end != nd.end) ++err;
-            }
-        }
-        for (uint8_t c : covered) if (c != 1) ++err;
-        return err;
-    }
-
-    // Brute-force closest primitive (same arithmetic and tie rule as query), the
-    // reference query() must match exactly.
-    void brute_force(const MatrixXd & V, const Vector3d & p, double & bestD, int & bestGid) const
-    {
-        for (int i = 0; i < (int)gid.size(); ++i) {
-            const auto & c = corner[i];
-            Vector3d q;
-            if (c[2] < 0) {
-                const Vector3d a = P3(V, c[0]), bb = P3(V, c[1]);
-                const double t = seg_t(p, a, bb);
-                q = (1 - t) * a + t * bb;
-            } else {
-                const Vector3d a = P3(V, c[0]), bb = P3(V, c[1]), cc = P3(V, c[2]);
-                const Vector3d b = tri_bary(p, a, bb, cc);
-                q = b(0) * a + b(1) * bb + b(2) * cc;
-            }
-            const double d = (p - q).squaredNorm();
-            if (d < bestD || (d == bestD && gid[i] < bestGid)) { bestD = d; bestGid = gid[i]; }
-        }
     }
 };
 
@@ -325,7 +246,7 @@ struct Projector {
         for (int f = 0; f < nF; ++f)
             for (int c = 0; c < 3; ++c) {
                 const int e = subdiv_find_edge(origEdges, FO(f, c), FO(f, (c + 1) % 3));
-                if (e < 0) proj_fail("face edge missing from origEdges");
+                if (e < 0) fail("face edge missing from origEdges");
                 if (edgeFace[e] < 0) edgeFace[e] = f;
                 edgeFaces[e].push_back(f);
                 vertFaces[FO(f, c)].push_back(f);
@@ -401,6 +322,7 @@ struct Projector {
     // location, used as the initial incumbent when it is a valid target.
     ProjResult project(int k, const Vector3d & p, int curFace, int curEdge) const
     {
+        ProjResult R;
         double bestD = std::numeric_limits<double>::infinity();
         int bestGid = std::numeric_limits<int>::max();
         Vector3d bestBary(1, 0, 0);
@@ -421,100 +343,8 @@ struct Projector {
             bestGid = curFace;
         }
         for (int t : targets[k]) trees[t].query(VO, p, bestD, bestGid, bestBary);
-        if (bestGid == std::numeric_limits<int>::max()) proj_fail("projection found no target");
-        return finish(curve, bestGid, bestBary);
-    }
+        if (bestGid == std::numeric_limits<int>::max()) fail("projection found no target");
 
-    // Counters of project_local (all threads).
-    mutable std::atomic<int64_t> nLocal{0};        // calls
-    mutable std::atomic<int64_t> nLocalGrown{0};   // calls that had to grow past the first ring
-    mutable std::atomic<int64_t> nLocalGlobal{0};  // calls answered by the global project()
-
-    // Local projection: the closest point to p over a neighbourhood of the
-    // current location on the vertex's own structure, instead of over the whole
-    // structure. The neighbourhood starts as the current face (edge) and the
-    // structure faces (edges) around its corners, and grows by one such ring
-    // until the closest point is a local minimum of the distance on the
-    // structure: inside a face, or on an edge / vertex whose structure faces
-    // (edges) are all in the neighbourhood. A vertex therefore reaches only
-    // points connected to where it is, as when sliding, and cannot jump to
-    // another part of its sheet that happens to be closer in 3D. Same closest
-    // point per primitive and tie rule as project(). Falls back to project()
-    // without a valid current location, or after kMaxRounds rounds.
-    ProjResult project_local(int k, const Vector3d & p, int curFace, int curEdge) const
-    {
-        constexpr int kMaxRounds = 64;
-        ++nLocal;
-        const bool curve = isCurveSet[k] != 0;
-        if (curve ? !(curEdge >= 0 && edge_in(k, curEdge)) : !(curFace >= 0 && face_in(k, curFace))) {
-            ++nLocalGlobal;
-            return project(k, p, curFace, curEdge);
-        }
-        std::vector<int> region;
-        auto in_region = [&](int x) { return std::find(region.begin(), region.end(), x) != region.end(); };
-        auto in_struct = [&](int x) { return curve ? edge_in(k, x) : face_in(k, x); };
-        auto add_corner = [&](int v) {
-            for (int x : curve ? vertEdges[v] : vertFaces[v]) if (!in_region(x) && in_struct(x)) region.push_back(x);
-        };
-        auto add_ring = [&](int x) {
-            if (curve) { add_corner(origEdges(x, 0)); add_corner(origEdges(x, 1)); }
-            else       { for (int c = 0; c < 3; ++c) add_corner(FO(x, c)); }
-        };
-        region.push_back(curve ? curEdge : curFace);
-        add_ring(region[0]);
-
-        for (int round = 0; round < kMaxRounds; ++round) {
-            double bestD = std::numeric_limits<double>::infinity();
-            int bestGid = std::numeric_limits<int>::max();
-            Vector3d bestBary(1, 0, 0);
-            for (int x : region) {
-                Vector3d b, q;
-                if (curve) {
-                    const Vector3d a = P3(VO, origEdges(x, 0)), bb = P3(VO, origEdges(x, 1));
-                    const double t = seg_t(p, a, bb);
-                    b = Vector3d(1 - t, t, 0);
-                    q = (1 - t) * a + t * bb;
-                } else {
-                    const Vector3d a = P3(VO, FO(x, 0)), bb = P3(VO, FO(x, 1)), cc = P3(VO, FO(x, 2));
-                    b = tri_bary(p, a, bb, cc);
-                    q = b(0) * a + b(1) * bb + b(2) * cc;
-                }
-                const double d = (p - q).squaredNorm();
-                if (d < bestD || (d == bestD && x < bestGid)) { bestD = d; bestGid = x; bestBary = b; }
-            }
-            // Primitives of the structure that contain the closest point; all in
-            // the region = local minimum, done.
-            bool closed = true;
-            auto need = [&](int x) { if (closed && in_struct(x) && !in_region(x)) closed = false; };
-            if (curve) {
-                if (bestBary(1) == 0) for (int e : vertEdges[origEdges(bestGid, 0)]) need(e);
-                if (bestBary(0) == 0) for (int e : vertEdges[origEdges(bestGid, 1)]) need(e);
-            } else {
-                int nz = 0, zc[3];
-                for (int c = 0; c < 3; ++c) if (bestBary(c) == 0) zc[nz++] = c;
-                if (nz >= 2) {          // on corner v
-                    const int c = 3 - zc[0] - zc[1];
-                    for (int g : vertFaces[FO(bestGid, c)]) need(g);
-                } else if (nz == 1) {   // on the edge opposite corner zc[0]
-                    const int v0 = FO(bestGid, (zc[0] + 1) % 3), v1 = FO(bestGid, (zc[0] + 2) % 3);
-                    for (int g : vertFaces[v0])
-                        if (FO(g, 0) == v1 || FO(g, 1) == v1 || FO(g, 2) == v1) need(g);
-                }
-            }
-            if (closed) return finish(curve, bestGid, bestBary);
-            if (round == 0) ++nLocalGrown;
-            const size_t before = region.size();
-            for (size_t r = 0; r < before; ++r) add_ring(region[r]);
-            if (region.size() == before) return finish(curve, bestGid, bestBary);  // whole component
-        }
-        ++nLocalGlobal;
-        return project(k, p, curFace, curEdge);
-    }
-
-    // (primitive, its barycentrics) -> ProjResult: face + bary in FO corner order.
-    ProjResult finish(bool curve, int bestGid, const Vector3d & bestBary) const
-    {
-        ProjResult R;
         if (curve) {
             const int e = bestGid;
             const int f = edgeFace[e];
@@ -538,5 +368,3 @@ struct Projector {
         return R;
     }
 };
-
-} // namespace subdiv_proj

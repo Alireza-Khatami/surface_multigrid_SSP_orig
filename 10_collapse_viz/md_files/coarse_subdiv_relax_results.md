@@ -1,6 +1,8 @@
 # Relaxing the subdivided coarse mesh on the fine MAT
 
 Status (2026-09-28): implemented and verified; **the relaxed mesh folds**.
+
+**Update 2026-09-30:** see `coarse_subdiv_relax_experiments.md`. The "flipped vs seed" column below is misleading (a seed fold the relaxation fixes counts as a flip); the experiments doc measures absolute folds against each coarse face's majority orientation, and adds the explicit (small-step, all-at-once) relaxation, which beats Newton and improves on the seed in its first ~10-100 steps.
 Code: `coarse_subdiv_relax.{h,cpp}` (commit `83b95db`). Next step undecided,
 see "Options".
 

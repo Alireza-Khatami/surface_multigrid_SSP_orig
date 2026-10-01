@@ -372,9 +372,7 @@ static long long gCoarseSubdivSamples = -1;
 static bool   gCoarseSubdivRelax = true;
 static bool   gStructGateOn = false;         // --mat_struct_check (the relaxation needs it)
 static double gRelaxAnchorTol = 3e-3;        // --subdiv_relax_anchor_tol
-static std::string gCoarseSubdivRelaxMethod = "newton";  // --coarse_subdiv_relax_method newton|solve_project
-static long long gCoarseSubdivRelaxMaxIter = -1;         // --coarse_subdiv_relax_max_iter N (-1: until converged)
-static bool gCoarseSubdivRelaxPerFace = false;           // --coarse_subdiv_relax_per_face
+static CoarseSubdivRelaxConfig gCoarseRelax;  // --coarse_subdiv_relax_* / --explicit_* flags
 
 static bool export_final_outputs(const std::string & out_dir, const std::string & stem)
 {
@@ -409,11 +407,18 @@ static bool export_final_outputs(const std::string & out_dir, const std::string 
             fprintf(stderr, "[coarse_subdiv_relax] skipped: needs --matstruct_path and --mat_struct_check "
                             "(struct IDs of the coarse vertices)\n");
         else if (gCoarseSubdivRelax)
-            coarse_subdiv_relax_export(cmc, csub, gMatStruct, gCoarseSubdivRelaxMethod, gRelaxAnchorTol,
-                                       gCoarseSubdivRelaxMaxIter, gCoarseSubdivRelaxPerFace, gSubdivObjMaxVerts,
-                                       out("coarse_subdiv_at_fine_pos_relaxed_" + gCoarseSubdivRelaxMethod
-                                           + (gCoarseSubdivRelaxPerFace ? "_perface" : "") + "_", ".obj"),
+        {
+            gCoarseRelax.curveAnchorTol = gRelaxAnchorTol;
+            const CoarseSubdivRelaxConfig & c = gCoarseRelax;
+            coarse_subdiv_relax_export(cmc, csub, gMatStruct, c, gSubdivObjMaxVerts,
+                                       out("coarse_subdiv_at_fine_pos_relaxed_" + c.method
+                                           + (c.perCoarseFace ? "_perface" : "")
+                                           + (c.noNewFolds ? "_nofold" : "")
+                                           + (c.localProjection ? "_local" : "")
+                                           + (c.jointPass ? "_joint" : "")
+                                           + (c.method == "explicit" && c.explicitGlobalProj ? "_global" : "") + "_", ".obj"),
                                        out_dir + "laplacian_graph", "coarse_subdiv_" + stem);
+        }
     }
     simp_viz_tracker_write_json(cmc, json);
 
@@ -642,6 +647,17 @@ int main(int argc, char * argv[])
     //                          coarse_subdiv_at_fine_pos_relaxed_<method>_*.obj
     // [--coarse_subdiv_relax_per_face]  hold the vertices on coarse vertices / edges at their
     //                          seeds and relax only each coarse face's interior (*_<method>_perface_*.obj)
+    // [--coarse_subdiv_relax_no_new_folds]  newton only: no step may fold a triangle that is not
+    //                          folded at the seed (folded ones may unfold) (*_<method>[_perface]_nofold_*.obj)
+    // [--coarse_subdiv_relax_local_proj]  newton only: project each step to the closest point
+    //                          reachable from the vertex's current location, not the global closest (*_local_*.obj)
+    // [--coarse_subdiv_relax_joint]  newton only: relax curves and sheets in one pass on the symmetric
+    //                          mesh graph (curve vertices also pulled by sheet neighbours) (*_joint_*.obj)
+    // [--coarse_subdiv_relax_method explicit]  small Laplacian steps x <- Pi(x + lambda (mean - x)) on all
+    //                          free vertices at once, symmetric graph, no linear solve
+    //                          (coarse_subdiv_relax_explicit.cpp); snapshots *_it<N>.obj
+    // [--explicit_lambda L]    default 0.5   [--explicit_max_iter N] default 20000
+    // [--explicit_tol T]       default 1e-7 (x diag)   [--explicit_global_proj] global closest point
     // [--subdiv_obj_max_verts N]  default: 2000000 — write subdiv_fine_*.obj (incl. subdiv_fine_at_coarse_pos_*.obj)
     //                             only up to N vertices
     // [--track_face_flip F]    face-flip debug tracker on gFO face F (needs --n_subdiv_samples)
@@ -667,7 +683,15 @@ int main(int argc, char * argv[])
         } else if (a == "--no_coarse_subdiv_relax") {
             gCoarseSubdivRelax = false;
         } else if (a == "--coarse_subdiv_relax_per_face") {
-            gCoarseSubdivRelaxPerFace = true;
+            gCoarseRelax.perCoarseFace = true;
+        } else if (a == "--coarse_subdiv_relax_no_new_folds") {
+            gCoarseRelax.noNewFolds = true;
+        } else if (a == "--coarse_subdiv_relax_local_proj") {
+            gCoarseRelax.localProjection = true;
+        } else if (a == "--coarse_subdiv_relax_joint") {
+            gCoarseRelax.jointPass = true;
+        } else if (a == "--explicit_global_proj") {
+            gCoarseRelax.explicitGlobalProj = true;
         } else if (i + 1 < argc) {
             if      (a == "--mesh_path")        meshPath          = argv[i+1];
             else if (a == "--target_faces")     targetFaces       = std::stoi(argv[i+1]);
@@ -679,8 +703,11 @@ int main(int argc, char * argv[])
             else if (a == "--subdiv_obj_max_verts") gSubdivObjMaxVerts = std::stoll(argv[i+1]);
             else if (a == "--n_coarse_subdiv_samples") gCoarseSubdivSamples = std::stoll(argv[i+1]);
             else if (a == "--subdiv_relax_method") subdivRelaxMethod = argv[i+1];
-            else if (a == "--coarse_subdiv_relax_method") gCoarseSubdivRelaxMethod = argv[i+1];
-            else if (a == "--coarse_subdiv_relax_max_iter") gCoarseSubdivRelaxMaxIter = std::stoll(argv[i+1]);
+            else if (a == "--coarse_subdiv_relax_method") gCoarseRelax.method = argv[i+1];
+            else if (a == "--coarse_subdiv_relax_max_iter") gCoarseRelax.maxIter = std::stoll(argv[i+1]);
+            else if (a == "--explicit_lambda") gCoarseRelax.explicitLambda = std::stod(argv[i+1]);
+            else if (a == "--explicit_max_iter") gCoarseRelax.explicitMaxIter = std::stoll(argv[i+1]);
+            else if (a == "--explicit_tol") gCoarseRelax.explicitTol = std::stod(argv[i+1]);
             else if (a == "--subdiv_relax_curve_anchors") subdivCurveAnchors = std::stoi(argv[i+1]);
             else if (a == "--subdiv_relax_anchor_tol") subdivAnchorTol = std::stod(argv[i+1]);
             else { continue; }

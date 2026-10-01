@@ -1,4 +1,5 @@
 #include "coarse_subdiv_relax.h"
+#include "coarse_subdiv_relax_explicit.h"
 #include "collapse_structure_tracker/simp_viz_tracker.h"
 #include "subdiv_sample_tracker/subdiv_relax.h"
 #include "subdiv_sample_tracker/subdiv_relax_projector.h"
@@ -272,11 +273,13 @@ static void verify_projector_bvh(const Projector & proj, int nPts)
 }
 
 void coarse_subdiv_relax_export(const CoarseMeshCompaction & cmc, const CoarseSubdivC2F & C,
-                                const MatStruct & ms, const std::string & method, double curveAnchorTol,
-                                int64_t maxIter, bool perCoarseFace,
+                                const MatStruct & ms, const CoarseSubdivRelaxConfig & cfg,
                                 int64_t maxObjVerts, const std::string & objPath,
                                 const std::string & graphDir, const std::string & graphStem)
 {
+    const std::string & method = cfg.method;
+    const bool isExplicit = method == "explicit";
+    if (method != "newton" && method != "solve_project" && !isExplicit) relax_fail("unknown relax method " + method);
     const int64_t Vs = C.S.V.rows();
     const double diag = (gVO.leftCols(3).colwise().maxCoeff() - gVO.leftCols(3).colwise().minCoeff()).norm();
 
@@ -356,13 +359,26 @@ void coarse_subdiv_relax_export(const CoarseMeshCompaction & cmc, const CoarseSu
             (long long)unmapped, (long long)noTarget);
 
     // 4. Relax with the existing graph and solver.
-    const RelaxGraph G = build_relax_graph(M, pal, setId, &ms);
+    RelaxGraph G = build_relax_graph(M, pal, setId, &ms);
+    if (cfg.jointPass || isExplicit) {
+        // Symmetric graph: every row holds all its mesh neighbours (the plain
+        // two-way adjacency), roles kept. Curve vertices then also feel the
+        // sheet vertices next to them; they still only slide along their curve.
+        RelaxGraph J = build_relax_graph(M, pal, setId, nullptr);
+        J.role = G.role;
+        G = std::move(J);
+    }
     const MatrixXd Vseed = M.V;
     const MeshQuality q0 = subdiv_mesh_quality(M.V, M.F);
     RelaxOptions opt;
-    opt.curveAnchorTol = curveAnchorTol;
-    opt.maxIter = maxIter;
-    if (perCoarseFace) {
+    opt.curveAnchorTol = cfg.curveAnchorTol;
+    opt.maxIter = cfg.maxIter;
+    opt.localProjection = cfg.localProjection;
+    opt.jointPass = cfg.jointPass;
+    if (cfg.jointPass && method == "solve_project")
+        fprintf(stderr, "[coarse_subdiv_relax] WARNING: the joint pass is Newton only; solve_project keeps two passes "
+                        "(on the symmetric graph)\n");
+    if (cfg.perCoarseFace) {
         // C.S carriers are those of the coarse mesh (M's were overwritten above).
         opt.holdFixed.resize(Vs);
         int64_t held = 0;
@@ -373,21 +389,66 @@ void coarse_subdiv_relax_export(const CoarseMeshCompaction & cmc, const CoarseSu
         fprintf(stderr, "[coarse_subdiv_relax] per coarse face: %lld vertices on coarse vertices / edges held at their seeds\n",
                 (long long)held);
     }
-    if (method != "newton" && method != "solve_project") relax_fail("unknown relax method " + method);
+    MatrixXd foldRef;  // empty unless built below
+    if (cfg.noNewFolds || isExplicit) {
+        // Reference normal of each subdivided triangle: its coarse face's normal,
+        // signed to agree with the majority of that coarse face's seed triangles
+        // (some coarse faces are oriented against the fine sheet under them, which
+        // is not a fold). Folded = disagrees with that majority.
+        const int64_t nF = M.F.rows();
+        const int FC = (int)cmc.Fout.rows();
+        auto n_of = [&](const MatrixXd & P, const Vector3i & t) {
+            const Vector3d a = P.row(t(0)).transpose(), b = P.row(t(1)).transpose(), c = P.row(t(2)).transpose();
+            return Vector3d((b - a).cross(c - a));
+        };
+        std::vector<Vector3d> cn(FC, Vector3d::Zero());
+        std::vector<int64_t> vote(FC, 0);
+        for (int64_t f = 0; f < nF; ++f) {
+            const int cf = C.S.faceOrig[f];
+            if (cf < 0 || cf >= FC) relax_fail("subdivided face without a coarse face");
+            const Vector3d nc = n_of(C.S.V, M.F.row(f).transpose());
+            cn[cf] += nc;
+            vote[cf] += n_of(M.V, M.F.row(f).transpose()).dot(nc) >= 0 ? 1 : -1;
+        }
+        foldRef.resize(nF, 3);
+        for (int64_t f = 0; f < nF; ++f) {
+            const int cf = C.S.faceOrig[f];
+            foldRef.row(f) = ((vote[cf] >= 0 ? 1.0 : -1.0) * cn[cf].normalized()).transpose();
+        }
+        opt.foldRef = foldRef;
+        if (cfg.noNewFolds && method == "solve_project")
+            fprintf(stderr, "[coarse_subdiv_relax] WARNING: the no-new-folds rule is ignored by solve_project\n");
+        if (!cfg.noNewFolds) opt.foldRef.resize(0, 3);  // explicit: built for logging only
+    }
     if (!graphDir.empty()) {
         std::vector<uint8_t> fixed(Vs);
         for (int64_t i = 0; i < Vs; ++i)
             fixed[i] = G.role[i] == RELAX_JUNCTION || (!opt.holdFixed.empty() && opt.holdFixed[i]);
         export_relax_graph_ply(graphDir, graphStem, G, M.V, pal, S, setId, ms, fixed);
     }
-    const RelaxReport R = method == "newton" ? subdiv_relax(M, gVO, gFO, &ms, pal, setId, G, opt)
-                                             : subdiv_relax_solve_project(M, gVO, gFO, &ms, pal, setId, G, opt);
+    RelaxReport R;
+    if (isExplicit) {
+        ExplicitRelaxOptions eo;
+        eo.lambda = cfg.explicitLambda;
+        eo.maxIter = cfg.explicitMaxIter;
+        eo.tol = cfg.explicitTol;
+        eo.localProjection = !cfg.explicitGlobalProj;
+        eo.holdFixed = opt.holdFixed;
+        eo.noNewFolds = cfg.noNewFolds;
+        eo.foldRef = foldRef;
+        eo.snapshotPrefix = objPath.substr(0, objPath.size() - 4) + "_";
+        R = subdiv_relax_explicit(M, gVO, gFO, &ms, pal, setId, G, eo);
+    } else {
+        R = method == "newton" ? subdiv_relax(M, gVO, gFO, &ms, pal, setId, G, opt)
+                               : subdiv_relax_solve_project(M, gVO, gFO, &ms, pal, setId, G, opt);
+    }
     const MeshQuality q1 = subdiv_mesh_quality(M.V, M.F, &Vseed);
     fprintf(stderr,
         "[coarse_subdiv_relax] relaxation (%s), before -> after: edge CV %.4f -> %.4f | min angle %.3f -> %.3f, "
         "p1 %.3f -> %.3f, p5 %.3f -> %.3f, median %.3f -> %.3f deg | degenerate %lld -> %lld | "
         "flipped vs seed %lld | move max %.3g mean %.3g (x diag)\n",
-        (method + (perCoarseFace ? ", per coarse face" : "")).c_str(), q0.edgeCV, q1.edgeCV, q0.minAngle, q1.minAngle, q0.p1, q1.p1, q0.p5, q1.p5, q0.median, q1.median,
+        (method + (cfg.perCoarseFace ? ", per coarse face" : "") + (cfg.noNewFolds ? ", no new folds" : "")
+         + (cfg.localProjection ? ", local projection" : "") + (cfg.jointPass ? ", joint pass" : "")).c_str(), q0.edgeCV, q1.edgeCV, q0.minAngle, q1.minAngle, q0.p1, q1.p1, q0.p5, q1.p5, q0.median, q1.median,
         (long long)q0.degenerate, (long long)q1.degenerate, (long long)q1.flippedVsRef, R.maxMove, R.meanMove);
     if (R.seedOffStructure || R.fixedMoved || R.posMismatch || R.badBary || R.offStructure)
         relax_fail("relaxation consistency checks failed");
