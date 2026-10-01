@@ -34,6 +34,7 @@ struct CoarseSubdivRelaxConfig {
     bool    noNewFolds = false;     // newton / explicit: no step may fold an unfolded triangle
     bool    localProjection = false;// newton: closest point reachable from the current location
     bool    jointPass = false;      // newton: curves + sheets in one pass on the symmetric graph
+    bool    jointSolve = false;     // solve_project: one LU solve of curves + sheets (directed graph)
     // explicit
     double  explicitLambda = 0.5;
     int64_t explicitMaxIter = 20000;

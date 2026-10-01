@@ -15,6 +15,7 @@
 #   --coarse_subdiv_relax_no_new_folds no step may fold an unfolded triangle (newton)
 #   --coarse_subdiv_relax_local_proj   closest point reachable from the current location (newton)
 #   --coarse_subdiv_relax_joint        curves + sheets in one pass, symmetric graph (newton)
+#   --coarse_subdiv_relax_joint_solve  solve_project: one LU solve of curves + sheets (directed graph)
 #   --coarse_subdiv_relax_max_iter N
 set -e
 name=$1; shift
@@ -24,4 +25,4 @@ rm -rf "$R/$name"; mkdir -p "$R/$name"
 build/release/Release/collapse_viz_bin.exe --mesh_path "$D.obj" --matstruct_path "$D.ma_struct" \
     --target_faces 200 --mode qslim --n_subdiv_samples 200000 --mat_struct_check \
     --output_dir "./$R/$name/" "$@" > "$R/$name.log" 2>&1
-grep -hE "^\[relax_explicit\] (converged|NOT)|^\[subdiv_relax\] newton:|projection:|no-new-folds|local projection:|relaxation \(|checks:" "$R/$name.log"
+grep -hE "^\[relax_explicit\] (converged|NOT)|^\[subdiv_relax\] (newton:|joint:|curve:|sheet:)|projection:|no-new-folds|local projection:|relaxation \(|checks:" "$R/$name.log"

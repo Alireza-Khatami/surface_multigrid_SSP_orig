@@ -78,6 +78,10 @@ struct RelaxOptions {
     // solve_project experiment only, used when curveAnchors == 0: adaptive anchors,
     // Douglas-Peucker on each seam chain with this tolerance (x bbox diagonal).
     double  curveAnchorTol = 0.0;
+    // solve_project only: one joint solve of curves + sheets instead of two passes
+    // (in the two passes the curves are projected before the sheet pass). Restored
+    // from commit 84b44fc for the coarse subdivision.
+    bool    jointSolve = false;
     // Optional, one entry per vertex: nonzero = held at its seed (counted as fixed).
     // Empty: none extra.
     std::vector<uint8_t> holdFixed;

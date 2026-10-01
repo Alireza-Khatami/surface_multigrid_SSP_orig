@@ -416,6 +416,7 @@ static bool export_final_outputs(const std::string & out_dir, const std::string 
                                            + (c.noNewFolds ? "_nofold" : "")
                                            + (c.localProjection ? "_local" : "")
                                            + (c.jointPass ? "_joint" : "")
+                                           + (c.jointSolve ? "_jointsolve" : "")
                                            + (c.method == "explicit" && c.explicitGlobalProj ? "_global" : "") + "_", ".obj"),
                                        out_dir + "laplacian_graph", "coarse_subdiv_" + stem);
         }
@@ -653,6 +654,8 @@ int main(int argc, char * argv[])
     //                          reachable from the vertex's current location, not the global closest (*_local_*.obj)
     // [--coarse_subdiv_relax_joint]  newton only: relax curves and sheets in one pass on the symmetric
     //                          mesh graph (curve vertices also pulled by sheet neighbours) (*_joint_*.obj)
+    // [--coarse_subdiv_relax_joint_solve]  solve_project only: one LU solve of curves + sheets at once
+    //                          (directed graph, DP anchors + junctions fixed), then projection (*_jointsolve_*.obj)
     // [--coarse_subdiv_relax_method explicit]  small Laplacian steps x <- Pi(x + lambda (mean - x)) on all
     //                          free vertices at once, symmetric graph, no linear solve
     //                          (coarse_subdiv_relax_explicit.cpp); snapshots *_it<N>.obj
@@ -690,6 +693,8 @@ int main(int argc, char * argv[])
             gCoarseRelax.localProjection = true;
         } else if (a == "--coarse_subdiv_relax_joint") {
             gCoarseRelax.jointPass = true;
+        } else if (a == "--coarse_subdiv_relax_joint_solve") {
+            gCoarseRelax.jointSolve = true;
         } else if (a == "--explicit_global_proj") {
             gCoarseRelax.explicitGlobalProj = true;
         } else if (i + 1 < argc) {

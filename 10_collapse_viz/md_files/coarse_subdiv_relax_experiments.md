@@ -76,6 +76,34 @@ The relaxation's damage is densest at the seams (Newton: 1.7x the folds and
 3.6x the degenerate triangles of the far interior), but not confined to them.
 Relaxing everything at once lowers it in every band, least at the seam itself.
 
+### solve_project: one joint solve instead of two passes
+
+`solve_project` solves L x = 0 in 3D once per pass (curves with junctions and
+Douglas-Peucker anchors fixed, project; then sheets against the projected
+curves, project). `--coarse_subdiv_relax_joint_solve` (restored from commit
+84b44fc) solves all free curve and sheet vertices in one system instead (the
+directed graph makes it non-symmetric; sparse LU, relative residual 1.2e-14).
+Runs `sp` and `sp_joint`:
+
+| run | folded | removed | new | degenerate | edge CV |
+|---|---|---|---|---|---|
+| `solve_project`, two passes | 55,738 | 2,807 | 53,377 | 71,431 | 1.020 |
+| `solve_project`, joint solve | 64,985 | 2,787 | 62,604 | 85,090 | 1.021 |
+
+| ring from seam | 0 | 1-2 | 3-5 | 6-10 | 11+ |
+|---|---|---|---|---|---|
+| two passes (folded / degenerate) | 16.8% / 22.3% | 16.2% / 21.2% | 15.4% / 19.9% | 14.0% / 17.9% | 11.1% / 13.9% |
+| joint | 25.6% / 33.4% | 21.5% / 28.5% | 18.0% / 24.2% | 15.3% / 20.1% | 12.0% / 15.2% |
+
+- The curves come out identical (curve rows never see sheets); the sheets differ
+  only in seeing the curves **before** projection, on the chords between the
+  anchors. The extra damage sits at the seams and fades with distance. Same
+  conclusion as on the fine subdivision
+  (`subdiv_relax_solve_project_experiments.md`): keep the two passes.
+- Both variants are far worse than the iterative methods on the coarse
+  subdivision: one 3D solve places sheet vertices up to 0.027 x diag off the
+  curved MAT, and projecting them back piles them up (17-33% degenerate).
+
 ## 3. Projection
 
 `Projector::project` (`subdiv_sample_tracker/subdiv_relax_projector.h`) returns
@@ -115,6 +143,7 @@ and 38 curve trees (edges).
 | `--coarse_subdiv_relax_no_new_folds` | Newton and explicit: a step may not fold an unfolded triangle (its moved vertices are held back for that step); folded ones may unfold |
 | `--coarse_subdiv_relax_local_proj` | Newton: local projection (section 3) |
 | `--coarse_subdiv_relax_joint` | Newton: one pass over curves and sheets on the symmetric graph |
+| `--coarse_subdiv_relax_joint_solve` | solve_project: one LU solve of curves and sheets on the directed graph |
 | (always) | relaxation graph at the seed as `laplacian_graph/{sheets,curves,junctions}_coarse_subdiv_<stem>.ply`, coloured by structure id; projector BVH check; projection jump counter |
 
 The options are collected in `CoarseSubdivRelaxConfig` (`coarse_subdiv_relax.h`).

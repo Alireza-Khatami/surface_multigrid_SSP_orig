@@ -375,6 +375,9 @@ void coarse_subdiv_relax_export(const CoarseMeshCompaction & cmc, const CoarseSu
     opt.maxIter = cfg.maxIter;
     opt.localProjection = cfg.localProjection;
     opt.jointPass = cfg.jointPass;
+    opt.jointSolve = cfg.jointSolve;
+    if (cfg.jointSolve && method != "solve_project")
+        fprintf(stderr, "[coarse_subdiv_relax] WARNING: the joint solve is solve_project only; ignored by %s\n", method.c_str());
     if (cfg.jointPass && method == "solve_project")
         fprintf(stderr, "[coarse_subdiv_relax] WARNING: the joint pass is Newton only; solve_project keeps two passes "
                         "(on the symmetric graph)\n");
@@ -448,7 +451,8 @@ void coarse_subdiv_relax_export(const CoarseMeshCompaction & cmc, const CoarseSu
         "p1 %.3f -> %.3f, p5 %.3f -> %.3f, median %.3f -> %.3f deg | degenerate %lld -> %lld | "
         "flipped vs seed %lld | move max %.3g mean %.3g (x diag)\n",
         (method + (cfg.perCoarseFace ? ", per coarse face" : "") + (cfg.noNewFolds ? ", no new folds" : "")
-         + (cfg.localProjection ? ", local projection" : "") + (cfg.jointPass ? ", joint pass" : "")).c_str(), q0.edgeCV, q1.edgeCV, q0.minAngle, q1.minAngle, q0.p1, q1.p1, q0.p5, q1.p5, q0.median, q1.median,
+         + (cfg.localProjection ? ", local projection" : "") + (cfg.jointPass ? ", joint pass" : "")
+         + (cfg.jointSolve ? ", joint solve" : "")).c_str(), q0.edgeCV, q1.edgeCV, q0.minAngle, q1.minAngle, q0.p1, q1.p1, q0.p5, q1.p5, q0.median, q1.median,
         (long long)q0.degenerate, (long long)q1.degenerate, (long long)q1.flippedVsRef, R.maxMove, R.meanMove);
     if (R.seedOffStructure || R.fixedMoved || R.posMismatch || R.badBary || R.offStructure)
         relax_fail("relaxation consistency checks failed");
