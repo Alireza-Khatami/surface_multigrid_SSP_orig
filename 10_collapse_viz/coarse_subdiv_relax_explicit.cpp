@@ -140,6 +140,8 @@ RelaxReport subdiv_relax_explicit(SubdivMesh & M, const MatrixXd & VO, const Mat
             fprintf(stderr, "[relax_explicit] writeOBJ failed: %s\n", path.c_str());
     };
     if (haveRef) R.foldedSeed = count_folded(X);
+    proj.reset_stats();  // projection statistics of the iterations only (not the seed check)
+    ProjStats lastLog;
     fprintf(stderr, "[relax_explicit] %lld free, %lld fixed (%lld pinned, %lld seeds off structure) | lambda %.3g, "
                     "tol %.3g x diag, max %lld iterations | %s projection | no new folds %s | %s weights%s | "
                     "energy %.6g, folded %lld\n",
@@ -216,10 +218,15 @@ RelaxReport subdiv_relax_explicit(SubdivMesh & M, const MatrixXd & VO, const Mat
         }
         lastMove = m;
         snapshot(it + 1);
-        if ((it + 1) % opt.logEvery == 0 || m <= tolAbs)
-            fprintf(stderr, "[relax_explicit] iter %lld: max move %.3g (x diag), energy %.6g, folded %lld, degenerate %lld (%.1f s)\n",
+        if ((it + 1) % opt.logEvery == 0 || m <= tolAbs) {
+            const ProjStats now = proj.stats(), d = now - lastLog;
+            lastLog = now;
+            fprintf(stderr, "[relax_explicit] iter %lld: max move %.3g (x diag), energy %.6g, folded %lld, degenerate %lld | "
+                            "projection: %.2f%% on an edge/vertex, off-surface distance mean %.3g max %.3g (x diag) (%.1f s)\n",
                     (long long)(it + 1), m / diag, energy(X), (long long)count_folded(X), (long long)count_degenerate(X),
-                    now_s() - tStart);
+                    d.calls ? 100.0 * d.onBorder / d.calls : 0.0, d.calls ? d.distSum / d.calls / diag : 0.0,
+                    now.distMax / diag, now_s() - tStart);
+        }
         if (m <= tolAbs) { ++it; R.converged = true; break; }
     }
     R.itersSheet = it;
@@ -230,6 +237,7 @@ RelaxReport subdiv_relax_explicit(SubdivMesh & M, const MatrixXd & VO, const Mat
     M.fineBary = bary;
     if (haveRef) R.foldedResult = count_folded(X);
     R.localCalls = proj.nLocal; R.localGrown = proj.nLocalGrown; R.localGlobal = proj.nLocalGlobal;
+    const ProjStats ps = proj.stats();
 
     // ---- checks (as subdiv_relax)
     double sumMove = 0.0;
@@ -260,12 +268,16 @@ RelaxReport subdiv_relax_explicit(SubdivMesh & M, const MatrixXd & VO, const Mat
         "folded %lld -> %lld, moves held back %lld (%.1f s)\n"
         "[relax_explicit]   projection: %lld vertex moves, %lld jumps, largest jump %.3g (x diag); local calls %lld, "
         "grew past the first ring %lld, fell back to global %lld\n"
+        "[relax_explicit]   projection over all iterations: %lld calls, %.2f%% on an edge/vertex of their "
+        "triangle (or an end of their edge), off-surface distance mean %.3g max %.3g (x diag), barycentric fix-ups %lld\n"
         "[relax_explicit]   checks: seed off structure %lld, fixed moved %lld, pos != interp %lld, bad bary %lld, "
         "off own structure %lld\n",
         R.converged ? "converged" : "NOT CONVERGED", (long long)R.itersSheet, R.deltaSheet, R.maxMove, R.meanMove,
         (long long)R.foldedSeed, (long long)R.foldedResult, (long long)R.foldReverts, now_s() - tStart,
         (long long)R.projMoves, (long long)R.projJumps, R.projJumpMax, (long long)R.localCalls,
         (long long)R.localGrown, (long long)R.localGlobal,
+        (long long)ps.calls, ps.calls ? 100.0 * ps.onBorder / ps.calls : 0.0,
+        ps.calls ? ps.distSum / ps.calls / diag : 0.0, ps.distMax / diag, (long long)ps.baryFix,
         (long long)R.seedOffStructure, (long long)R.fixedMoved, (long long)R.posMismatch, (long long)R.badBary,
         (long long)R.offStructure);
     return R;

@@ -287,6 +287,31 @@ struct PrimBVH {
 
 // ---------------------------------------------------------------- projector
 
+inline void atomic_add(std::atomic<double> & a, double v)
+{
+    double o = a.load();
+    while (!a.compare_exchange_weak(o, o + v)) {}
+}
+inline void atomic_max(std::atomic<double> & a, double v)
+{
+    double o = a.load();
+    while (v > o && !a.compare_exchange_weak(o, v)) {}
+}
+
+// Snapshot of the projector's statistics (see Projector::stats()).
+struct ProjStats {
+    int64_t calls = 0;     // projections
+    int64_t onBorder = 0;  // result on an edge or vertex of its triangle (sheets) or at an end of its edge (curves)
+    int64_t baryFix = 0;   // results whose barycentrics needed more than rounding cleanup (expected 0)
+    double  distSum = 0.0, distMax = 0.0;  // |input point - projected point|
+    ProjStats operator-(const ProjStats & o) const
+    {
+        ProjStats r = *this;
+        r.calls -= o.calls; r.onBorder -= o.onBorder; r.baryFix -= o.baryFix; r.distSum -= o.distSum;
+        return r;  // distMax is not differenced
+    }
+};
+
 struct ProjResult {
     int face = -1;         // FO row
     Vector3d bary;         // in FO.row(face) corner order
@@ -422,7 +447,36 @@ struct Projector {
         }
         for (int t : targets[k]) trees[t].query(VO, p, bestD, bestGid, bestBary);
         if (bestGid == std::numeric_limits<int>::max()) proj_fail("projection found no target");
-        return finish(curve, bestGid, bestBary);
+        return record(p, finish(curve, bestGid, bestBary));
+    }
+
+    // Projection statistics (all threads); reset with reset_stats().
+    mutable std::atomic<int64_t> statCalls{0}, statOnBorder{0}, statBaryFix{0};
+    mutable std::atomic<double> statDistSum{0.0}, statDistMax{0.0};
+    void reset_stats() const
+    {
+        statCalls = 0; statOnBorder = 0; statBaryFix = 0; statDistSum = 0.0; statDistMax = 0.0;
+    }
+    ProjStats stats() const
+    {
+        ProjStats s;
+        s.calls = statCalls; s.onBorder = statOnBorder; s.baryFix = statBaryFix;
+        s.distSum = statDistSum; s.distMax = statDistMax;
+        return s;
+    }
+    // Records one projection of p with result R.
+    ProjResult record(const Vector3d & p, const ProjResult & R) const
+    {
+        ++statCalls;
+        int zeros = 0;
+        for (int c = 0; c < 3; ++c) if (R.bary(c) == 0.0) ++zeros;
+        // sheets: a zero coordinate = on an edge / vertex; curves: two non-zero
+        // coordinates inside the edge, so a third zero beyond the face's own one = at an end
+        if (R.edge >= 0 ? zeros >= 2 : zeros >= 1) ++statOnBorder;
+        const double d = (p - R.pos).norm();
+        atomic_add(statDistSum, d);
+        atomic_max(statDistMax, d);
+        return R;
     }
 
     // Counters of project_local (all threads).
@@ -501,11 +555,11 @@ struct Projector {
                         if (FO(g, 0) == v1 || FO(g, 1) == v1 || FO(g, 2) == v1) need(g);
                 }
             }
-            if (closed) return finish(curve, bestGid, bestBary);
+            if (closed) return record(p, finish(curve, bestGid, bestBary));
             if (round == 0) ++nLocalGrown;
             const size_t before = region.size();
             for (size_t r = 0; r < before; ++r) add_ring(region[r]);
-            if (region.size() == before) return finish(curve, bestGid, bestBary);  // whole component
+            if (region.size() == before) return record(p, finish(curve, bestGid, bestBary));  // whole component
         }
         ++nLocalGlobal;
         return project(k, p, curFace, curEdge);
@@ -531,6 +585,7 @@ struct Projector {
         }
         // Clean rounding: no negatives, exact sum 1 is not representable in
         // general, so only renormalise when off by more than an ulp-level.
+        if (R.bary.minCoeff() < -1e-12 || std::abs(R.bary.sum() - 1.0) > 1e-12) ++statBaryFix;
         for (int c = 0; c < 3; ++c) if (R.bary(c) < 0) R.bary(c) = 0;
         const double s = R.bary.sum();
         if (std::abs(s - 1.0) > 1e-15) R.bary /= s;

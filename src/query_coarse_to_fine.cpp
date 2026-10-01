@@ -2,6 +2,7 @@
 #include <iostream>
 #include <atomic>
 #include <sstream>
+#include <algorithm>
 
 void query_coarse_to_fine(
   const std::vector<single_collapse_data> & decInfo,
@@ -11,7 +12,8 @@ void query_coarse_to_fine(
   const Eigen::VectorXi & faceSheetID,
   Eigen::MatrixXd & BC,
   Eigen::MatrixXi & BF,
-  Eigen::VectorXi & FIdx)
+  Eigen::VectorXi & FIdx,
+  C2FQueryStats * stats)
 {
   using namespace std;
   using namespace Eigen;
@@ -27,6 +29,15 @@ void query_coarse_to_fine(
   std::atomic<int> cnt_sheet_fallback{0};
   std::atomic<int> cnt_sheet_miss{0};
   std::atomic<int> cnt_pre_row_miss{0};
+
+  if (stats) {
+    stats->steps.setZero(numQuery);
+    stats->clamped.setZero(numQuery);
+    stats->farOutside.setZero(numQuery);
+    stats->maxNegBary.setZero(numQuery);
+    stats->sumNegBary.setZero(numQuery);
+    stats->maxSnapRel.setZero(numQuery);
+  }
 
 #ifdef SSP_LSCM_LOG
   fprintf(stderr,
@@ -50,7 +61,7 @@ void query_coarse_to_fine(
   igl::parallel_for(
     numQuery,
     [&verbose, &FIdx, &BC, &BF, &decIM, &decInfo, &queryCounts, &faceSheetID,
-     &cnt_early_exit, &cnt_sheet_fallback, &cnt_sheet_miss, &cnt_pre_row_miss](const int qIdx)
+     &cnt_early_exit, &cnt_sheet_fallback, &cnt_sheet_miss, &cnt_pre_row_miss, stats](const int qIdx)
   {
 #ifdef SSP_LSCM_LOG
     // Per-query log buffer — flushed atomically so parallel output doesn't interleave.
@@ -203,10 +214,32 @@ void query_coarse_to_fine(
       }
 
       // Clamp small negatives from numerical error
+      const double negBary = -B.row(idxToFUV).minCoeff();  // > 0: outside the chosen triangle
       B(idxToFUV, 0) = max(0.0, B(idxToFUV, 0));
       B(idxToFUV, 1) = max(0.0, B(idxToFUV, 1));
       B(idxToFUV, 2) = max(0.0, B(idxToFUV, 2));
       B.row(idxToFUV) = B.row(idxToFUV).array() / B.row(idxToFUV).sum();
+
+      if (stats) {
+        ++stats->steps(qIdx);
+        if (distToValid(idxToFUV) >= 1.0) ++stats->farOutside(qIdx);
+        if (negBary > 1e-12) {
+          ++stats->clamped(qIdx);
+          stats->maxNegBary(qIdx) = max(stats->maxNegBary(qIdx), negBary);
+          stats->sumNegBary(qIdx) += negBary;
+          // Snap distance in the pre-collapse chart, relative to the triangle size.
+          Eigen::Vector2d corner[3], snapped = Eigen::Vector2d::Zero();
+          for (int c = 0; c < 3; c++) {
+            corner[c] = sd.UV_pre.row(sd.FUV_pre(idxToFUV, c)).transpose().head<2>();
+            snapped += B(idxToFUV, c) * corner[c];
+          }
+          const Eigen::Vector2d q2(queryUV(0), queryUV(1));
+          const double edge = max({ (corner[1] - corner[0]).norm(), (corner[2] - corner[1]).norm(),
+                                    (corner[0] - corner[2]).norm() });
+          if (edge > 0)
+            stats->maxSnapRel(qIdx) = max(stats->maxSnapRel(qIdx), (q2 - snapped).norm() / edge);
+        }
+      }
 
       int new_FIdx = sd.FIdx_pre(idxToFUV);
       int new_v0   = sd.subsetVIdx(sd.FUV_pre(idxToFUV,0));

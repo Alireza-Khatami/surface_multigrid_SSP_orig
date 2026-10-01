@@ -7,6 +7,7 @@
 #include <igl/writeOBJ.h>
 #include <Eigen/Dense>
 
+#include <algorithm>
 #include <cstdio>
 #include <vector>
 
@@ -97,7 +98,36 @@ CoarseSubdivC2F coarse_subdiv_c2f_build(const CoarseMeshCompaction & cmc, int64_
     // SSP never renumbers vertices or faces: identity maps.
     const VectorXi IM  = VectorXi::LinSpaced((int)gV.rows(), 0, (int)gV.rows() - 1);
     const VectorXi IMF = VectorXi::LinSpaced((int)gF.rows(), 0, (int)gF.rows() - 1);
-    query_coarse_to_fine(gDecInfo, IM, gDecIM, IMF, gFaceSheetID, BC, BF, FIdx);
+    C2FQueryStats qs;
+    query_coarse_to_fine(gDecInfo, IM, gDecIM, IMF, gFaceSheetID, BC, BF, FIdx, &qs);
+
+    // Clamp statistics per subdivided vertex, and a summary.
+    C.walkSteps.setZero(n);  C.clampedSteps.setZero(n); C.farSteps.setZero(n);
+    C.maxNegBary.setZero(n); C.sumNegBary.setZero(n);   C.maxSnapRel.setZero(n);
+    {
+        int64_t steps = 0, clamped = 0, far = 0, qClamped = 0;
+        std::vector<double> neg, snap;
+        for (int q = 0; q < nq; ++q) {
+            const int i = qVert[q];
+            C.walkSteps(i) = qs.steps(q);       C.clampedSteps(i) = qs.clamped(q); C.farSteps(i) = qs.farOutside(q);
+            C.maxNegBary(i) = qs.maxNegBary(q); C.sumNegBary(i) = qs.sumNegBary(q); C.maxSnapRel(i) = qs.maxSnapRel(q);
+            steps += qs.steps(q); clamped += qs.clamped(q); far += qs.farOutside(q);
+            if (qs.clamped(q) > 0) { ++qClamped; neg.push_back(qs.maxNegBary(q)); snap.push_back(qs.maxSnapRel(q)); }
+        }
+        auto pct = [](std::vector<double> v, double p) {
+            if (v.empty()) return 0.0;
+            std::sort(v.begin(), v.end());
+            return v[(size_t)std::min<double>((double)v.size() - 1, p * v.size())];
+        };
+        fprintf(stderr,
+            "[coarse_subdiv] c2f clamp: %d queries, %lld walk steps (%.1f per query); %lld steps clamped (%.2f%%), "
+            "%lld far outside; %lld queries clamped at least once (%.1f%%); per clamped query, largest negative "
+            "barycentric median %.3g p90 %.3g max %.3g, largest snap / triangle edge median %.3g p90 %.3g max %.3g\n",
+            nq, (long long)steps, nq ? (double)steps / nq : 0.0, (long long)clamped,
+            steps ? 100.0 * clamped / steps : 0.0, (long long)far, (long long)qClamped,
+            nq ? 100.0 * qClamped / nq : 0.0, pct(neg, 0.5), pct(neg, 0.9), pct(neg, 1.0),
+            pct(snap, 0.5), pct(snap, 0.9), pct(snap, 1.0));
+    }
 
     // Fine positions; vertices not queried keep their coarse position.
     C.P = S.V;
@@ -122,6 +152,18 @@ CoarseSubdivC2F coarse_subdiv_c2f_build(const CoarseMeshCompaction & cmc, int64_
         S.nLevels, (long long)cmc.Vbase.rows(), n, (long long)cmc.Fout.rows(), (long long)S.F.rows(),
         (long long)nTarget, nq, n - nq - nUnmatched, nUnmatched, nOffFace);
     return C;
+}
+
+void coarse_subdiv_c2f_write_clamp_csv(const CoarseSubdivC2F & C, const std::string & csvPath)
+{
+    FILE * f = fopen(subdiv_long_path(csvPath).c_str(), "w");
+    if (!f) { fprintf(stderr, "[coarse_subdiv] cannot write %s\n", csvPath.c_str()); return; }
+    fprintf(f, "vid,mapped,steps,clamped_steps,far_steps,max_neg_bary,sum_neg_bary,max_snap_rel\n");
+    for (int64_t i = 0; i < C.S.V.rows(); ++i)
+        fprintf(f, "%lld,%d,%d,%d,%d,%.9g,%.9g,%.9g\n", (long long)i, C.fineFace[i] >= 0 ? 1 : 0,
+                C.walkSteps(i), C.clampedSteps(i), C.farSteps(i), C.maxNegBary(i), C.sumNegBary(i), C.maxSnapRel(i));
+    fclose(f);
+    fprintf(stderr, "[coarse_subdiv] c2f clamp statistics per vertex -> %s\n", csvPath.c_str());
 }
 
 void coarse_subdiv_c2f_write(const CoarseSubdivC2F & C, int64_t maxObjVerts,

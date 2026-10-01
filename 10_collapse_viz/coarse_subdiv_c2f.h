@@ -15,6 +15,10 @@ struct CoarseSubdivC2F {
     Eigen::MatrixXd P;              // Vs x 3 fine correspondences (coarse position when not mapped)
     std::vector<int32_t> fineFace;  // gFO row per vertex, -1 when not mapped
     Eigen::MatrixXd fineBary;       // Vs x 3, in gFO.row(fineFace) corner order
+    // Clamp-and-renormalize statistics of each vertex's backward walk
+    // (query_coarse_to_fine's C2FQueryStats); 0 for vertices not queried.
+    Eigen::VectorXi walkSteps, clampedSteps, farSteps;
+    Eigen::VectorXd maxNegBary, sumNegBary, maxSnapRel;
 };
 
 // Subdivides (cmc.Vbase, cmc.Fout) until it has >= nTarget vertices and queries
@@ -29,3 +33,8 @@ CoarseSubdivC2F coarse_subdiv_c2f_build(const CoarseMeshCompaction & cmc, int64_
 // Skipped above maxObjVerts vertices.
 void coarse_subdiv_c2f_write(const CoarseSubdivC2F & C, int64_t maxObjVerts,
                              const std::string & coarseObjPath, const std::string & fineObjPath);
+
+// Per-vertex clamp statistics of the coarse -> fine walk, one CSV row per
+// subdivided vertex (same order as the OBJs): vid, mapped, steps, clamped_steps,
+// far_steps, max_neg_bary, sum_neg_bary, max_snap_rel.
+void coarse_subdiv_c2f_write_clamp_csv(const CoarseSubdivC2F & C, const std::string & csvPath);

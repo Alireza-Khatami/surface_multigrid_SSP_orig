@@ -403,6 +403,7 @@ static bool export_final_outputs(const std::string & out_dir, const std::string 
         const CoarseSubdivC2F csub = coarse_subdiv_c2f_build(cmc, gCoarseSubdivSamples);
         coarse_subdiv_c2f_write(csub, gSubdivObjMaxVerts,
                                 out("coarse_subdiv_", ".obj"), out("coarse_subdiv_at_fine_pos_", ".obj"));
+        coarse_subdiv_c2f_write_clamp_csv(csub, out("coarse_subdiv_c2f_clamp_", ".csv"));
         if (gCoarseSubdivRelax && (!gHaveMatStruct || !gStructGateOn))
             fprintf(stderr, "[coarse_subdiv_relax] skipped: needs --matstruct_path and --mat_struct_check "
                             "(struct IDs of the coarse vertices)\n");

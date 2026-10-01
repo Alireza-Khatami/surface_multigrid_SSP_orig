@@ -458,6 +458,8 @@ RelaxReport subdiv_relax(SubdivMesh & M, const MatrixXd & VO, const MatrixXi & F
         return m;
     };
 
+    proj.reset_stats();  // projection statistics of the iterations only (not the seed check)
+
     // No-new-folds rule (opt.foldRef): triangle f is folded when n_f . ref_f <= 0.
     const bool foldRule = opt.foldRef.size() > 0;
     const int64_t nF = M.F.rows();
@@ -744,6 +746,12 @@ RelaxReport subdiv_relax(SubdivMesh & M, const MatrixXd & VO, const MatrixXi & F
     M.fineBary = bary;
     if (foldRule) R.foldedResult = count_folded(X);
     R.localCalls = proj.nLocal; R.localGrown = proj.nLocalGrown; R.localGlobal = proj.nLocalGlobal;
+    const ProjStats ps = proj.stats();  // before the final checks project again
+    fprintf(stderr, "[subdiv_relax]   projection over all steps (incl. rejected line-search trials): %lld calls, "
+                    "%.2f%% on an edge/vertex of their triangle (or an end of their edge), off-surface distance "
+                    "mean %.3g max %.3g (x diag), barycentric fix-ups %lld\n",
+            (long long)ps.calls, ps.calls ? 100.0 * ps.onBorder / ps.calls : 0.0,
+            ps.calls ? ps.distSum / ps.calls / diag : 0.0, ps.distMax / diag, (long long)ps.baryFix);
 
     // ---- checks ----
     double sumMove = 0.0;
