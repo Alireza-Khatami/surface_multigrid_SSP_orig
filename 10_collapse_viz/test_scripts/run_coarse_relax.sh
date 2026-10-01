@@ -11,6 +11,7 @@
 #       (coarse_subdiv_relax_explicit.cpp); also writes *_it<N>.obj snapshots
 #   --explicit_lambda L (0.5)  --explicit_max_iter N (20000)  --explicit_tol T (1e-7 x diag)
 #   --explicit_global_proj     global closest point instead of the local one
+#   --coarse_subdiv_relax_weights uniform|cotan   explicit: neighbour weights (default uniform)
 #   --coarse_subdiv_relax_per_face     relax only each coarse face's interior
 #   --coarse_subdiv_relax_no_new_folds no step may fold an unfolded triangle (newton)
 #   --coarse_subdiv_relax_local_proj   closest point reachable from the current location (newton)

@@ -8,7 +8,7 @@ Run them from this folder; a `<run_dir>` is one run's `--output_dir`, e.g.
 | script | what it reports |
 |---|---|
 | `run_coarse_relax.sh` | runs one experiment on the test mesh (from `10_collapse_viz`): `bash test_scripts/run_coarse_relax.sh <name> [flags]` |
-| `fold_table.py` | seed vs relaxed: folded triangles, seed folds removed / kept, new folds, degenerate, edge CV |
+| `fold_table.py` | seed vs relaxed: folded triangles, seed folds removed / kept, new folds, degenerate, edge CV (whole mesh, and median within each coarse face) |
 | `seam_distance_folds.py` | folded / degenerate rates by ring distance from the nearest seam/boundary vertex |
 | `orientation_vs_coarse.py` | why "flipped vs seed" and "flipped vs coarse normal" mislead (whole coarse faces oriented against the fine sheet) |
 | `snapshot_table.py` | explicit runs: folded / removed / new / degenerate / edge CV at every `_it<N>` snapshot |

@@ -8,8 +8,10 @@
 //
 //     x_i <- Pi_i( x_i + lambda * (mean_j x_j - x_i) ),
 //
-// with the symmetric mesh graph: every vertex is pulled by all its mesh
-// neighbours, so curves and sheets relax together (curve vertices are also
+// with mean_j = sum_j w_ij x_j / sum_j w_ij (uniform w_ij = 1 by default, or
+// given weights, e.g. cotangent weights), on the symmetric mesh graph: every
+// vertex is pulled by all its mesh neighbours, so curves and sheets relax
+// together (curve vertices are also
 // pulled by the sheet vertices next to them, and only slide along their curve
 // through the projection). Junctions are fixed. Stops when no vertex moves more
 // than tol * bbox diagonal, or after maxIter iterations.
@@ -35,6 +37,10 @@ struct ExplicitRelaxOptions {
     // (the vertices of such a triangle keep their position for that step).
     Eigen::MatrixXd foldRef;
     bool    noNewFolds = false;
+    // Optional, one weight per graph entry (aligned with G.cols, >= 0): the
+    // neighbour mean and the energy use w_ij instead of 1. Empty: uniform. A row
+    // whose weights sum to 0 falls back to uniform.
+    std::vector<double> weights;
     int64_t logEvery = 100;     // progress line every logEvery iterations
     // OBJ snapshots of the positions at these iterations (and none if the prefix
     // is empty): <snapshotPrefix>it<N>.obj

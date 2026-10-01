@@ -47,6 +47,19 @@ RelaxReport subdiv_relax_explicit(SubdivMesh & M, const MatrixXd & VO, const Mat
     if (haveRef && (opt.foldRef.rows() != nF || opt.foldRef.cols() != 3)) explicit_fail("foldRef / face count mismatch");
     if (opt.noNewFolds && !haveRef) explicit_fail("noNewFolds needs foldRef");
     if (!(opt.lambda > 0 && opt.lambda <= 1)) explicit_fail("lambda must be in (0, 1]");
+    const bool weighted = !opt.weights.empty();
+    if (weighted && opt.weights.size() != G.cols.size()) explicit_fail("weights / graph size mismatch");
+    // Weight of graph entry q (row i): w_q, or 1 when uniform or the row's weights sum to 0.
+    std::vector<uint8_t> uniformRow(Vs, 1);
+    int64_t zeroRows = 0;
+    if (weighted)
+        for (int64_t i = 0; i < Vs; ++i) {
+            double s = 0.0;
+            for (int64_t q = G.rowOffs[i]; q < G.rowOffs[i + 1]; ++q) s += opt.weights[q];
+            uniformRow[i] = !(s > 0);
+            if (uniformRow[i] && G.rowOffs[i + 1] > G.rowOffs[i]) ++zeroRows;
+        }
+    auto w = [&](int64_t i, int64_t q) { return uniformRow[i] ? 1.0 : opt.weights[q]; };
     const double diag = (VO.leftCols(3).colwise().maxCoeff() - VO.leftCols(3).colwise().minCoeff()).norm();
     const double tolAbs = opt.tol * diag;
 
@@ -102,11 +115,11 @@ RelaxReport subdiv_relax_explicit(SubdivMesh & M, const MatrixXd & VO, const Mat
     R.nFixed = Vs - R.nFree;
 
     // ---- metrics
-    auto energy = [&](const MatrixXd & P) {  // 1/2 sum over graph edges (each undirected edge once)
+    auto energy = [&](const MatrixXd & P) {  // 1/2 sum over graph edges of w_ij |x_i - x_j|^2 (each once)
         double e = 0.0;
         for (int64_t i = 0; i < Vs; ++i)
             for (int64_t q = G.rowOffs[i]; q < G.rowOffs[i + 1]; ++q)
-                if (G.cols[q] > i) e += 0.5 * (P.row(i) - P.row(G.cols[q])).squaredNorm();
+                if (G.cols[q] > i) e += 0.5 * w(i, q) * (P.row(i) - P.row(G.cols[q])).squaredNorm();
         return e;
     };
     auto count_folded = [&](const MatrixXd & P) {
@@ -128,9 +141,12 @@ RelaxReport subdiv_relax_explicit(SubdivMesh & M, const MatrixXd & VO, const Mat
     };
     if (haveRef) R.foldedSeed = count_folded(X);
     fprintf(stderr, "[relax_explicit] %lld free, %lld fixed (%lld pinned, %lld seeds off structure) | lambda %.3g, "
-                    "tol %.3g x diag, max %lld iterations | %s projection | no new folds %s | energy %.6g, folded %lld\n",
+                    "tol %.3g x diag, max %lld iterations | %s projection | no new folds %s | %s weights%s | "
+                    "energy %.6g, folded %lld\n",
             (long long)R.nFree, (long long)R.nFixed, (long long)R.nPinned, (long long)R.seedOffStructure, opt.lambda,
             opt.tol, (long long)opt.maxIter, opt.localProjection ? "local" : "global", opt.noNewFolds ? "on" : "off",
+            weighted ? "given" : "uniform",
+            weighted ? (" (" + std::to_string(zeroRows) + " rows with zero weight sum -> uniform)").c_str() : "",
             energy(X), (long long)R.foldedSeed);
 
     // ---- iterate
@@ -149,8 +165,13 @@ RelaxReport subdiv_relax_explicit(SubdivMesh & M, const MatrixXd & VO, const Mat
         igl::parallel_for((int64_t)list.size(), [&](int64_t a) {
             const int64_t i = list[a];
             Vector3d mean = Vector3d::Zero();
-            for (int64_t q = G.rowOffs[i]; q < G.rowOffs[i + 1]; ++q) mean += X.row(G.cols[q]).transpose();
-            mean /= (double)(G.rowOffs[i + 1] - G.rowOffs[i]);
+            double ws = 0.0;
+            for (int64_t q = G.rowOffs[i]; q < G.rowOffs[i + 1]; ++q) {
+                const double wq = w(i, q);
+                mean += wq * X.row(G.cols[q]).transpose();
+                ws += wq;
+            }
+            mean /= ws;
             const Vector3d x = X.row(i).transpose();
             const Vector3d y = x + opt.lambda * (mean - x);
             const ProjResult pr = opt.localProjection ? proj.project_local(setId[i], y, face[i], edge[i])

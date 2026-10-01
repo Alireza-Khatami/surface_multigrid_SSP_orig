@@ -33,6 +33,7 @@ still missing is the even spacing.
 | explicit + no new folds, lambda 0.25 (4,000 it.) | 2,386 | 33 | 1.018 |
 | explicit + no new folds, lambda 0.1 (10,000 it.) | 2,379 | 32 | 1.017 |
 | explicit + no new folds, lambda 1.0 (1,000 it.) | 2,568 | 37 | 1.027 |
+| explicit + no new folds, cotan weights (5,000 it.) | 2,568 | 34 | 1.135 |
 | explicit, iteration 10 | 3,722 | 47 | 1.062 |
 | explicit, iteration 100 | 4,357 | 655 | 1.020 |
 | explicit, final (20,000) | 11,347 | 4,764 | 0.867 |
@@ -71,13 +72,22 @@ still missing is the even spacing.
 7. **Per-coarse-face relaxation** cuts degenerate triangles but doesn't reduce
    folds, and it barely evens out the spacing.
 8. **Step size:** below 0.5 nothing changes but the run time; 1.0 overshoots.
+9. **No relaxation makes the spacing inside each coarse face more even.** The
+   median edge CV within a coarse face rises from 0.384 (seed) to ~0.5 for every
+   method; the whole-mesh edge CV improves only because spacing *between* coarse
+   faces is equalized (vertices migrate from small into large coarse faces).
+10. **Cotangent weights (from the coarse positions) did not help:** 24% of them
+    are negative (obtuse coarse triangles) and are clamped to 0, which loses the
+    linear reproduction they were chosen for.
 
 ### Recommended next step
 
-Even out the spacing without folding: change the **Laplacian weights** (area or
-cotangent weights from the seed instead of uniform), so the resting state no
-longer evens out vertex counts across coarse faces of very different areas
-(point 2), and keep the no-new-folds rule as a safety net.
+Decide which spacing is wanted: even across the whole mesh (what uniform
+weights optimize, at the cost of the regular layout inside each coarse face), or
+even inside each coarse face and proportional to its size (what geometric
+weights aim for). For the second, try **mean-value weights** (always positive, no
+clamping, reproduce the coarse layout on flat regions) as a third value of
+`--coarse_subdiv_relax_weights`, keeping the no-new-folds rule.
 
 ## 1. How folds are measured now
 
@@ -176,6 +186,29 @@ CV 1.027; 0.25: 2,386 / 33 / 1.018; 0.1: 2,379 / 32 / 1.017; 0.5 (to 5,000): 2,3
 - lambda 1.0 moves each vertex all the way to its neighbours' mean and
   overshoots: 8% more folds, higher energy, still moving at the end (3e-4 x diag).
 - **Keep lambda = 0.5.**
+
+### Weights: uniform vs cotangent (explicit + no new folds)
+
+`--coarse_subdiv_relax_weights uniform|cotan` (explicit only, default uniform).
+Cotangent weights w_ij = 1/2 (cot a + cot b) come from the subdivided coarse
+mesh at its coarse positions, computed once; 294,080 of 1,233,216 (24%) are
+negative (obtuse coarse triangles; midpoint subdivision keeps the angles) and
+are clamped to 0. The update uses the weighted neighbour mean; the logged energy
+is 1/2 sum w_ij |x_i - x_j|^2. Run `cotan_nofold` vs `nofold` (lambda 0.5, 5,000
+iterations). "CV/face" = median over coarse faces of the edge-length CV inside
+that face (`fold_table.py`):
+
+| run | folded | removed | new | degenerate | edge CV | CV/face | median smallest angle |
+|---|---|---|---|---|---|---|---|
+| seed | 5,168 | - | - | 0 | 1.084 | **0.384** | 14.7 |
+| uniform + no new folds | **2,383** | 2,799 | 14 | 33 | **1.014** | 0.494 | **17.5** |
+| cotan + no new folds | 2,568 | 2,616 | 16 | 34 | 1.135 | 0.505 | 16.6 |
+| explicit, uniform, no rule | 11,347 | 4,151 | 10,330 | 4,764 | 0.867 | 0.506 | |
+| Newton | 15,381 | 3,874 | 14,087 | 10,606 | 0.837 | 0.506 | |
+
+- Cotan is slightly worse in folds and no better inside each coarse face.
+- Every relaxation raises the within-face CV from 0.384 to ~0.5: they all trade
+  the regular layout inside coarse faces for evener spacing between them.
 
 ### Newton stopped early
 
@@ -294,6 +327,7 @@ and 38 curve trees (edges).
 | `--coarse_subdiv_relax_no_new_folds` | Newton and explicit: a step may not fold an unfolded triangle (its moved vertices are held back for that step); folded ones may unfold |
 | `--coarse_subdiv_relax_local_proj` | Newton: local projection (section 3) |
 | `--coarse_subdiv_relax_joint` | Newton: one pass over curves and sheets on the symmetric graph |
+| `--coarse_subdiv_relax_weights uniform\|cotan` | explicit: neighbour weights; cotan from the coarse positions, negatives clamped to 0 |
 | `--coarse_subdiv_relax_joint_solve` | solve_project: one LU solve of curves and sheets on the directed graph |
 | (always) | relaxation graph at the seed as `laplacian_graph/{sheets,curves,junctions}_coarse_subdiv_<stem>.ply`, coloured by structure id; projector BVH check; projection jump counter |
 
@@ -332,6 +366,7 @@ Coarse-subdivision runs in `output/relaxation_experiments/` (each folder has a
 | `sp_joint` | solve_project, joint solve | done |
 | `nofold` | explicit + no new folds, lambda 0.5, 5,000 iterations | done (best) |
 | `lam1`, `lam025`, `lam01` | explicit + no new folds, lambda 1.0 / 0.25 / 0.1 | done |
+| `cotan_nofold` | explicit + no new folds, cotangent weights | done |
 | `nf_newton`, `nf_newton_pf` | Newton with no-new-folds (+ per face) | **stopped, incomplete: not results** |
 | `joint_newton` | Newton, joint pass | **stopped, incomplete: not results** |
 | `projector_extract_{before,after}` | projector refactor check (2026-09-28) | done |

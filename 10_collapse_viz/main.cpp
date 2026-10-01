@@ -417,6 +417,7 @@ static bool export_final_outputs(const std::string & out_dir, const std::string 
                                            + (c.localProjection ? "_local" : "")
                                            + (c.jointPass ? "_joint" : "")
                                            + (c.jointSolve ? "_jointsolve" : "")
+                                           + (c.weights != "uniform" ? "_" + c.weights : std::string())
                                            + (c.method == "explicit" && c.explicitGlobalProj ? "_global" : "") + "_", ".obj"),
                                        out_dir + "laplacian_graph", "coarse_subdiv_" + stem);
         }
@@ -661,6 +662,8 @@ int main(int argc, char * argv[])
     //                          (coarse_subdiv_relax_explicit.cpp); snapshots *_it<N>.obj
     // [--explicit_lambda L]    default 0.5   [--explicit_max_iter N] default 20000
     // [--explicit_tol T]       default 1e-7 (x diag)   [--explicit_global_proj] global closest point
+    // [--coarse_subdiv_relax_weights uniform|cotan]  explicit only, default uniform; cotan = cotangent
+    //                          weights of the subdivided coarse mesh at coarse positions (*_cotan_*.obj)
     // [--subdiv_obj_max_verts N]  default: 2000000 — write subdiv_fine_*.obj (incl. subdiv_fine_at_coarse_pos_*.obj)
     //                             only up to N vertices
     // [--track_face_flip F]    face-flip debug tracker on gFO face F (needs --n_subdiv_samples)
@@ -713,6 +716,7 @@ int main(int argc, char * argv[])
             else if (a == "--explicit_lambda") gCoarseRelax.explicitLambda = std::stod(argv[i+1]);
             else if (a == "--explicit_max_iter") gCoarseRelax.explicitMaxIter = std::stoll(argv[i+1]);
             else if (a == "--explicit_tol") gCoarseRelax.explicitTol = std::stod(argv[i+1]);
+            else if (a == "--coarse_subdiv_relax_weights") gCoarseRelax.weights = argv[i+1];
             else if (a == "--subdiv_relax_curve_anchors") subdivCurveAnchors = std::stoi(argv[i+1]);
             else if (a == "--subdiv_relax_anchor_tol") subdivAnchorTol = std::stod(argv[i+1]);
             else { continue; }

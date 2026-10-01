@@ -40,6 +40,9 @@ struct CoarseSubdivRelaxConfig {
     int64_t explicitMaxIter = 20000;
     double  explicitTol = 1e-7;
     bool    explicitGlobalProj = false;  // global closest point instead of local
+    // explicit: "uniform" (w_ij = 1) or "cotan" (cotangent weights of the
+    // subdivided coarse mesh at its coarse positions, negative ones clamped to 0)
+    std::string weights = "uniform";
 };
 
 // Relaxes C's vertices on the fine mesh and writes the result to objPath (same

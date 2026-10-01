@@ -272,6 +272,43 @@ static void verify_projector_bvh(const Projector & proj, int nPts)
     if (structErr || mismatch) relax_fail("projector BVH check failed");
 }
 
+// Cotangent weights for the entries of graph G (aligned with G.cols) from the
+// triangles F at positions P: w_ij = 1/2 (cot alpha + cot beta), the angles
+// opposite edge ij. Negative weights (obtuse triangles) are clamped to 0, since a
+// negative weight makes the neighbour mean leave the neighbours' hull. Entries of
+// G that are not mesh edges get 0.
+static std::vector<double> cotan_weights(const MatrixXd & P, const MatrixXi & F, const RelaxGraph & G)
+{
+    std::unordered_map<uint64_t, double> we;
+    we.reserve((size_t)F.rows() * 3);
+    auto key = [](int64_t a, int64_t b) { return ((uint64_t)std::min(a, b) << 32) | (uint64_t)std::max(a, b); };
+    for (int64_t f = 0; f < F.rows(); ++f)
+        for (int c = 0; c < 3; ++c) {
+            const int o = F(f, c), a = F(f, (c + 1) % 3), b = F(f, (c + 2) % 3);
+            const Vector3d u = P.row(a).transpose() - P.row(o).transpose();
+            const Vector3d v = P.row(b).transpose() - P.row(o).transpose();
+            const double s = u.cross(v).norm();
+            if (!(s > 0)) continue;  // degenerate: no contribution
+            we[key(a, b)] += 0.5 * u.dot(v) / s;
+        }
+    std::vector<double> w(G.cols.size(), 0.0);
+    int64_t neg = 0, n = 0;
+    double wmin = std::numeric_limits<double>::infinity(), wmax = 0.0;
+    for (int64_t i = 0; i + 1 < (int64_t)G.rowOffs.size(); ++i)
+        for (int64_t q = G.rowOffs[i]; q < G.rowOffs[i + 1]; ++q) {
+            auto it = we.find(key(i, G.cols[q]));
+            double x = it == we.end() ? 0.0 : it->second;
+            ++n;
+            if (x < 0) { ++neg; x = 0.0; }
+            w[q] = x;
+            wmin = std::min(wmin, x);
+            wmax = std::max(wmax, x);
+        }
+    fprintf(stderr, "[coarse_subdiv_relax] cotangent weights from the coarse positions: %lld entries, %lld negative "
+                    "(clamped to 0), range %.3g .. %.3g\n", (long long)n, (long long)neg, wmin, wmax);
+    return w;
+}
+
 void coarse_subdiv_relax_export(const CoarseMeshCompaction & cmc, const CoarseSubdivC2F & C,
                                 const MatStruct & ms, const CoarseSubdivRelaxConfig & cfg,
                                 int64_t maxObjVerts, const std::string & objPath,
@@ -429,6 +466,10 @@ void coarse_subdiv_relax_export(const CoarseMeshCompaction & cmc, const CoarseSu
             fixed[i] = G.role[i] == RELAX_JUNCTION || (!opt.holdFixed.empty() && opt.holdFixed[i]);
         export_relax_graph_ply(graphDir, graphStem, G, M.V, pal, S, setId, ms, fixed);
     }
+    if (cfg.weights != "uniform" && cfg.weights != "cotan") relax_fail("unknown weights " + cfg.weights);
+    if (cfg.weights != "uniform" && !isExplicit)
+        fprintf(stderr, "[coarse_subdiv_relax] WARNING: %s weights are explicit only; %s uses uniform\n",
+                cfg.weights.c_str(), method.c_str());
     RelaxReport R;
     if (isExplicit) {
         ExplicitRelaxOptions eo;
@@ -440,6 +481,7 @@ void coarse_subdiv_relax_export(const CoarseMeshCompaction & cmc, const CoarseSu
         eo.noNewFolds = cfg.noNewFolds;
         eo.foldRef = foldRef;
         eo.snapshotPrefix = objPath.substr(0, objPath.size() - 4) + "_";
+        if (cfg.weights == "cotan") eo.weights = cotan_weights(C.S.V, M.F, G);
         R = subdiv_relax_explicit(M, gVO, gFO, &ms, pal, setId, G, eo);
     } else {
         R = method == "newton" ? subdiv_relax(M, gVO, gFO, &ms, pal, setId, G, opt)
@@ -452,7 +494,8 @@ void coarse_subdiv_relax_export(const CoarseMeshCompaction & cmc, const CoarseSu
         "flipped vs seed %lld | move max %.3g mean %.3g (x diag)\n",
         (method + (cfg.perCoarseFace ? ", per coarse face" : "") + (cfg.noNewFolds ? ", no new folds" : "")
          + (cfg.localProjection ? ", local projection" : "") + (cfg.jointPass ? ", joint pass" : "")
-         + (cfg.jointSolve ? ", joint solve" : "")).c_str(), q0.edgeCV, q1.edgeCV, q0.minAngle, q1.minAngle, q0.p1, q1.p1, q0.p5, q1.p5, q0.median, q1.median,
+         + (cfg.jointSolve ? ", joint solve" : "")
+         + (cfg.weights != "uniform" ? ", " + cfg.weights + " weights" : std::string())).c_str(), q0.edgeCV, q1.edgeCV, q0.minAngle, q1.minAngle, q0.p1, q1.p1, q0.p5, q1.p5, q0.median, q1.median,
         (long long)q0.degenerate, (long long)q1.degenerate, (long long)q1.flippedVsRef, R.maxMove, R.meanMove);
     if (R.seedOffStructure || R.fixedMoved || R.posMismatch || R.badBary || R.offStructure)
         relax_fail("relaxation consistency checks failed");

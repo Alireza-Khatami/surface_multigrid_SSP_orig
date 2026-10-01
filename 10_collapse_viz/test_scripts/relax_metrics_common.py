@@ -123,6 +123,19 @@ def edge_cv(V, F):
     return e.std() / e.mean()
 
 
+def edge_cv_per_coarse_face(V, F, best):
+    """Median over coarse faces of the edge-length CV of that face's triangles:
+    how evenly spaced the vertices are inside each coarse face, whatever its size."""
+    L = np.stack([np.linalg.norm(V[F[:, i]] - V[F[:, (i + 1) % 3]], axis=1) for i in range(3)], 1)
+    n = int(best.max()) + 1
+    cnt = np.bincount(best, minlength=n) * 3
+    s1 = np.bincount(best, L.sum(1), n)
+    s2 = np.bincount(best, (L ** 2).sum(1), n)
+    m = s1 / cnt
+    cv = np.sqrt(np.maximum(s2 / cnt - m ** 2, 0)) / m
+    return float(np.median(cv))
+
+
 def read_graph_ply(path):
     """(vertices, edges) of a laplacian_graph PLY as numpy structured arrays."""
     b = open(path, 'rb').read()
