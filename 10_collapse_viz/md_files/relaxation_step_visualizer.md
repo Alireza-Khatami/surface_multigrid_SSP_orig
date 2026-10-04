@@ -81,6 +81,20 @@ ported first (not part of this step; to be decided).
    boxes) with a depth slider and a leaves-only option, so you can check that every box
    encloses its children and its triangles / edges.
 
+8. **Export (PLY).** One button per mesh, and one that writes all four:
+   - relaxation input (iteration 0)
+   - committed (current)
+   - step y (this iteration)
+   - projection Pi(y) (this iteration)
+
+   A last button writes the stages before the relaxation, as `run_relax.py` does: coarse,
+   equal-area refined, subdivided, at c2f positions, input. The data comes from the
+   relaxation's state or this iteration's checkpoint, and step y / Pi(y) need a recorded
+   checkpoint. Vertex properties: role, set id, free, fine face, held back, the point's
+   colour. Face property: coarse face. Files go to `--export_dir`, by default
+   `output/relaxation_experiments/viewer_exports/<date_time>/`, whose `experiment_config.txt`
+   lists every export with its iteration and configuration.
+
 ## Input
 
 A C++ run's bundle and the fine `.ma_struct`, as `run_relax.py` takes them (default:

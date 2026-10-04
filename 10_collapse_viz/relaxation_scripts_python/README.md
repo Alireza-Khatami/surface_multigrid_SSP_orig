@@ -56,6 +56,17 @@ Outputs, named as in C++: `coarse_subdiv_<stem>.obj`, `coarse_subdiv_at_fine_pos
 `coarse_subdiv_c2f_clamp_<stem>.csv`, `coarse_subdiv_at_fine_pos_relaxed_<flags>_<stem>.obj`
 and its `_it<N>.obj` snapshots, plus `run.log`, `experiment_config.txt`, `results.json`.
 
+Every run also writes the meshes that lead to the relaxation as binary PLY in
+`relax_input/` (`relax_exports.py`; off with `--no_input_ply`):
+- `00_coarse`: the coarse mesh.
+- `01_coarse_equal_area`: the refined coarse mesh, only in equal-area mode.
+- `02_subdiv`: the subdivided mesh on the coarse geometry.
+- `03_subdiv_at_fine`: the subdivided mesh at its c2f positions.
+- `04_relax_input`: the relaxation input, taken right after the relaxer's initialization.
+
+The files carry per-vertex carrier, role, set id, free flag, fine face and snap distance, and
+the coarse face of each face.
+
 `run_experiments.py` runs a list of schemes and writes
 `output/relaxation_experiments/py_experiments_results.{csv,md}`.
 
@@ -86,3 +97,13 @@ the refined coarse OBJ): `python equal_area_refine.py --bundle <...>.c2f --equal
 `relax_viewer.py`: polyscope viewer that runs the relaxation one step at a time and shows each
 step's checkpoint (x, y, Pi(y), committed, search region, BVH). The configuration can be switched
 between steps. Spec: `md_files/relaxation_step_visualizer.md`. Headless test: `test_viewer.py`.
+The "Export (PLY)" panel has one button per mesh:
+- relaxation input
+- committed
+- step y
+- projection Pi(y)
+- the stages before the relaxation
+
+They are written to `--export_dir`, by default
+`output/relaxation_experiments/viewer_exports/<date_time>/`, which gets an `experiment_config.txt`
+listing each export with its iteration and configuration.

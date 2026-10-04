@@ -9,12 +9,15 @@
    Y == x + lambda (mean - x) for the free points.
 3. Every viewer action runs: select, each display option, clear selection,
    concave mask, step meshes, BVH inspector (show all / hide all / tree check).
+4. PLY export: each mesh button writes the relaxation's own arrays (read back and
+   compared exactly), and the stages before the relaxation are written.
 
   python test_viewer.py [--steps 20]
 """
 import argparse
 import os
 import sys
+import tempfile
 
 import numpy as np
 
@@ -22,6 +25,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import relax_viewer  # noqa: E402
+from ply_io import read_ply  # noqa: E402
 from projector import interp3  # noqa: E402
 
 
@@ -64,8 +68,10 @@ def check_trace(v):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--steps', type=int, default=20)
+    p.add_argument('--export_dir', default=None, help='default: a temporary folder')
     a = p.parse_args()
-    v = relax_viewer.main(['--mock', '--coarse_subdiv_relax_no_new_folds'])
+    exportDir = a.export_dir or tempfile.mkdtemp(prefix='relax_viewer_export_')
+    v = relax_viewer.main(['--mock', '--coarse_subdiv_relax_no_new_folds', '--export_dir', exportDir])
     sess, cfg = v.sess, v.cfg
     ok = True
 
@@ -130,6 +136,28 @@ def main():
     errs = sum(v.tree_errors(t) for t in v.treeLabel)
     print('BVH inspector: %d trees, %d structure errors' % (len(v.treeLabel), errs))
     ok &= errs == 0
+
+    # 4: PLY exports, read back
+    want = dict(input=v.sess.Vseed, committed=v.rel.X, step=v.trace.Y, proj=v.trace.P)
+    for key, _ in v.EXPORTS:
+        path = v.export_mesh(key)
+        V, F, vp, fp = read_ply(path)
+        same = (np.array_equal(V, want[key]) and np.array_equal(F, v.F)
+                and np.array_equal(fp['coarse_face'], v.C.S.faceOrig))
+        if key == 'proj':
+            same &= np.array_equal(vp['fine_face'], v.trace.Pface)
+        if key in ('committed', 'step', 'proj'):
+            same &= np.array_equal(vp['held_back'], v.trace.held.astype(np.uint8))
+        print('export %-9s -> %s: %s' % (key, os.path.basename(path), 'exact' if same else 'MISMATCH'))
+        ok &= bool(same)
+    paths = v.export_stages()
+    print('export stages: %s' % ', '.join(os.path.basename(x) for x in paths))
+    V, F, vp, _ = read_ply([x for x in paths if '04_relax_input' in x][0])
+    same = np.array_equal(V, v.sess.Vseed) and np.array_equal(vp['free'], v.input0.isFree)
+    V3 = read_ply([x for x in paths if '03_subdiv_at_fine' in x][0])[0]
+    same &= np.array_equal(V3, v.C.P)
+    print('stages: relax input == seeds, at-fine == c2f positions: %s (folder %s)' % (same, exportDir))
+    ok &= bool(same) and len(paths) >= 4
     print('TEST VIEWER: %s' % ('PASS' if ok else 'FAIL'))
     return 0 if ok else 1
 

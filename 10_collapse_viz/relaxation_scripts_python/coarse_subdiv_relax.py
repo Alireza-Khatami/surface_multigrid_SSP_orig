@@ -263,9 +263,11 @@ class CoarseRelaxSession:
                                state=state, proj=self.proj, it0=it0)
 
 
-def coarse_subdiv_relax_export(B, C, ms, cfg, maxObjVerts, objPath, log=None, anc=None):
+def coarse_subdiv_relax_export(B, C, ms, cfg, maxObjVerts, objPath, log=None, anc=None, on_relaxer=None):
     """Relaxes C's vertices on the fine mesh (B.fineV / B.fineF = gVO / gFO) and
-    writes the result to objPath. Returns (M, report, q0, q1)."""
+    writes the result to objPath. Returns (M, report, q0, q1).
+    on_relaxer(sess, rel) (Python-only): called after the relaxer's initialization,
+    before its first step (run_relax.py exports the relaxation input there)."""
     log = log or log_util.log
     sess = CoarseRelaxSession(B, C, ms, log, anc)
     method = cfg.method
@@ -276,6 +278,8 @@ def coarse_subdiv_relax_export(B, C, ms, cfg, maxObjVerts, objPath, log=None, an
     def quality_before():
         q['q0'] = subdiv_mesh_quality(sess.M.V, sess.M.F)
     rel = sess.make_relaxer(cfg, objPath, log_quality=quality_before)
+    if on_relaxer is not None:
+        on_relaxer(sess, rel)
     rel.run()
     R = rel.finish()
     M = rel.M

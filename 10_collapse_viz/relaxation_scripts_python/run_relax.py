@@ -32,6 +32,9 @@ Python-only extras:
                             (longest-edge bisection) into about |F| * 4^K faces of similar area
                             before the uniform subdivision (0 = off, the C++ behaviour)
   --equal_area_target A     same, with the target face area A given directly
+  --no_input_ply            do not write relax_input/*.ply (default: written, see relax_exports.py:
+                            coarse mesh, equal-area refined mesh if on, subdivided mesh, its c2f
+                            positions, and the relaxation input at the relaxer's initialization)
 """
 import argparse
 import dataclasses
@@ -50,6 +53,7 @@ import log_util  # noqa: E402
 from bundle_io import load_bundle_flat  # noqa: E402
 from c2f_walk import coarse_subdiv_c2f_build  # noqa: E402
 from equal_area_refine import refine_from_args  # noqa: E402
+from relax_exports import export_relax_input  # noqa: E402
 from coarse_subdiv_relax import CoarseSubdivRelaxConfig, coarse_subdiv_relax_export, relaxed_obj_prefix  # noqa: E402
 from matstruct import load_matstruct  # noqa: E402
 from obj_io import read_obj, write_obj  # noqa: E402
@@ -84,13 +88,23 @@ def parse_args(argv=None):
     p.add_argument('--description', default='')
     p.add_argument('--equal_area_levels', type=int, default=0)
     p.add_argument('--equal_area_target', type=float, default=-1.0)
+    p.add_argument('--no_input_ply', action='store_true')
     return p.parse_args(argv)
+
+
+def bundle_stem(bundle):
+    """correspondence_<stem>.c2f -> <stem>"""
+    base = os.path.basename(bundle)
+    stem = base[len('correspondence_'):] if base.startswith('correspondence_') else base
+    return stem[:-4] if stem.endswith('.c2f') else stem
 
 
 def build_c2f(B, a):
     """Subdivided coarse mesh + c2f walk; with the equal-area mode, from the refined coarse mesh."""
     R = refine_from_args(B.coarseV, B.coarseF, a.equal_area_levels, a.equal_area_target)
-    return coarse_subdiv_c2f_build(B, a.n_coarse_subdiv_samples, refined=R)
+    C = coarse_subdiv_c2f_build(B, a.n_coarse_subdiv_samples, refined=R)
+    C.refined = R
+    return C
 
 
 def equal_area_text(a):
@@ -137,11 +151,7 @@ def main(argv=None):
     cfg = config_from_args(a)
     out_dir = a.output_dir
     os.makedirs(out_dir, exist_ok=True)
-    stem = a.stem
-    if stem is None:
-        base = os.path.basename(a.bundle)
-        stem = base[len('correspondence_'):] if base.startswith('correspondence_') else base
-        stem = stem[:-4] if stem.endswith('.c2f') else stem
+    stem = a.stem if a.stem is not None else bundle_stem(a.bundle)
     out = lambda prefix, ext: os.path.join(out_dir, prefix + stem + ext)
     objPath = out(relaxed_obj_prefix(cfg), '.obj')
     logPath = os.path.join(out_dir, 'run.log')
@@ -189,7 +199,13 @@ def main(argv=None):
     write_clamp_csv(C, out('coarse_subdiv_c2f_clamp_', '.csv'))
     status = 0
     try:
-        M, R, q0, q1 = coarse_subdiv_relax_export(B, C, ms, cfg, a.subdiv_obj_max_verts, objPath, log)
+        on_rel = None
+        if not a.no_input_ply:
+            def on_rel(sess, rel):
+                export_relax_input(os.path.join(out_dir, 'relax_input'), '_' + stem, B, C, sess, rel,
+                                   'experiment %s' % os.path.basename(os.path.normpath(out_dir)))
+        M, R, q0, q1 = coarse_subdiv_relax_export(B, C, ms, cfg, a.subdiv_obj_max_verts, objPath, log,
+                                                  on_relaxer=on_rel)
         result = [
             '[relax_explicit] %s after %d iterations (last max move %.3g x diag) | move max %.3g mean %.3g (x diag) | '
             'folded %d -> %d, moves held back %d' % ('converged' if R.converged else 'NOT CONVERGED', R.itersSheet,

@@ -10,12 +10,17 @@ from the step's checkpoint (StepTrace), filled by the relaxation itself.
 Defaults: ABC 00040057, the bundle of output/relaxation_experiments/clamp_check,
 explicit method. The configuration can be changed between any two steps
 (panel "Configuration", Apply): the run continues from the current positions.
+Panel "Export (PLY)": one button per mesh (relaxation input, committed, step y,
+projection Pi(y)) and one for the stages before the relaxation, written to
+--export_dir (default output/relaxation_experiments/viewer_exports/<date_time>).
 """
+import datetime
 import argparse
 import glob
 import os
 import sys
 import time
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -27,10 +32,14 @@ import run_relax  # noqa: E402
 from bundle_io import load_bundle_flat  # noqa: E402
 from coarse_subdiv_relax import CoarseRelaxSession  # noqa: E402
 from matstruct import load_matstruct  # noqa: E402
+from ply_io import write_ply  # noqa: E402
 from relax_explicit import StepTrace  # noqa: E402
+from relax_exports import export_relax_input, relax_vertex_props  # noqa: E402
 from struct_ids import RELAX_CURVE, RELAX_JUNCTION  # noqa: E402
 
 DEFAULT_RUN = os.path.normpath(os.path.join(HERE, '..', 'output', 'relaxation_experiments', 'clamp_check'))
+DEFAULT_EXPORT_ROOT = os.path.normpath(os.path.join(HERE, '..', 'output', 'relaxation_experiments',
+                                                   'viewer_exports'))
 DEFAULT_MS = ('D:/datasets/abc_full_10k/out_ABC_v6_knn_poission40_20_15_10/'
               '01_00040057_f8f78dbd17414efda75bc437_trimesh_000/mat/'
               'mat_01_00040057_f8f78dbd17414efda75bc437_trimesh_000.obj__2025-05-06_02_38_00.ma_struct')
@@ -136,6 +145,11 @@ class RelaxViewer:
         self.history = []          # (iteration, configuration text)
         self.rel = None
         self.make_relaxer(state=None)
+        r0 = self.rel  # the relaxation input: the first relaxer at its initialization (copies)
+        self.input0 = SimpleNamespace(X=r0.X.copy(), G=SimpleNamespace(role=r0.G.role.copy()),
+                                      setId=r0.setId.copy(), isFree=r0.isFree.copy(), face=r0.face.copy())
+        self.exportDir = None
+        self.exported = []         # paths written this session
 
         # display state
         rng = np.random.default_rng(12345)
@@ -207,6 +221,83 @@ class RelaxViewer:
                 self.runTo = 0
                 break
         self.refresh()
+
+    # -------------------------------------------------------------- PLY export
+    EXPORTS = (('input', 'relaxation input (iteration 0)'), ('committed', 'committed (current)'),
+               ('step', 'step y (this iteration)'), ('proj', 'projection Pi(y) (this iteration)'))
+
+    def export_root(self):
+        """The export folder, with its experiment_config.txt (created on the first export)."""
+        if self.exportDir is None:
+            d = self.args.export_dir or os.path.join(
+                DEFAULT_EXPORT_ROOT, datetime.datetime.now().strftime('%Y%m%d_%H%M%S'))
+            os.makedirs(d, exist_ok=True)
+            a = self.args
+            with open(os.path.join(d, 'experiment_config.txt'), 'w', newline='\n') as f:
+                f.write('experiment:   %s\n' % os.path.basename(os.path.normpath(d)))
+                f.write('description:  PLY exports from relax_viewer.py\n')
+                f.write('started:      %s\n' % datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                f.write('implementation: python (relaxation_scripts_python/relax_viewer.py)\n')
+                f.write('bundle:       %s\n' % a.bundle)
+                f.write('matstruct:    %s\n' % a.matstruct_path)
+                f.write('n_coarse_subdiv_samples: %d\n' % a.n_coarse_subdiv_samples)
+                f.write('equal-area refinement: %s\n' % run_relax.equal_area_text(a))
+                f.write('exports (iteration | configuration active then | file):\n')
+            self.exportDir = d
+        return self.exportDir
+
+    def _log_export(self, it, cfgText, name):
+        with open(os.path.join(self.export_root(), 'experiment_config.txt'), 'a', newline='\n') as f:
+            f.write('  %6d | %s | %s\n' % (it, cfgText, name))
+
+    def export_mesh(self, key):
+        """Writes one mesh as PLY; the data is the relaxation's (its state or this
+        iteration's checkpoint). Returns the path, or None when there is no data."""
+        t, r = self.trace, self.rel
+        held = t.held if self.hasTrace else None
+        if key == 'input':
+            X = self.input0.X
+            vp = relax_vertex_props(self.sess, self.input0)
+            name = 'relax_input_it000000.ply'
+        elif key == 'committed':
+            X = r.X
+            vp = relax_vertex_props(self.sess, r, held=held)
+            name = 'it%06d_committed.ply' % self.iters
+        elif key in ('step', 'proj'):
+            if not self.hasTrace:
+                self.status = 'no checkpoint for this iteration: turn on "record checkpoints" and step'
+                return None
+            X = t.Y if key == 'step' else t.P
+            vp = relax_vertex_props(self.sess, r, face=(None if key == 'step' else t.Pface), held=held)
+            if key == 'step':
+                del vp['fine_face']  # y is off the surface
+            name = 'it%06d_%s.ply' % (self.iters, 'step_y' if key == 'step' else 'projection')
+        else:
+            raise ValueError(key)
+        cc = np.clip(np.round(self.colors * 255.0), 0, 255).astype(np.uint8)
+        vp['red'], vp['green'], vp['blue'] = cc[:, 0], cc[:, 1], cc[:, 2]
+        fp = dict(coarse_face=self.C.S.faceOrig.astype(np.int32))
+        path = os.path.join(self.export_root(), name)
+        it = 0 if key == 'input' else self.iters
+        cfgText = self.history[0][1] if key == 'input' else self.cfg_text()
+        if not write_ply(path, X, self.F, vp, fp, ['relax_viewer %s, iteration %d' % (key, it), cfgText]):
+            self.status = 'could not write %s' % path
+            return None
+        self._log_export(it, cfgText, name)
+        self.exported.append(path)
+        self.status = 'exported %s' % path
+        log_util.log('[relax_viewer] exported %s' % path)
+        return path
+
+    def export_stages(self):
+        """The stages before the relaxation (coarse, equal-area, subdivided, c2f, input),
+        as run_relax.py writes them."""
+        d = os.path.join(self.export_root(), 'relax_input')
+        paths = export_relax_input(d, '_' + run_relax.bundle_stem(self.args.bundle), self.B, self.C, self.sess, self.input0, 'relax_viewer')
+        self._log_export(0, self.history[0][1], 'relax_input/ (%d files)' % len(paths))
+        self.exported += paths
+        self.status = 'exported %d stage files to %s' % (len(paths), d)
+        return paths
 
     # -------------------------------------------------------------- polyscope structures
     def register(self):
@@ -539,6 +630,18 @@ class RelaxViewer:
                 if ch:
                     self.refresh()
 
+        if psim.CollapsingHeader('Export (PLY)', psim.ImGuiTreeNodeFlags_DefaultOpen):
+            for key, label in self.EXPORTS:
+                if psim.Button('Export ' + label):
+                    self.export_mesh(key)
+            if psim.Button('Export all four'):
+                for key, _ in self.EXPORTS:
+                    self.export_mesh(key)
+            if psim.Button('Export the stages before the relaxation (coarse ... input)'):
+                self.export_stages()
+            psim.TextUnformatted('folder: %s' % (self.exportDir or self.args.export_dir
+                                                 or 'viewer_exports/<date_time> (made on the first export)'))
+
         if psim.CollapsingHeader('Selected point', psim.ImGuiTreeNodeFlags_DefaultOpen):
             info = self.selection_info()
             if info is None:
@@ -632,6 +735,7 @@ def parse(argv=None):
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument('--total_max_iter', type=int, default=20000)
     pre.add_argument('--mock', action='store_true', help='headless polyscope backend (tests)')
+    pre.add_argument('--export_dir', default=None, help='PLY export folder (default: viewer_exports/<date_time>)')
     extra, rest = pre.parse_known_args(argv)
     if '--bundle' not in rest and b:
         rest = ['--bundle', b[0]] + rest
@@ -642,6 +746,7 @@ def parse(argv=None):
     a = run_relax.parse_args(rest)
     a.total_max_iter = extra.total_max_iter
     a.mock = extra.mock
+    a.export_dir = extra.export_dir
     cfg = run_relax.config_from_args(a)
     cfg.snapshotIters = ()
     return a, cfg
