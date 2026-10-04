@@ -7,7 +7,7 @@ writes a results table.
 Each experiment goes to output/relaxation_experiments/<name>/ (with
 experiment_config.txt, run.log, results.json); the table (one row per
 experiment, folder column first) to
-output/relaxation_experiments/py_experiments_results.{csv,md}.
+output/relaxation_experiments/py_experiments_results[_<set>].{csv,md}.
 """
 import argparse
 import glob
@@ -46,9 +46,24 @@ SETS = {
         ('py_mv_nofold_lam1_2k', 'mean-value weights, symmetric graph, no new folds, lambda 1',
          E + NF + IT + ['--coarse_subdiv_relax_weights', 'meanvalue', '--explicit_lambda', '1']),
     ],
+    # equal-area refinement of the coarse mesh before the subdivision (equal_area_refine.py);
+    # flags None: an existing run, listed in the table for comparison
+    'equal_area': [
+        ('py_nofold_2k', 'baseline (existing run)', None),
+        ('py_eqarea1_nofold_2k', 'as baseline, coarse faces refined to equal area first (levels 1: ~1600 faces)',
+         E + NF + IT + ['--equal_area_levels', '1']),
+        ('py_eqarea2_nofold_2k', 'as baseline, coarse faces refined to equal area first (levels 2: ~6400 faces)',
+         E + NF + IT + ['--equal_area_levels', '2']),
+        ('py_cotan_nofold_dir_2k', 'cotan, directed, no new folds (existing run)', None),
+        ('py_eqarea2_cotan_nofold_dir_2k', 'cotan, directed, no new folds, equal-area levels 2',
+         E + NF + IT + ['--coarse_subdiv_relax_weights', 'cotan', '--explicit_directed_graph',
+                        '--equal_area_levels', '2']),
+    ],
 }
 
 COLS = [('folder', lambda r: r['folder']),
+        ('equal_area', lambda r: r.get('equal_area', 'off')),
+        ('n_verts', lambda r: r.get('n_subdiv_verts', '')),
         ('weights', lambda r: r['config']['weights']),
         ('graph', lambda r: 'directed' if r['config']['explicitDirected'] and not r['config']['jointPass'] else 'symmetric'),
         ('no_new_folds', lambda r: int(r['config']['noNewFolds'])),
@@ -72,7 +87,7 @@ COLS = [('folder', lambda r: r['folder']),
         ('seconds', lambda r: '%.0f' % r['seconds'])]
 
 
-def write_table(folders):
+def write_table(folders, name='py_experiments_results'):
     rows = []
     for d in folders:
         p = os.path.join(EXP_ROOT, d, 'results.json')
@@ -82,15 +97,15 @@ def write_table(folders):
         return
     head = [c for c, _ in COLS]
     vals = [[str(f(r)) for _, f in COLS] for r in rows]
-    with open(os.path.join(EXP_ROOT, 'py_experiments_results.csv'), 'w', newline='\n') as f:
+    with open(os.path.join(EXP_ROOT, name + '.csv'), 'w', newline='\n') as f:
         f.write(','.join(head) + '\n')
         for v in vals:
             f.write(','.join('"%s"' % x if ',' in x else x for x in v) + '\n')
-    with open(os.path.join(EXP_ROOT, 'py_experiments_results.md'), 'w', newline='\n') as f:
+    with open(os.path.join(EXP_ROOT, name + '.md'), 'w', newline='\n') as f:
         f.write('| ' + ' | '.join(head) + ' |\n|' + '---|' * len(head) + '\n')
         for v in vals:
             f.write('| ' + ' | '.join(v) + ' |\n')
-    print(open(os.path.join(EXP_ROOT, 'py_experiments_results.md')).read())
+    print(open(os.path.join(EXP_ROOT, name + '.md')).read())
 
 
 def main():
@@ -106,11 +121,14 @@ def main():
     bundle = glob.glob(os.path.join(SOURCE_RUN, 'correspondence_*.c2f'))[0]
     if not a.table_only:
         for name, desc, flags in exps:
+            if flags is None:
+                continue
             out = os.path.join(EXP_ROOT, name)
             print('=== %s: %s' % (name, desc), flush=True)
             run_relax.main(['--bundle', bundle, '--matstruct_path', MS, '--output_dir', out,
                             '--no_subdiv_objs', '--description', desc] + flags)
-    write_table([e[0] for e in SETS[a.set]])
+    write_table([e[0] for e in SETS[a.set]],
+                'py_experiments_results' + ('' if a.set == 'default' else '_' + a.set))
 
 
 if __name__ == '__main__':

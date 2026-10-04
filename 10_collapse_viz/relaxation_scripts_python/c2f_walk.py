@@ -188,10 +188,11 @@ class CoarseSubdivC2F:
     pass
 
 
-def coarse_subdiv_c2f_build(B, nTarget):
-    """coarse_subdiv_c2f_build(cmc, nTarget) with cmc from the bundle."""
+def coarse_subdiv_c2f_build(B, nTarget, refined=None):
+    """coarse_subdiv_c2f_build(cmc, nTarget) with cmc from the bundle.
+    refined (Python-only): equal_area_refine.RefinedCoarse to subdivide from."""
     C = CoarseSubdivC2F()
-    C.S = build_subdiv_mesh(B.coarseV, B.coarseF, nTarget)
+    C.S = build_subdiv_mesh(B.coarseV, B.coarseF, nTarget, start=refined)
     S = C.S
     n = S.V.shape[0]
     nDec = B.nDec

@@ -68,3 +68,21 @@ and its `_it<N>.obj` snapshots, plus `run.log`, `experiment_config.txt`, `result
   against the C++-exact walk.
 - `test_projector.py`: BVH structure and BVH vs brute-force closest points.
 - `cpp_reference_run.sh`: a headless C++ Release run, for flags no earlier run used.
+
+## Equal-area mode (Python only)
+
+`equal_area_refine.py`: before the uniform subdivision, the big coarse faces are split
+(longest-edge bisection, conforming, also on non-manifold edges) until all faces are below a
+target area. `--equal_area_levels K` searches the target so that the refined coarse mesh has
+about |F| * 4^K faces; the subdivision then needs K levels fewer, so the sample count stays
+the same. `--equal_area_target A` gives the target area directly. The default (0) is the C++
+behaviour. Every refined vertex keeps an exact carrier on the original coarse mesh, so the
+c2f walk, struct ids, roles and projection are unchanged. It works with `run_relax.py`,
+`relax_viewer.py` and the `equal_area` set of `run_experiments.py`. Standalone (area stats and
+the refined coarse OBJ): `python equal_area_refine.py --bundle <...>.c2f --equal_area_levels 2 --out r.obj`.
+
+## Step viewer
+
+`relax_viewer.py`: polyscope viewer that runs the relaxation one step at a time and shows each
+step's checkpoint (x, y, Pi(y), committed, search region, BVH). The configuration can be switched
+between steps. Spec: `md_files/relaxation_step_visualizer.md`. Headless test: `test_viewer.py`.

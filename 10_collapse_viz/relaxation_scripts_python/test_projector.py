@@ -19,7 +19,7 @@ sys.path.insert(0, HERE)
 
 from bundle_io import load_bundle_flat  # noqa: E402
 from matstruct import load_matstruct  # noqa: E402
-from projector import Projector, bvh_query, prim_closest  # noqa: E402
+from projector import NO_TRACE, Projector, bvh_query, prim_closest  # noqa: E402
 from struct_ids import RELAX_SHEET  # noqa: E402
 from subdiv_mesh import subdiv_unique_edges  # noqa: E402
 
@@ -102,7 +102,7 @@ def main():
             c = [x for x in tr.corner[rng.integers(len(tr.gid))] if x >= 0]
             q = proj.VO[c].mean(axis=0) + (0.0, 0.02, 0.5)[s % 3] * tdiag * rng.normal(size=3)
             d0, g0 = brute_force(PJ, t, q[0], q[1], q[2])
-            d1, g1, _, _, _ = bvh_query(PJ, t, q[0], q[1], q[2], np.inf, 2 ** 31 - 1, 1.0, 0.0, 0.0)
+            d1, g1, _, _, _, _, _ = bvh_query(PJ, t, q[0], q[1], q[2], np.inf, 2 ** 31 - 1, 1.0, 0.0, 0.0, NO_TRACE, 0)
             mismatch += (d0 != d1) or (g0 != g1)
             nq += 1
     print('[test_projector] projector BVH check: %d trees, %d structure errors, %d of %d queries differ from brute force'

@@ -28,6 +28,10 @@ Python-only extras:
   --snapshot_iters a,b,...  OBJ snapshots at these iterations (C++: 1,10,100,1000,10000)
   --no_subdiv_objs          do not write coarse_subdiv_*.obj / coarse_subdiv_at_fine_pos_*.obj
   --description TEXT        written to experiment_config.txt
+  --equal_area_levels K     equal-area mode (equal_area_refine.py): split the big coarse faces
+                            (longest-edge bisection) into about |F| * 4^K faces of similar area
+                            before the uniform subdivision (0 = off, the C++ behaviour)
+  --equal_area_target A     same, with the target face area A given directly
 """
 import argparse
 import dataclasses
@@ -45,6 +49,7 @@ sys.path.insert(0, HERE)
 import log_util  # noqa: E402
 from bundle_io import load_bundle_flat  # noqa: E402
 from c2f_walk import coarse_subdiv_c2f_build  # noqa: E402
+from equal_area_refine import refine_from_args  # noqa: E402
 from coarse_subdiv_relax import CoarseSubdivRelaxConfig, coarse_subdiv_relax_export, relaxed_obj_prefix  # noqa: E402
 from matstruct import load_matstruct  # noqa: E402
 from obj_io import read_obj, write_obj  # noqa: E402
@@ -77,7 +82,24 @@ def parse_args(argv=None):
     p.add_argument('--snapshot_iters', default='1,10,100,1000,10000')
     p.add_argument('--no_subdiv_objs', action='store_true')
     p.add_argument('--description', default='')
+    p.add_argument('--equal_area_levels', type=int, default=0)
+    p.add_argument('--equal_area_target', type=float, default=-1.0)
     return p.parse_args(argv)
+
+
+def build_c2f(B, a):
+    """Subdivided coarse mesh + c2f walk; with the equal-area mode, from the refined coarse mesh."""
+    R = refine_from_args(B.coarseV, B.coarseF, a.equal_area_levels, a.equal_area_target)
+    return coarse_subdiv_c2f_build(B, a.n_coarse_subdiv_samples, refined=R)
+
+
+def equal_area_text(a):
+    if a.equal_area_target > 0:
+        return 'on, target face area %g' % a.equal_area_target
+    if a.equal_area_levels > 0:
+        return 'on, levels %d (about |F| x %d coarse faces of similar area)' % (a.equal_area_levels,
+                                                                                 4 ** a.equal_area_levels)
+    return 'off'
 
 
 def config_from_args(a):
@@ -158,7 +180,7 @@ def main(argv=None):
         if not (okF and okV):
             raise SystemExit('simplified mesh does not match the bundle')
     ms = load_matstruct(a.matstruct_path, B.fineV, B.fineF)
-    C = coarse_subdiv_c2f_build(B, a.n_coarse_subdiv_samples)
+    C = build_c2f(B, a)
     if not a.no_subdiv_objs and C.S.V.shape[0] <= a.subdiv_obj_max_verts:
         write_obj(out('coarse_subdiv_', '.obj'), C.S.V, C.S.F)
         write_obj(out('coarse_subdiv_at_fine_pos_', '.obj'), C.P, C.S.F)
@@ -178,6 +200,8 @@ def main(argv=None):
             % (q0.edgeCV, q1.edgeCV, q0.p1, q1.p1, q0.p5, q1.p5, q0.median, q1.median, q0.degenerate,
                q1.degenerate, q1.flippedVsRef)]
         res = dict(folder=os.path.basename(os.path.normpath(out_dir)), config=dataclasses.asdict(cfg),
+                   equal_area=equal_area_text(a), n_subdiv_verts=int(C.S.V.shape[0]),
+                   n_subdiv_faces=int(C.S.F.shape[0]),
                    report=dataclasses.asdict(R), quality_before=dataclasses.asdict(q0),
                    quality_after=dataclasses.asdict(q1), seconds=time.perf_counter() - t0, relaxed_obj=objPath)
         with open(os.path.join(out_dir, 'results.json'), 'w') as f:

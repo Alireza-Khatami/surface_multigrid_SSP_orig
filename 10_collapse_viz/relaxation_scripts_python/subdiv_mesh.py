@@ -109,8 +109,12 @@ def subdiv_find_edges(edges, a, b):
     return np.where(ok, idx_c, -1)
 
 
-def build_subdiv_mesh(VO, FO, nTarget):
-    """Subdivides (VO, FO) uniformly until the vertex count is >= nTarget."""
+def build_subdiv_mesh(VO, FO, nTarget, start=None):
+    """Subdivides (VO, FO) uniformly until the vertex count is >= nTarget.
+
+    start (Python-only, equal_area_refine.RefinedCoarse): a refinement of (VO, FO)
+    with carriers on (VO, FO); the subdivision starts from its faces instead of FO.
+    Carriers, faceOrig, fineFace / fineBary stay relative to (VO, FO)."""
     VO = np.asarray(VO, dtype=np.float64)
     FO = np.asarray(FO, dtype=np.int64)
     nVO, nFO = VO.shape[0], FO.shape[0]
@@ -185,6 +189,13 @@ def build_subdiv_mesh(VO, FO, nTarget):
 
     F = FO.copy()
     faceOrig = np.arange(nFO, dtype=np.int64)
+    if start is not None:
+        ctype = list(start.carrierType)
+        cidx = list(start.carrierIndex)
+        ccoord = list(start.carrierCoord)
+        F = np.asarray(start.F, dtype=np.int64).copy()
+        faceOrig = np.asarray(start.faceOrig, dtype=np.int64).copy()
+        M.levelVerts = [len(ctype)]
 
     while len(ctype) < nTarget and F.shape[0] > 0:
         Fs = F.shape[0]
@@ -303,8 +314,10 @@ def build_subdiv_mesh(VO, FO, nTarget):
     M.carrierCoord = np.array(ccoord, dtype=np.float64).reshape(Vs, 3)
     M.fineFace = fineFace
     M.fineBary = fineBary
-    log('[subdiv_mesh] %d levels: |V| %d -> %d, |F| %d -> %d (target %d)'
-          % (M.nLevels, nVO, Vs, nFO, F.shape[0], nTarget))
+    log('[subdiv_mesh] %d levels: |V| %d -> %d, |F| %d -> %d (target %d)%s'
+          % (M.nLevels, nVO, Vs, nFO, F.shape[0], nTarget,
+             '' if start is None else ' (from the equal-area refinement: |V| %d, |F| %d)'
+             % (M.levelVerts[0], start.F.shape[0])))
     return M
 
 

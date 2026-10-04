@@ -29,6 +29,7 @@ from struct_ids import RELAX_CURVE, RELAX_SHEET, intersects
 from subdiv_mesh import subdiv_find_edges
 
 INF = np.inf
+NO_TRACE = np.zeros(0, dtype=np.int64)  # empty checkpoint buffer
 INT_MAX = 2 ** 31 - 1
 
 
@@ -180,15 +181,20 @@ def _box_sqdist(mn, mx, n, px, py, pz):
 
 
 @njit(cache=True)
-def bvh_query(PJ, t, px, py, pz, bestD, bestGid, b0, b1, b2):
-    """PrimBVH::query on tree t; returns the updated incumbent."""
+def bvh_query(PJ, t, px, py, pz, bestD, bestGid, b0, b1, b2, vis, nvis):
+    """PrimBVH::query on tree t; returns the updated incumbent, the tree-local
+    leaf node holding a strictly better primitive (-1 if the incumbent stands)
+    and the updated count of vis.
+    Checkpoint: vis records (up to its size) every node the query enters
+    (not pruned), as global node indices; pass an empty array to skip."""
     VO = PJ[0]
     prim0 = PJ[19][t]
     corner = PJ[20]; gid = PJ[21]; order = PJ[22]
     n0 = PJ[23][t]; n1 = PJ[23][t + 1]
     mn = PJ[24]; mx = PJ[25]; left = PJ[26]; right = PJ[27]; beg = PJ[28]; end = PJ[29]
+    leaf = -1
     if n1 == n0:
-        return bestD, bestGid, b0, b1, b2
+        return bestD, bestGid, b0, b1, b2, leaf, nvis
     stack = np.empty(128, dtype=np.int64)
     sp = 0
     stack[sp] = 0
@@ -198,12 +204,16 @@ def bvh_query(PJ, t, px, py, pz, bestD, bestGid, b0, b1, b2):
         nd = n0 + stack[sp]
         if _box_sqdist(mn, mx, nd, px, py, pz) > bestD:
             continue
+        if nvis < vis.shape[0]:
+            vis[nvis] = nd
+            nvis += 1
         if left[nd] < 0:
             for k in range(beg[nd], end[nd]):
                 i = prim0 + order[prim0 + k]
                 d, c0, c1, c2 = prim_closest(VO, corner[i, 0], corner[i, 1], corner[i, 2], px, py, pz)
                 if d < bestD or (d == bestD and gid[i] < bestGid):
                     bestD = d; bestGid = gid[i]; b0 = c0; b1 = c1; b2 = c2
+                    leaf = nd - n0
         else:
             if sp + 2 > 128:
                 raise RuntimeError('[subdiv_relax] BVH too deep')
@@ -214,7 +224,7 @@ def bvh_query(PJ, t, px, py, pz, bestD, bestGid, b0, b1, b2):
             else:
                 stack[sp] = left[nd]; stack[sp + 1] = right[nd]
             sp += 2
-    return bestD, bestGid, b0, b1, b2
+    return bestD, bestGid, b0, b1, b2, leaf, nvis
 
 
 # ------------------------------------------------------------------ membership
@@ -304,10 +314,15 @@ def _record(px, py, pz, b0, b1, b2, edge, x, y, z):
 
 
 # ------------------------------------------------------------------ project / project_local
-# Both return (face, b0, b1, b2, edge, x, y, z, onBorder, baryFix, dist, grown, global)
+# Both return (face, b0, b1, b2, edge, x, y, z, onBorder, baryFix, dist, grown, global,
+#               winTree, winLeaf, nTrace)
+# Checkpoint fields (not used by the relaxation): winTree / winLeaf = the tree and
+# tree-local leaf node that gave the result (-1 when the incumbent location or the
+# local region did); nTrace = entries written to vis (project) or the size of the
+# final search region left in `region` (project_local).
 
 @njit(cache=True)
-def project(PJ, k, px, py, pz, curFace, curEdge):
+def project(PJ, k, px, py, pz, curFace, curEdge, vis):
     VO = PJ[0]; FO = PJ[1]; E = PJ[2]
     bestD = INF
     bestGid = INT_MAX
@@ -321,13 +336,20 @@ def project(PJ, k, px, py, pz, curFace, curEdge):
         d, c0, c1, c2 = prim_closest(VO, FO[curFace, 0], FO[curFace, 1], FO[curFace, 2], px, py, pz)
         bestD = d; bestGid = curFace; b0 = c0; b1 = c1; b2 = c2
     tg_off = PJ[17]; tg = PJ[18]
+    winTree = -1
+    winLeaf = -1
+    nvis = 0
     for a in range(tg_off[k], tg_off[k + 1]):
-        bestD, bestGid, b0, b1, b2 = bvh_query(PJ, tg[a], px, py, pz, bestD, bestGid, b0, b1, b2)
+        bestD, bestGid, b0, b1, b2, leaf, nvis = bvh_query(PJ, tg[a], px, py, pz, bestD, bestGid, b0, b1, b2,
+                                                           vis, nvis)
+        if leaf >= 0:
+            winTree = tg[a]
+            winLeaf = leaf
     if bestGid == INT_MAX:
         raise RuntimeError('[subdiv_relax] projection found no target')
     face, r0, r1, r2, edge, x, y, z, fix = finish(PJ, curve, bestGid, b0, b1, b2)
     onb, dist = _record(px, py, pz, r0, r1, r2, edge, x, y, z)
-    return face, r0, r1, r2, edge, x, y, z, onb, fix, dist, 0, 0
+    return face, r0, r1, r2, edge, x, y, z, onb, fix, dist, 0, 0, winTree, winLeaf, nvis
 
 
 @njit(cache=True)
@@ -368,14 +390,14 @@ def _add_ring(PJ, k, curve, x, region, n):
 
 
 @njit(cache=True)
-def project_local(PJ, k, px, py, pz, curFace, curEdge, region):
+def project_local(PJ, k, px, py, pz, curFace, curEdge, region, vis):
     """region: scratch buffer of size >= max(#faces, #edges)."""
     VO = PJ[0]; FO = PJ[1]; E = PJ[2]
     curve = PJ[16][k] != 0
     valid = (curEdge >= 0 and edge_in(PJ, k, curEdge)) if curve else (curFace >= 0 and face_in(PJ, k, curFace))
     if not valid:
-        r = project(PJ, k, px, py, pz, curFace, curEdge)
-        return r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], 0, 1
+        r = project(PJ, k, px, py, pz, curFace, curEdge, vis)
+        return r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], 0, 1, r[13], r[14], r[15]
     n = 0
     region[n] = curEdge if curve else curFace
     n += 1
@@ -448,7 +470,7 @@ def project_local(PJ, k, px, py, pz, curFace, curEdge, region):
         if closed:
             face, r0, r1, r2, edge, x, y, z, fix = finish(PJ, curve, bestGid, b0, b1, b2)
             onb, dist = _record(px, py, pz, r0, r1, r2, edge, x, y, z)
-            return face, r0, r1, r2, edge, x, y, z, onb, fix, dist, grown, 0
+            return face, r0, r1, r2, edge, x, y, z, onb, fix, dist, grown, 0, -1, -1, n
         if rnd == 0:
             grown = 1
         before = n
@@ -457,9 +479,9 @@ def project_local(PJ, k, px, py, pz, curFace, curEdge, region):
         if n == before:  # whole component
             face, r0, r1, r2, edge, x, y, z, fix = finish(PJ, curve, bestGid, b0, b1, b2)
             onb, dist = _record(px, py, pz, r0, r1, r2, edge, x, y, z)
-            return face, r0, r1, r2, edge, x, y, z, onb, fix, dist, grown, 0
-    r = project(PJ, k, px, py, pz, curFace, curEdge)
-    return r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], grown, 1
+            return face, r0, r1, r2, edge, x, y, z, onb, fix, dist, grown, 0, -1, -1, n
+    r = project(PJ, k, px, py, pz, curFace, curEdge, vis)
+    return r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], grown, 1, r[13], r[14], r[15]
 
 
 # ------------------------------------------------------------------ BVH build (Python, once)
@@ -637,4 +659,4 @@ class Projector:
         return intersects(self.edgeCurves[e], self.S.curve[k])
 
     def project(self, k, p, curFace, curEdge):
-        return project(self.pj, int(k), float(p[0]), float(p[1]), float(p[2]), int(curFace), int(curEdge))
+        return project(self.pj, int(k), float(p[0]), float(p[1]), float(p[2]), int(curFace), int(curEdge), NO_TRACE)
