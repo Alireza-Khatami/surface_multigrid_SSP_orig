@@ -54,10 +54,47 @@ ROLE_NAME = {0: 'sheet', 1: 'curve', 2: 'junction'}
 POINT_MATERIAL = 'flat'  # unlit: a point's colour does not change with the light / view
 
 
+# Sizes stay the same on screen-independent terms: every radius below is given relative to
+# the scene's length scale AT START (LEN0) and set as an absolute size, so the camera speed
+# control (which changes the length scale) does not shrink points, curves or vectors.
+LEN0 = [None]
+
+
+def _abs(rel):
+    return rel * LEN0[0]
+
+
 def register_pc(ps, name, points, **kw):
-    """ps.register_point_cloud with the unlit material (every point cloud of the viewer)."""
+    """ps.register_point_cloud with the unlit material and an absolute radius (every point
+    cloud of the viewer)."""
     kw.setdefault('material', POINT_MATERIAL)
-    return ps.register_point_cloud(name, points, **kw)
+    r = kw.pop('radius', 0.005)
+    pc = ps.register_point_cloud(name, points, **kw)
+    if LEN0[0]:
+        pc.set_radius(_abs(r), relative=False)
+    return pc
+
+
+def register_cn(ps, name, nodes, edges, **kw):
+    """ps.register_curve_network with an absolute radius."""
+    r = kw.pop('radius', 0.005)
+    cn = ps.register_curve_network(name, nodes, edges, **kw)
+    if LEN0[0]:
+        cn.set_radius(_abs(r), relative=False)
+    return cn
+
+
+def add_ambient_vectors(pc, name, vecs, color, radius=0.0012):
+    """Ambient vector quantity with an absolute radius (the Python wrapper only sets
+    relative radii, so the bound call is used)."""
+    import polyscope_bindings as psb
+    from polyscope.common import glm3
+    q = pc.bound_instance.add_vector_quantity(name, np.asfortranarray(np.asarray(vecs, dtype=np.float32)),
+                                              psb.VectorType.ambient)
+    q.set_radius(_abs(radius), False)
+    q.set_color(glm3(color))
+    q.set_enabled(True)
+    return q
 
 
 # ------------------------------------------------------------------ geometry helpers (display only)
@@ -156,6 +193,12 @@ class RelaxViewer:
             self.treeLabel[t] = 'curve %d' % i
         if sess.proj.globalTree >= 0:
             self.treeLabel[sess.proj.globalTree] = 'global (all faces)'
+        # camera speed control: polyscope moves (scroll zoom, pan, first-person keys) by steps
+        # proportional to the length scale; it is set every frame to k * d, d = distance
+        # from the camera to the orbit centre (mode 0) or to the point under the cursor (mode 1)
+        self.sceneCenter = None    # orbit centre fallback (polyscope < 2.5)
+        self.cam = dict(on=True, mode=0, k=0.5, minf=1e-3, maxf=1.0, smooth=0.35, every=2, frame=0,
+                        d=float('nan'), scale=None, far=20.0)
         self.ui = {}
         self.status = ''
         log_util.log('[relax_viewer] ready in %.1f s' % (time.perf_counter() - t0))
@@ -199,6 +242,98 @@ class RelaxViewer:
                 self.runTo = 0
                 break
         self.refresh()
+
+    # -------------------------------------------------------------- camera speed
+    CAM_MODES = ['distance to the orbit centre (C)', 'depth under the cursor (A)']
+
+    def _view(self):
+        """(camera position, orbit centre) from the view JSON, which every polyscope 2.x
+        version has. Polyscope < 2.5 has no view centre (not in the JSON, no
+        get_view_center): its turntable orbits the centre of the scene bounding box."""
+        import json
+        v = json.loads(self.ps.get_view_as_json())
+        M = v.get('viewMat')
+        if not M or any(x is None for x in M):
+            return None, None
+        M = np.asarray(M, dtype=float).reshape(4, 4)  # world -> camera, row-major
+        R, t = M[:3, :3], M[:3, 3]
+        pos = -R.T @ t
+        if 'viewCenter' in v:
+            ctr = np.asarray(v['viewCenter'], dtype=float)
+        else:
+            if self.sceneCenter is None:
+                lo, hi = (np.asarray(x, dtype=float) for x in self.ps.get_bounding_box())
+                self.sceneCenter = 0.5 * (lo + hi)
+            ctr = self.sceneCenter
+        return pos, ctr
+
+    def camera_distance(self, psim=None):
+        """d for the current mode; None when there is no reading this frame."""
+        ps, c = self.ps, self.cam
+        pos, ctr = self._view()
+        if pos is None:
+            return None
+        if c['mode'] == 0:
+            d = float(np.linalg.norm(ctr - pos))
+            return d if np.isfinite(d) else None
+        c['frame'] += 1
+        if psim is None or c['frame'] % max(1, c['every']):
+            return None
+        io = psim.GetIO()
+        if io.WantCaptureMouse:  # over the GUI
+            return None
+        mp = io.MousePos
+        try:
+            if hasattr(ps, 'pick'):
+                r = ps.pick(screen_coords=(mp[0], mp[1]))
+            else:  # older polyscope
+                r = ps.pick_at_screen_coords((mp[0], mp[1]))
+        except Exception:  # noqa: BLE001 (outside the window)
+            return None
+        if not r.is_hit:
+            return None
+        d = float(np.linalg.norm(r.position - pos))
+        return d if np.isfinite(d) else None
+
+    def set_far_clip(self, scale):
+        """Keeps the far clip at 20 x the starting length scale (polyscope's far clip is a
+        ratio of the current length scale)."""
+        want = 20.0 * LEN0[0] / scale
+        if abs(want - self.cam['far']) <= 0.01 * self.cam['far']:
+            return
+        try:
+            import json
+            v = json.loads(self.ps.get_view_as_json())
+            if any(x is None for x in v.get('viewMat', [])):
+                return  # no valid view (mock backend)
+            v['farClip' if 'farClip' in v else 'farClipRatio'] = want  # name differs across versions
+            self.ps.set_view_from_json(json.dumps(v))
+            self.cam['far'] = want
+        except Exception:  # noqa: BLE001
+            pass
+
+    def camera_speed(self, psim=None):
+        """Called every frame: length scale = clamp(k d, min, max) x LEN0, smoothed."""
+        c = self.cam
+        L0 = LEN0[0]
+        if not L0:
+            return
+        if not c['on']:
+            target = L0
+        else:
+            d = self.camera_distance(psim)
+            if d is not None:
+                c['d'] = d
+            if not np.isfinite(c['d']):
+                return
+            target = min(max(c['k'] * c['d'], c['minf'] * L0), c['maxf'] * L0)
+        sc = c['scale'] + c['smooth'] * (target - c['scale'])
+        if abs(sc - target) < 1e-4 * L0:
+            sc = target
+        if sc != c['scale']:
+            c['scale'] = sc
+            self.ps.set_length_scale(sc)
+            self.set_far_clip(sc)
 
     # -------------------------------------------------------------- PLY export
     EXPORTS = (('input', 'relaxation input (iteration 0)'), ('committed', 'committed (current)'),
@@ -286,6 +421,9 @@ class RelaxViewer:
             ps.create_group(g)
         m = ps.register_surface_mesh('fine MAT', B.fineV, B.fineF, color=(0.8, 0.8, 0.8), transparency=0.3)
         m.add_to_group('fine MAT')
+        LEN0[0] = ps.get_length_scale()  # sizes and the camera speed are relative to this
+        ps.set_automatically_compute_scene_extents(False)
+        self.cam['scale'] = LEN0[0]
         pc = register_pc(ps, 'points', self.rel.X, radius=0.0015)
         pc.add_color_quantity('random colour', self.colors, enabled=True)
         pc.add_to_group('points')
@@ -351,7 +489,7 @@ class RelaxViewer:
                 ps.remove_point_cloud(name)
         if len(P.edges):
             nodes, edges, _ = compact(B.fineV, P.edges)  # only the vertices the edges use
-            cn = ps.register_curve_network('concave seam / boundary parts', nodes, edges, color=(0.9, 0.1, 0.1),
+            cn = register_cn(ps, 'concave seam / boundary parts', nodes, edges, color=(0.9, 0.1, 0.1),
                                            radius=0.002, material=POINT_MATERIAL)
             cn.add_scalar_quantity('type (1 seam, 2 boundary)', P.edgeType.astype(float), defined_on='edges')
             cn.add_to_group('fine MAT')
@@ -450,14 +588,12 @@ class RelaxViewer:
             c = self._add(G1, 'pc', 'sel: x (start)', register_pc(ps, 'sel: x (start)', x0[None], radius=0.004,
                                                                             color=(0.2, 0.2, 0.2)))
             if sh['vstep']:
-                c.add_vector_quantity('step x -> y', (y - x0)[None], vectortype='ambient', enabled=True,
-                                      color=(0.1, 0.4, 0.95))
+                add_ambient_vectors(c, 'step x -> y', (y - x0)[None], (0.1, 0.4, 0.95))
         if sh['y']:
             c = self._add(G1, 'pc', 'sel: y (step)', register_pc(ps, 'sel: y (step)', y[None], radius=0.004,
                                                                            color=(0.1, 0.4, 0.95)))
             if sh['vproj']:
-                c.add_vector_quantity('projection y -> Pi(y)', (p - y)[None], vectortype='ambient', enabled=True,
-                                      color=(0.95, 0.5, 0.05))
+                add_ambient_vectors(c, 'projection y -> Pi(y)', (p - y)[None], (0.95, 0.5, 0.05))
         if sh['p']:
             self._add(G1, 'pc', 'sel: Pi(y) (projection)',
                       register_pc(ps, 'sel: Pi(y) (projection)', p[None], radius=0.004, color=(0.95, 0.5, 0.05)))
@@ -471,7 +607,7 @@ class RelaxViewer:
             if info['role'] == 'curve':
                 E = proj.E[info['reg']]
                 self._add(G2, 'cn', 'sel: local search region (edges)',
-                          ps.register_curve_network('sel: local search region (edges)', B.fineV, E,
+                          register_cn(ps, 'sel: local search region (edges)', B.fineV, E,
                                                     color=(0.2, 0.8, 0.3), radius=0.002))
             else:
                 self._add(G2, 'sm', 'sel: local search region (faces)',
@@ -479,7 +615,7 @@ class RelaxViewer:
                                                    color=(0.2, 0.8, 0.3), transparency=0.6))
         if sh['region']:
             if info['role'] == 'curve' and info['pedge'] >= 0:
-                self._add(G2, 'cn', 'sel: result edge', ps.register_curve_network(
+                self._add(G2, 'cn', 'sel: result edge', register_cn(ps,
                     'sel: result edge', B.fineV, proj.E[[info['pedge']]], color=(0.95, 0.5, 0.05), radius=0.003))
             elif info['pface'] >= 0:
                 self._add(G2, 'sm', 'sel: result face', ps.register_surface_mesh(
@@ -492,18 +628,18 @@ class RelaxViewer:
                 if keep:
                     nodes, edges = box_wire([tr.nodes[j][0] for j in keep], [tr.nodes[j][1] for j in keep])
                     nm = 'sel: target tree %s' % self.treeLabel.get(t, t)
-                    self._add(G2, 'cn', nm, ps.register_curve_network(nm, nodes, edges, color=(0.6, 0.6, 0.6),
+                    self._add(G2, 'cn', nm, register_cn(ps, nm, nodes, edges, color=(0.6, 0.6, 0.6),
                                                                       radius=0.0006, transparency=0.5))
         pj = proj.pj
         if sh['bvh_visited'] and info.get('visited') is not None and len(info['visited']):
             g = info['visited']
             nodes, edges = box_wire(pj[24][g], pj[25][g])
-            self._add(G2, 'cn', 'sel: BVH nodes visited', ps.register_curve_network(
+            self._add(G2, 'cn', 'sel: BVH nodes visited', register_cn(ps,
                 'sel: BVH nodes visited', nodes, edges, color=(0.1, 0.4, 0.95), radius=0.001))
         if sh['bvh_winner'] and info['winTree'] >= 0:
             gnode = pj[23][info['winTree']] + info['winLeaf']
             nodes, edges = box_wire(pj[24][gnode], pj[25][gnode])
-            self._add(G2, 'cn', 'sel: winning BVH leaf', ps.register_curve_network(
+            self._add(G2, 'cn', 'sel: winning BVH leaf', register_cn(ps,
                 'sel: winning BVH leaf', nodes, edges, color=(0.95, 0.5, 0.05), radius=0.002))
 
     def handle_pick(self):
@@ -536,7 +672,7 @@ class RelaxViewer:
         if not keep:
             return
         nodes, edges = box_wire([tr.nodes[j][0] for j in keep], [tr.nodes[j][1] for j in keep])
-        c = ps.register_curve_network(nm, nodes, edges, radius=0.0006)
+        c = register_cn(ps, nm, nodes, edges, radius=0.0006)
         c.add_scalar_quantity('depth', np.repeat(d[keep], 12).astype(float), defined_on='edges', enabled=True,
                               cmap='viridis')
         c.add_to_group('BVH inspector')
@@ -549,6 +685,13 @@ class RelaxViewer:
     def gui(self):
         import polyscope.imgui as psim
         self.handle_pick()
+        if self.cam['on']:
+            try:
+                self.camera_speed(psim)
+            except Exception as e:  # noqa: BLE001 (polyscope API differences): switch it off, keep the viewer
+                self.cam['on'] = False
+                self.cam['error'] = '%s: %s' % (type(e).__name__, e)
+                log_util.log('[relax_viewer] camera speed control switched off: ' + self.cam['error'])
         if self.running:
             self.step(self.stepsPerFrame)
         r = self.rel
@@ -609,6 +752,25 @@ class RelaxViewer:
                 ch, self.meshOn[key] = psim.Checkbox(label, self.meshOn[key])
                 if ch:
                     self.refresh()
+
+        if psim.CollapsingHeader('Camera speed', psim.ImGuiTreeNodeFlags_DefaultOpen):
+            c = self.cam
+            _, c['on'] = psim.Checkbox('slow down near things (camera speed control)', c['on'])
+            _, c['mode'] = psim.Combo('distance measured to', c['mode'], self.CAM_MODES)
+            _, c['k'] = psim.SliderFloat('speed per unit distance k', c['k'], 0.01, 2.0, format='%.3f')
+            _, c['minf'] = psim.InputFloat('min speed (x start)', c['minf'], format='%.5f')
+            c['minf'] = min(max(c['minf'], 1e-5), 1.0)
+            _, c['maxf'] = psim.SliderFloat('max speed (x start)', c['maxf'], 0.01, 4.0, format='%.2f')
+            _, c['smooth'] = psim.SliderFloat('smoothing', c['smooth'], 0.05, 1.0)
+            if c['mode'] == 1:
+                _, c['every'] = psim.SliderInt('pick every n frames', c['every'], 1, 10)
+            if self.cam.get('error'):
+                psim.TextUnformatted('switched off after an error: ' + self.cam['error'])
+            psim.Text('distance %.4g | speed %.3g x start' % (c['d'], c['scale'] / LEN0[0] if LEN0[0] else 1.0))
+            if psim.Button('Reset speed'):
+                c['scale'] = LEN0[0]
+                self.ps.set_length_scale(LEN0[0])
+                self.set_far_clip(LEN0[0])
 
         if psim.CollapsingHeader('Export (PLY)', psim.ImGuiTreeNodeFlags_DefaultOpen):
             for key, label in self.EXPORTS:
@@ -736,6 +898,8 @@ def main(argv=None):
     import polyscope as ps
     a, cfg = parse(argv)
     ps.init('openGL_mock' if a.mock else 'auto')
+    log_util.log('[relax_viewer] python %s, polyscope %s (%s)' % (sys.version.split()[0], getattr(ps, '__version__', '?'),
+                                                               os.path.dirname(ps.__file__)))
     ps.set_program_name('relaxation step viewer')
     ps.set_up_dir('z_up')
     v = RelaxViewer(a, cfg, ps)

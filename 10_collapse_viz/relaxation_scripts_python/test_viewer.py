@@ -168,6 +168,54 @@ def main():
     same &= np.array_equal(V3, v.C.P)
     print('stages: relax input == seeds, at-fine == c2f positions: %s (folder %s)' % (same, exportDir))
     ok &= bool(same) and len(paths) >= 4
+    # 5: camera speed control (distance readings simulated; the mock backend has no view)
+    L0 = relax_viewer.LEN0[0]
+    rad0 = v.pc.get_radius()
+    for mode in (0, 1):
+        v.cam['mode'] = mode
+        for d in (2.0 * L0, 0.1 * L0, 1e-6 * L0):
+            v.camera_distance = lambda psim=None, d=d: d
+            for _ in range(60):
+                v.camera_speed()
+            want = min(max(v.cam['k'] * d, v.cam['minf'] * L0), v.cam['maxf'] * L0)
+            okc = abs(v.ps.get_length_scale() - want) <= 1e-6 * L0
+            print('camera mode %d, d = %.3g x L0: length scale %.4g x L0 (want %.4g): %s'
+                  % (mode, d / L0, v.ps.get_length_scale() / L0, want / L0, 'ok' if okc else 'WRONG'))
+            ok &= okc
+    del v.camera_distance
+    # mode C from the real view: camera at a known position, distance to the view centre
+    R = np.linalg.qr(np.random.default_rng(1).random((3, 3)))[0]
+    cpos = v.B.fineV.mean(axis=0) + np.array([0.3, 0.2, 0.1]) * L0
+    M = np.eye(4)
+    M[:3, :3] = R
+    M[:3, 3] = -R @ cpos
+    v.ps.set_camera_view_matrix(M)
+    ctr = v._view()[1]  # view centre (2.5+) or scene box centre (older)
+    v.cam['mode'] = 0
+    d = v.camera_distance()
+    okd = d is not None and abs(d - np.linalg.norm(ctr - cpos)) <= 1e-6 * L0
+    print('camera mode C from the view: d = %s (want %.6g): %s' % (d, np.linalg.norm(ctr - cpos), okd))
+    ok &= okd
+    v.camera_speed()
+    ok &= not v.cam.get('error')
+    v.cam['on'] = False
+    for _ in range(60):
+        v.camera_speed()
+    ok &= abs(v.ps.get_length_scale() - L0) <= 1e-6 * L0
+    v.select(1234)  # selection markers / vectors / curves registered at a small length scale
+    v.update_selection()
+    okr = v.pc.get_radius() == rad0
+    print('point radius unchanged by the length scale: %s' % okr)
+    ok &= okr
+    # 6: real GUI frames (mock backend): every panel's imgui / polyscope calls run
+    v.cam['on'] = True
+    v.colorMode = 1
+    v.select(1234)
+    for _ in range(3):
+        v.ps.frame_tick()
+    okg = not v.cam.get('error')
+    print('GUI frames (all panels drawn): %s' % ('ok' if okg else 'camera error: ' + v.cam['error']))
+    ok &= okg
     print('TEST VIEWER: %s' % ('PASS' if ok else 'FAIL'))
     return 0 if ok else 1
 

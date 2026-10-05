@@ -109,3 +109,6 @@ The "Export (PLY)" panel has one button per mesh:
 They are written to `--export_dir`, by default
 `output/relaxation_experiments/viewer_exports/<date_time>/`, which gets an `experiment_config.txt`
 listing each export with its iteration and configuration.
+"Camera speed" panel: the camera slows down as it gets close. Its speed is k x the distance
+to the orbit centre or to the point under the cursor (drop-down). Point, curve and vector
+sizes stay fixed.

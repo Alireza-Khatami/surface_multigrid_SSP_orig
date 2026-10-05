@@ -95,6 +95,20 @@ ported first (not part of this step; to be decided).
    `output/relaxation_experiments/viewer_exports/<date_time>/`, whose `experiment_config.txt`
    lists every export with its iteration and configuration.
 
+9. **Camera speed.** Polyscope moves the camera (scroll zoom, pan, first-person keys) in steps
+   proportional to the scene length scale. Every frame the viewer sets that scale to
+   clamp(k x d, min, max) x the starting scale, smoothed. A drop-down picks what d is:
+   - the distance from the camera to the orbit centre (C);
+   - the distance to the 3D point under the cursor, from polyscope's pick buffer (A), read
+     every n frames; it keeps the last value off the surface or over the GUI.
+
+   The viewer also does two things so this works:
+   - It sets all radii (points, curves, vectors) as absolute sizes from the starting length
+     scale, so they stay the same size when the scale changes.
+   - It raises the far clip ratio as the scale drops, so far geometry is not cut off.
+
+   On by default, in mode C.
+
 ## Input
 
 A C++ run's bundle and the fine `.ma_struct`, as `run_relax.py` takes them (default:
