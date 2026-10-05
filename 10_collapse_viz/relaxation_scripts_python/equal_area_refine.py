@@ -21,7 +21,8 @@ target area A*:
   mesh has about |F| * 4^k faces, i.e. as many as k uniform levels would make. The
   uniform subdivision then needs k levels fewer for the same sample count, and the
   vertex count stays close to the run without refinement. --equal_area_target sets
-  A* directly.
+  A* directly; --equal_area_target min sets it to the smallest coarse face area (every
+  face is split down to the smallest one; the vertex count then depends on the mesh).
 - areas are measured on the coarse geometry.
 
 Every refined vertex keeps an exact carrier on the ORIGINAL coarse mesh (coarse
@@ -310,13 +311,29 @@ def refine_to_count(VO, FO, nFaces, iters=24):
     return best
 
 
+def target_arg(s):
+    """--equal_area_target: a positive area, 'min' (the smallest coarse face area), or <= 0 (off)."""
+    if isinstance(s, str) and s.strip().lower() == 'min':
+        return 'min'
+    return float(s)
+
+
+def target_on(target):
+    return target == 'min' or (target is not None and target > 0)
+
+
 def refine_from_args(VO, FO, levels=None, target=None):
-    """None when the mode is off (no levels, no target)."""
-    if (levels is None or levels <= 0) and (target is None or target <= 0):
+    """None when the mode is off (no levels, no target). target: an area, or 'min' for
+    the smallest coarse face area; it takes precedence over levels."""
+    if (levels is None or levels <= 0) and not target_on(target):
         return None
     VO = np.asarray(VO, dtype=np.float64)[:, :3]
     FO = np.asarray(FO, dtype=np.int64)
-    if target is not None and target > 0:
+    if target == 'min':
+        A = float(tri_areas(VO, FO).min())
+        R = refine_equal_area(VO, FO, A)
+        how = 'the smallest coarse face area'
+    elif target_on(target):
         R = refine_equal_area(VO, FO, float(target))
         how = 'given'
     else:
@@ -333,7 +350,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--bundle', required=True)
     p.add_argument('--equal_area_levels', type=int, default=2)
-    p.add_argument('--equal_area_target', type=float, default=-1.0)
+    p.add_argument('--equal_area_target', type=target_arg, default=-1.0, help="area, or 'min'")
     p.add_argument('--out', default=None, help='write the refined coarse mesh (OBJ)')
     a = p.parse_args(argv)
     from bundle_io import load_bundle_flat

@@ -6,6 +6,9 @@ collapse_viz_bin (main.cpp):
       --matstruct_path <...>.ma_struct --output_dir <dir> \
       --coarse_subdiv_relax_method explicit [--coarse_subdiv_relax_no_new_folds] ...
 
+--bundle / --matstruct_path default to ABC 00040057 decimated WITH validity checks
+(output/relaxation_experiments/src_qslim200_valid) and its .ma_struct.
+
 Relaxation flags (as in main.cpp):
   --coarse_subdiv_relax_method explicit   (the only ported method; C++ default: newton)
   --coarse_subdiv_relax_per_face          hold vertices on coarse vertices / edges at their seeds
@@ -33,7 +36,8 @@ Python-only extras:
   --equal_area_levels K     equal-area mode (equal_area_refine.py): split the big coarse faces
                             (longest-edge bisection) into about |F| * 4^K faces of similar area
                             before the uniform subdivision (0 = off, the C++ behaviour)
-  --equal_area_target A     same, with the target face area A given directly
+  --equal_area_target A     same, with the target face area A given directly; 'min': the
+                            smallest coarse face area
   --no_input_ply            do not write relax_input/*.ply (default: written, see relax_exports.py:
                             coarse mesh, equal-area refined mesh if on, subdivided mesh, its c2f
                             positions, and the relaxation input at the relaxer's initialization)
@@ -54,17 +58,35 @@ sys.path.insert(0, HERE)
 import log_util  # noqa: E402
 from bundle_io import load_bundle_flat  # noqa: E402
 from c2f_walk import coarse_subdiv_c2f_build  # noqa: E402
-from equal_area_refine import refine_from_args  # noqa: E402
+from equal_area_refine import refine_from_args, target_arg, target_on  # noqa: E402
 from relax_exports import export_relax_input  # noqa: E402
 from coarse_subdiv_relax import CoarseSubdivRelaxConfig, coarse_subdiv_relax_export, relaxed_obj_prefix  # noqa: E402
 from matstruct import load_matstruct  # noqa: E402
 from obj_io import read_obj, write_obj  # noqa: E402
 
 
+# Default input of every experiment (2026-10-05): the decimation WITH validity checks and the
+# struct gate (C++ run src_qslim200_valid: qslim to 200 faces, --validity-checks
+# --mat_struct_check; it stops at 541 coarse faces) on ABC 00040057.
+DEFAULT_SOURCE_RUN = 'src_qslim200_valid'
+EXP_ROOT = os.path.normpath(os.path.join(HERE, '..', 'output', 'relaxation_experiments'))
+DEFAULT_MS = ('D:/datasets/abc_full_10k/out_ABC_v6_knn_poission40_20_15_10/'
+              '01_00040057_f8f78dbd17414efda75bc437_trimesh_000/mat/'
+              'mat_01_00040057_f8f78dbd17414efda75bc437_trimesh_000.obj__2025-05-06_02_38_00.ma_struct')
+
+
+def default_bundle(run=DEFAULT_SOURCE_RUN):
+    import glob
+    b = glob.glob(os.path.join(EXP_ROOT, run, 'correspondence_*.c2f'))
+    return b[0] if b else None
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--bundle', required=True)
-    p.add_argument('--matstruct_path', required=True)
+    p.add_argument('--bundle', default=default_bundle(),
+                   help='default: the bundle of output/relaxation_experiments/%s (validity checks on)'
+                   % DEFAULT_SOURCE_RUN)
+    p.add_argument('--matstruct_path', default=DEFAULT_MS)
     p.add_argument('--output_dir', default='.')
     p.add_argument('--coarse_subdiv_relax_method', default='newton')
     p.add_argument('--coarse_subdiv_relax_per_face', action='store_true')
@@ -90,7 +112,7 @@ def parse_args(argv=None):
     p.add_argument('--no_subdiv_objs', action='store_true')
     p.add_argument('--description', default='')
     p.add_argument('--equal_area_levels', type=int, default=0)
-    p.add_argument('--equal_area_target', type=float, default=-1.0)
+    p.add_argument('--equal_area_target', type=target_arg, default=-1.0)
     p.add_argument('--no_input_ply', action='store_true')
     return p.parse_args(argv)
 
@@ -111,7 +133,9 @@ def build_c2f(B, a):
 
 
 def equal_area_text(a):
-    if a.equal_area_target > 0:
+    if a.equal_area_target == 'min':
+        return 'on, target face area = the smallest coarse face area'
+    if target_on(a.equal_area_target):
         return 'on, target face area %g' % a.equal_area_target
     if a.equal_area_levels > 0:
         return 'on, levels %d (about |F| x %d coarse faces of similar area)' % (a.equal_area_levels,
@@ -174,6 +198,9 @@ def main(argv=None):
         f.write('bundle:       %s\n' % a.bundle)
         f.write('matstruct:    %s\n' % a.matstruct_path)
         f.write('n_coarse_subdiv_samples: %d\n' % a.n_coarse_subdiv_samples)
+        f.write('equal-area refinement: %s\n' % equal_area_text(a))
+        f.write('input PLYs:   %s\n' % ('off' if a.no_input_ply else 'relax_input/ (coarse, equal-area if on, '
+                                        'subdivided, c2f positions, relaxation input)'))
         f.write('relaxation:   method %s, lambda %g, max_iter %d, tol %g x diag, %s projection, %s graph, '
                 '%s weights, no-new-folds %s, per coarse face %s\n'
                 % (cfg.method, cfg.explicitLambda, cfg.explicitMaxIter, cfg.explicitTol,

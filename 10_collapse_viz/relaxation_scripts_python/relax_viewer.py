@@ -7,7 +7,8 @@ from the step's checkpoint (StepTrace), filled by the relaxation itself.
 
   python relax_viewer.py [--bundle ...] [--matstruct_path ...] [run_relax.py flags]
 
-Defaults: ABC 00040057, the bundle of output/relaxation_experiments/clamp_check,
+Defaults: ABC 00040057, the bundle of output/relaxation_experiments/src_qslim200_valid
+(decimation with validity checks; run_relax.DEFAULT_SOURCE_RUN),
 explicit method. The configuration can be changed between any two steps
 (panel "Configuration", Apply): the run continues from the current positions.
 Panel "Export (PLY)": one button per mesh (relaxation input, committed, step y,
@@ -16,7 +17,6 @@ projection Pi(y)) and one for the stages before the relaxation, written to
 """
 import datetime
 import argparse
-import glob
 import os
 import sys
 import time
@@ -38,12 +38,9 @@ from relax_explicit import StepTrace  # noqa: E402
 from relax_exports import export_relax_input, relax_vertex_props  # noqa: E402
 from struct_ids import RELAX_CURVE, RELAX_JUNCTION  # noqa: E402
 
-DEFAULT_RUN = os.path.normpath(os.path.join(HERE, '..', 'output', 'relaxation_experiments', 'clamp_check'))
 DEFAULT_EXPORT_ROOT = os.path.normpath(os.path.join(HERE, '..', 'output', 'relaxation_experiments',
                                                    'viewer_exports'))
-DEFAULT_MS = ('D:/datasets/abc_full_10k/out_ABC_v6_knn_poission40_20_15_10/'
-              '01_00040057_f8f78dbd17414efda75bc437_trimesh_000/mat/'
-              'mat_01_00040057_f8f78dbd17414efda75bc437_trimesh_000.obj__2025-05-06_02_38_00.ma_struct')
+DEFAULT_MS = run_relax.DEFAULT_MS  # bundle / .ma_struct defaults come from run_relax.parse_args
 WEIGHTS = ['uniform', 'cotan', 'meanvalue']
 METHODS = ['explicit', 'newton (not ported)', 'solve_project (not ported)']
 ROLE_NAME = {0: 'sheet', 1: 'curve', 2: 'junction'}
@@ -911,17 +908,11 @@ class RelaxViewer:
 
 
 def parse(argv=None):
-    run = DEFAULT_RUN
-    b = glob.glob(os.path.join(run, 'correspondence_*.c2f'))
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument('--total_max_iter', type=int, default=20000)
     pre.add_argument('--mock', action='store_true', help='headless polyscope backend (tests)')
     pre.add_argument('--export_dir', default=None, help='PLY export folder (default: viewer_exports/<date_time>)')
     extra, rest = pre.parse_known_args(argv)
-    if '--bundle' not in rest and b:
-        rest = ['--bundle', b[0]] + rest
-    if '--matstruct_path' not in rest:
-        rest = ['--matstruct_path', DEFAULT_MS] + rest
     if '--coarse_subdiv_relax_method' not in rest:
         rest = ['--coarse_subdiv_relax_method', 'explicit'] + rest
     a = run_relax.parse_args(rest)
@@ -941,6 +932,8 @@ def main(argv=None):
                                                                os.path.dirname(ps.__file__)))
     ps.set_program_name('relaxation step viewer')
     ps.set_up_dir('z_up')
+    ps.set_background_color((0.0, 0.0, 0.0))  # black background
+    ps.set_ground_plane_mode('none')  # the tiled ground plane would cover it
     v = RelaxViewer(a, cfg, ps)
     ps.set_user_callback(v.gui)
     if not a.mock:

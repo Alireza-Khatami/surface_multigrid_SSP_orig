@@ -6,7 +6,8 @@ writes a results table.
                             [--source_run NAME] [--suffix S]
 
 --source_run: the C++ run (folder in output/relaxation_experiments) whose bundle the
-experiments start from (default clamp_check); --suffix: appended to every folder name
+experiments start from (default src_qslim200_valid, the decimation with validity checks;
+the earlier sets used clamp_check, which had them off); --suffix: appended to every folder name
 and to the table name.
 
 Each experiment goes to output/relaxation_experiments/<name>/ (with
@@ -26,7 +27,7 @@ sys.path.insert(0, HERE)
 import run_relax  # noqa: E402
 
 EXP_ROOT = os.path.normpath(os.path.join(HERE, '..', 'output', 'relaxation_experiments'))
-SOURCE_RUN = os.path.join(EXP_ROOT, 'clamp_check')  # C++ run whose bundle all experiments start from
+SOURCE_RUN = os.path.join(EXP_ROOT, run_relax.DEFAULT_SOURCE_RUN)  # C++ run whose bundle the experiments start from
 MS = ('D:/datasets/abc_full_10k/out_ABC_v6_knn_poission40_20_15_10/'
       '01_00040057_f8f78dbd17414efda75bc437_trimesh_000/mat/'
       'mat_01_00040057_f8f78dbd17414efda75bc437_trimesh_000.obj__2025-05-06_02_38_00.ma_struct')
@@ -62,6 +63,9 @@ SETS = {
          E + NF + IT + ['--equal_area_levels', '2']),
         ('py_eqarea2_nofold_global_2k', 'uniform weights, symmetric (two-sided) graph, no new folds, global '
          'projection, equal-area levels 2', E + NF + IT + ['--explicit_global_proj', '--equal_area_levels', '2']),
+        ('py_eqareamin_nofold_global_2k', 'uniform weights, symmetric (two-sided) graph, no new folds, global '
+         'projection, equal-area target = the smallest coarse face area, then the uniform subdivision',
+         E + NF + IT + ['--explicit_global_proj', '--equal_area_target', 'min']),
         ('py_cotan_nofold_dir_2k', 'cotangent weights, directed graph, no new folds',
          E + NF + IT + ['--coarse_subdiv_relax_weights', 'cotan', '--explicit_directed_graph']),
         ('py_eqarea2_cotan_nofold_dir_2k', 'cotan, directed, no new folds, equal-area levels 2',

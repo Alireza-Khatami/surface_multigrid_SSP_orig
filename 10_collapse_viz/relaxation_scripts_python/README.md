@@ -39,7 +39,7 @@ the decimation itself (the bundle is its output).
 ## Running
 
 ```
-python run_relax.py --bundle ../output/relaxation_experiments/clamp_check/correspondence_<stem>.c2f \
+python run_relax.py --bundle ../output/relaxation_experiments/src_qslim200_valid/correspondence_<stem>.c2f \
     --matstruct_path <...>.ma_struct --output_dir ../output/relaxation_experiments/<name> \
     --coarse_subdiv_relax_method explicit --coarse_subdiv_relax_no_new_folds --explicit_max_iter 2000
 ```
