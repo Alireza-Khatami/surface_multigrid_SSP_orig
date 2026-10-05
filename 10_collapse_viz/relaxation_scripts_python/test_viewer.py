@@ -75,6 +75,7 @@ def main():
     v = relax_viewer.main(['--mock', '--coarse_subdiv_relax_no_new_folds', '--explicit_local_proj',
                            '--export_dir', exportDir])
     sess, cfg = v.sess, v.cfg
+    camDefault = v.cam['mode']
     ok = True
 
     def reference(cfg_, state, it0, n):
@@ -222,6 +223,14 @@ def main():
     v.select(1234)  # selection markers / vectors / curves registered at a small length scale
     v.update_selection()
     okr = v.pc.get_radius() == rad0
+    v.set_point_radius(0.0003)
+    okr &= camDefault == 1  # default: depth under the cursor
+    v.fineOn = False
+    v.ps.get_surface_mesh('fine MAT').set_enabled(False)
+    okr &= not v.ps.get_surface_mesh('fine MAT').is_enabled()
+    v.fineOn = True
+    v.ps.get_surface_mesh('fine MAT').set_enabled(True)
+    okr &= abs(v.pc.get_radius() - 0.0003 * L0) <= 1e-9 * L0
     print('point radius unchanged by the length scale: %s' % okr)
     ok &= okr
     # 6: real GUI frames (mock backend): every panel's imgui / polyscope calls run

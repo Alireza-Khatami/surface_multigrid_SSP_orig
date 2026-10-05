@@ -166,6 +166,8 @@ class RelaxViewer:
                          bvh_targets=True, bvh_visited=True, bvh_winner=True, region=True)
         self.meshOn = dict(committed=False, step=False, proj=False)
         self.colorMode = 0         # 0 random, 1 concave mask
+        self.fineOn = True         # fine MAT mesh shown
+        self.pointRadius = 0.0008  # 'points' radius, x the starting length scale (was 0.0015)
         self.concAngle = 20.0      # concave corner: sheet interior angle > 180 + this
         self.concCache = None      # ((margin, radius, k), mask)
         self.concRadius = 3.0      # in mean subdivided edge lengths (of the input)
@@ -192,9 +194,10 @@ class RelaxViewer:
             self.treeLabel[sess.proj.globalTree] = 'global (all faces)'
         # camera speed control: polyscope moves (scroll zoom, pan, first-person keys) by steps
         # proportional to the length scale; it is set every frame to k * d, d = distance
-        # from the camera to the orbit centre (mode 0) or to the point under the cursor (mode 1)
+        # from the camera to the orbit centre (mode 0) or to the point under the cursor (mode 1,
+        # the default)
         self.sceneCenter = None    # orbit centre fallback (polyscope < 2.5)
-        self.cam = dict(on=True, mode=0, k=0.5, minf=1e-3, maxf=1.0, smooth=0.35, every=2, frame=0,
+        self.cam = dict(on=True, mode=1, k=0.5, minf=1e-3, maxf=1.0, smooth=0.35, every=2, frame=0,
                         d=float('nan'), scale=None, far=20.0)
         self.ui = {}
         self.status = ''
@@ -448,7 +451,7 @@ class RelaxViewer:
         LEN0[0] = ps.get_length_scale()  # sizes and the camera speed are relative to this
         ps.set_automatically_compute_scene_extents(False)
         self.cam['scale'] = LEN0[0]
-        pc = register_pc(ps, 'points', self.rel.X, radius=0.0015)
+        pc = register_pc(ps, 'points', self.rel.X, radius=self.pointRadius)
         pc.add_color_quantity('random colour', self.colors, enabled=True)
         pc.add_to_group('points')
         self.pc = pc
@@ -479,6 +482,12 @@ class RelaxViewer:
                     sm.add_scalar_quantity('held back', self.trace.held.astype(float), enabled=True,
                                            cmap='reds')
         self.update_selection()
+
+    def set_point_radius(self, r):
+        """Radius of the 'points' cloud, relative to the starting length scale, set as an
+        absolute size (the camera speed control does not change it)."""
+        self.pointRadius = min(max(float(r), 1e-6), 0.05)
+        self.pc.set_radius(_abs(self.pointRadius), relative=False)
 
     def apply_colors(self):
         if self.colorMode == 0:
@@ -776,6 +785,13 @@ class RelaxViewer:
                 psim.TreePop()
 
         if psim.CollapsingHeader('Display', psim.ImGuiTreeNodeFlags_DefaultOpen):
+            ch, self.fineOn = psim.Checkbox('fine MAT mesh', self.fineOn)
+            if ch:
+                self.ps.get_surface_mesh('fine MAT').set_enabled(self.fineOn)
+            ch, self.pointRadius = psim.SliderFloat('point radius (x scene size)', self.pointRadius, 0.00005, 0.004,
+                                                    format='%.5f')
+            if ch:
+                self.set_point_radius(self.pointRadius)
             ch, self.colorMode = psim.Combo('point colours', self.colorMode, ['random (fixed per point)', 'concave mask'])
             ch1, self.concK = psim.SliderInt('concave mask: rings k', self.concK, 0, 10)
             ch2, self.concAngle = psim.SliderFloat('concave corner: interior angle > 180 + (deg)', self.concAngle,
