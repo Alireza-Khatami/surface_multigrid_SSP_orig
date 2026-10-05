@@ -151,12 +151,12 @@ class RelaxViewer:
         self.trace = StepTrace(self.Vs)
         self.hasTrace = False
         self.iters = 0
-        self.history = []          # (iteration, configuration text)
+        self.history = []          # (iteration, configuration text) of the current run
+        self.runId = 0             # Reset starts run 1, 2, ...
+        self.pastRuns = []         # (run id, history, final iteration) of the earlier runs
         self.rel = None
         self.make_relaxer(state=None)
-        r0 = self.rel  # the relaxation input: the first relaxer at its initialization (copies)
-        self.input0 = SimpleNamespace(X=r0.X.copy(), G=SimpleNamespace(role=r0.G.role.copy()),
-                                      setId=r0.setId.copy(), isFree=r0.isFree.copy(), face=r0.face.copy())
+        self.keep_input()
         self.exportDir = None
         self.exported = []         # paths written this session
 
@@ -220,6 +220,33 @@ class RelaxViewer:
         self.rel = self.sess.make_relaxer(cfg, '', state=state, it0=self.iters)
         self.history.append((self.iters, self.cfg_text()))
         log_util.log('[relax_viewer] iteration %d: configuration %s' % (self.iters, self.cfg_text()))
+
+    def keep_input(self):
+        """The relaxation input of the current run: its relaxer at its initialization (copies)."""
+        r0 = self.rel
+        self.input0 = SimpleNamespace(X=r0.X.copy(), G=SimpleNamespace(role=r0.G.role.copy()),
+                                      setId=r0.setId.copy(), isFree=r0.isFree.copy(), face=r0.face.copy())
+
+    def reset(self):
+        """Starts the relaxation again from its input (the seeds, iteration 0) under the
+        current configuration. The seeds come from the session (steps 1-3, built once);
+        a new relaxer is made for the configuration, as for the first run."""
+        self.running = False
+        self.runTo = 0
+        self.pastRuns.append((self.runId, list(self.history), self.iters))
+        self.runId += 1
+        self.iters = 0
+        self.hasTrace = False
+        self.history = []
+        log_util.log('[relax_viewer] reset: run %d starts from the relaxation input' % self.runId)
+        self.make_relaxer(state=None)
+        self.keep_input()
+        self.concCache = None
+        self.status = 'run %d: started again from the relaxation input' % self.runId
+        self.refresh()
+
+    def run_prefix(self):
+        return '' if self.runId == 0 else 'run%02d_' % self.runId
 
     def apply_config(self):
         r = self.rel
@@ -371,11 +398,11 @@ class RelaxViewer:
         if key == 'input':
             X = self.input0.X
             vp = relax_vertex_props(self.sess, self.input0)
-            name = 'relax_input_it000000.ply'
+            name = self.run_prefix() + 'relax_input_it000000.ply'
         elif key == 'committed':
             X = r.X
             vp = relax_vertex_props(self.sess, r, held=held)
-            name = 'it%06d_committed.ply' % self.iters
+            name = self.run_prefix() + 'it%06d_committed.ply' % self.iters
         elif key in ('step', 'proj'):
             if not self.hasTrace:
                 self.status = 'no checkpoint for this iteration: turn on "record checkpoints" and step'
@@ -384,7 +411,7 @@ class RelaxViewer:
             vp = relax_vertex_props(self.sess, r, face=(None if key == 'step' else t.Pface), held=held)
             if key == 'step':
                 del vp['fine_face']  # y is off the surface
-            name = 'it%06d_%s.ply' % (self.iters, 'step_y' if key == 'step' else 'projection')
+            name = self.run_prefix() + 'it%06d_%s.ply' % (self.iters, 'step_y' if key == 'step' else 'projection')
         else:
             raise ValueError(key)
         cc = np.clip(np.round(self.colors * 255.0), 0, 255).astype(np.uint8)
@@ -697,6 +724,7 @@ class RelaxViewer:
         r = self.rel
 
         if psim.CollapsingHeader('Run', psim.ImGuiTreeNodeFlags_DefaultOpen):
+            psim.Text('run %d' % self.runId + ' (Reset: start again from the relaxation input with the configuration below)')
             psim.Text('iteration %d | last max move %.3g x diag | %s'
                       % (self.iters, r.lastMove / r.diag,
                          'converged' if r.R.converged else ('done (max iterations)' if r.done else 'running' if self.running else 'stopped')))
@@ -705,6 +733,9 @@ class RelaxViewer:
             psim.SameLine()
             if psim.Button('Step'):
                 self.step(1)
+            psim.SameLine()
+            if psim.Button('Reset'):
+                self.reset()
             psim.SameLine()
             _, self.stepsPerFrame = psim.SliderInt('steps / frame', self.stepsPerFrame, 1, 50)
             _, self.runTo = psim.InputInt('run until iteration (0: off)', self.runTo)
@@ -730,6 +761,8 @@ class RelaxViewer:
             _, c.explicitLambda = psim.InputFloat('lambda', c.explicitLambda)
             _, c.explicitTol = psim.InputFloat('tol (x diag)', c.explicitTol, format='%.2e')
             _, self.args.total_max_iter = psim.InputInt('max iterations (total)', self.args.total_max_iter)
+            if psim.Button('Reset with this configuration (from iteration 0)'):
+                self.reset()
             if psim.Button('Apply (continue from the current positions)'):
                 self.running = False
                 self.apply_config()
@@ -737,6 +770,12 @@ class RelaxViewer:
             if len(self.history) > 1 and psim.TreeNode('configuration history'):
                 for it, txt in self.history:
                     psim.TextUnformatted('%6d  %s' % (it, txt))
+                psim.TreePop()
+            if self.pastRuns and psim.TreeNode('earlier runs (before Reset)'):
+                for rid, hist, last in self.pastRuns:
+                    psim.TextUnformatted('run %d, stopped at iteration %d:' % (rid, last))
+                    for it, txt in hist:
+                        psim.TextUnformatted('  %6d  %s' % (it, txt))
                 psim.TreePop()
 
         if psim.CollapsingHeader('Display', psim.ImGuiTreeNodeFlags_DefaultOpen):

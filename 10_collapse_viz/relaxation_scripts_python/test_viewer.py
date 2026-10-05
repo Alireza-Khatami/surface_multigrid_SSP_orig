@@ -168,6 +168,23 @@ def main():
     same &= np.array_equal(V3, v.C.P)
     print('stages: relax input == seeds, at-fine == c2f positions: %s (folder %s)' % (same, exportDir))
     ok &= bool(same) and len(paths) >= 4
+    # 4b: Reset, then a different configuration from iteration 0 == a fresh run of it from the seeds
+    cfg.explicitDirected = False
+    cfg.weights = 'meanvalue'
+    cfg.explicitGlobalProj = False
+    cfg.noNewFolds = False
+    v.reset()
+    okr = v.iters == 0 and np.array_equal(v.rel.X, v.sess.Vseed)
+    ref = reference(cfg, None, 0, a.steps)
+    for _ in range(a.steps):
+        v.step(1)
+    same = same_state(v.rel, ref)
+    p2 = v.export_mesh('committed')
+    okr &= same and os.path.basename(p2).startswith('run01_') and check_trace(v) == []
+    print('reset -> run %d (%s): back at the seeds, %d steps == fresh run: %s; export %s'
+          % (v.runId, v.cfg_text(), a.steps, same, os.path.basename(p2)))
+    ok &= okr
+
     # 5: camera speed control (distance readings simulated; the mock backend has no view)
     L0 = relax_viewer.LEN0[0]
     rad0 = v.pc.get_radius()

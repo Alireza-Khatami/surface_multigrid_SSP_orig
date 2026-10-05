@@ -70,6 +70,15 @@ ported first (not part of this step; to be decided).
    fine MAT.
 5. **Run control:** Run, Stop (Run resumes), Step (one iteration), and run until a given
    iteration.
+   **Reset** starts again from the relaxation input (the seeds, iteration 0) with the
+   configuration currently set in the panel.
+   - The seeds come from the session, which is built once. A new relaxer is made, as for
+     the first run.
+   - Runs are numbered. Earlier runs and their configuration histories are listed in the
+     Configuration panel.
+   - Exports after a reset are named `runNN_...`.
+   - Changes that alter the mesh itself (sample count, equal-area level) still need a
+     restart.
 6. **Colour mode:** random colours or concave mask.
    - **Concave mask (choice a):** a fine edge is concave when its two faces meet at a
      concave dihedral angle, measured with consistently oriented normals (the coarse face
