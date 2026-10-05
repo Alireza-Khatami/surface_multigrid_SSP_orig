@@ -3,6 +3,11 @@ weights, folds rule, step, projection, per-face) on one C++ run's bundle and
 writes a results table.
 
   python run_experiments.py [--set default] [--only name1,name2] [--table_only]
+                            [--source_run NAME] [--suffix S]
+
+--source_run: the C++ run (folder in output/relaxation_experiments) whose bundle the
+experiments start from (default clamp_check); --suffix: appended to every folder name
+and to the table name.
 
 Each experiment goes to output/relaxation_experiments/<name>/ (with
 experiment_config.txt, run.log, results.json); the table (one row per
@@ -49,12 +54,16 @@ SETS = {
     # equal-area refinement of the coarse mesh before the subdivision (equal_area_refine.py);
     # flags None: an existing run, listed in the table for comparison
     'equal_area': [
-        ('py_nofold_2k', 'baseline (existing run)', None),
+        ('py_nofold_2k', 'baseline: uniform weights, symmetric graph, no new folds, lambda 0.5, local projection',
+         E + NF + IT),
         ('py_eqarea1_nofold_2k', 'as baseline, coarse faces refined to equal area first (levels 1: ~1600 faces)',
          E + NF + IT + ['--equal_area_levels', '1']),
         ('py_eqarea2_nofold_2k', 'as baseline, coarse faces refined to equal area first (levels 2: ~6400 faces)',
          E + NF + IT + ['--equal_area_levels', '2']),
-        ('py_cotan_nofold_dir_2k', 'cotan, directed, no new folds (existing run)', None),
+        ('py_eqarea2_nofold_global_2k', 'uniform weights, symmetric (two-sided) graph, no new folds, global '
+         'projection, equal-area levels 2', E + NF + IT + ['--explicit_global_proj', '--equal_area_levels', '2']),
+        ('py_cotan_nofold_dir_2k', 'cotangent weights, directed graph, no new folds',
+         E + NF + IT + ['--coarse_subdiv_relax_weights', 'cotan', '--explicit_directed_graph']),
         ('py_eqarea2_cotan_nofold_dir_2k', 'cotan, directed, no new folds, equal-area levels 2',
          E + NF + IT + ['--coarse_subdiv_relax_weights', 'cotan', '--explicit_directed_graph',
                         '--equal_area_levels', '2']),
@@ -113,22 +122,27 @@ def main():
     p.add_argument('--set', default='default')
     p.add_argument('--only', default='')
     p.add_argument('--table_only', action='store_true')
+    p.add_argument('--source_run', default=os.path.basename(SOURCE_RUN))
+    p.add_argument('--suffix', default='')
     a = p.parse_args()
     exps = SETS[a.set]
     if a.only:
         keep = set(a.only.split(','))
         exps = [e for e in exps if e[0] in keep]
-    bundle = glob.glob(os.path.join(SOURCE_RUN, 'correspondence_*.c2f'))[0]
+    bundle = glob.glob(os.path.join(EXP_ROOT, a.source_run, 'correspondence_*.c2f'))[0]
     if not a.table_only:
         for name, desc, flags in exps:
             if flags is None:
                 continue
-            out = os.path.join(EXP_ROOT, name)
-            print('=== %s: %s' % (name, desc), flush=True)
+            if '--explicit_global_proj' not in flags:
+                flags = flags + ['--explicit_local_proj']  # sets written when local was the default
+            out = os.path.join(EXP_ROOT, name + a.suffix)
+            desc = '%s [bundle of C++ run %s]' % (desc, a.source_run)
+            print('=== %s: %s' % (name + a.suffix, desc), flush=True)
             run_relax.main(['--bundle', bundle, '--matstruct_path', MS, '--output_dir', out,
                             '--no_subdiv_objs', '--description', desc] + flags)
-    write_table([e[0] for e in SETS[a.set]],
-                'py_experiments_results' + ('' if a.set == 'default' else '_' + a.set))
+    write_table([e[0] + a.suffix for e in SETS[a.set]],
+                'py_experiments_results' + ('' if a.set == 'default' else '_' + a.set) + a.suffix)
 
 
 if __name__ == '__main__':

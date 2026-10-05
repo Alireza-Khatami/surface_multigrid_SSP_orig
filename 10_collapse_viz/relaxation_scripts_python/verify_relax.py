@@ -96,6 +96,9 @@ def main():
     simp = glob.glob(os.path.join(cpp, 'simplified_*.obj'))
     stem = os.path.basename(bundle)[len('correspondence_'):-4]
 
+    # the forwarded flags are the C++ run's: no --explicit_global_proj means local (C++ default)
+    if '--explicit_global_proj' not in fwd and '--explicit_local_proj' not in fwd:
+        fwd = fwd + ['--explicit_local_proj']
     if not a.skip_run:
         args = ['--bundle', bundle, '--matstruct_path', a.matstruct_path, '--output_dir', a.out_dir] + fwd
         if simp:

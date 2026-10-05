@@ -47,7 +47,32 @@ Refined coarse faces (areas on the coarse geometry):
 - c2f walk on the refined samples: all 205,688 mapped; 2 clamped steps of about 1e-12.
 - `test_viewer.py` passes.
 
-## Results (2000 iterations, no new folds, lambda 0.5, local projection)
+## Results with validity checks (source run src_qslim200_valid)
+
+The earlier source run (clamp_check) was decimated without `--validity-checks`. The runs below
+use `src_qslim200_valid` (`--mode qslim --target_faces 200 --validity-checks --mat_struct_check`).
+The validity checks stop the decimation at 541 coarse faces, with face-area max/min 867 and
+CV 1.58. The subdivided mesh has about 278k vertices. Same schemes as below: 2000 iterations,
+no new folds, lambda 0.5, local projection. Table:
+`output/relaxation_experiments/py_experiments_results_equal_area_valid.md`. Folders `*_valid`.
+
+| run | edge CV | min angle p1 | p5 | median | folded (seed -> result) | held back | flipped vs seed | degenerate |
+|---|---|---|---|---|---|---|---|---|
+| uniform, off | 0.717 -> 0.621 | 6.2 -> 1.3 | 8.2 -> 7.0 | 21.1 -> 25.8 | 885 -> 413 | 8.8M | 546 | 18 |
+| uniform, levels 1 | 0.431 -> 0.397 | 7.4 -> 10.8 | 10.4 -> 20.3 | 29.9 -> 41.4 | 1239 -> 724 | 1.8M | 394 | 6 |
+| uniform, levels 2 | 0.388 -> 0.356 | 8.0 -> 19.6 | 12.8 -> 29.0 | 32.3 -> 47.1 | 986 -> 562 | 0.7M | 324 | 6 |
+| cotan + directed, off | 0.717 -> 0.714 | 6.2 -> 3.5 | 8.2 -> 7.0 | 21.1 -> 20.8 | 885 -> 462 | 1.6M | 325 | 21 |
+| cotan + directed, levels 2 | 0.388 -> 0.576 | 8.0 -> 1.7 | 12.8 -> 6.4 | 32.3 -> 31.3 | 986 -> 619 | 1.6M | 336 | 1479 |
+
+- Uniform weights with equal area (levels 2) are again the best on every quality measure. Min
+  angle p1 is 19.6 vs 1.3 degrees, the median is 47 vs 26, and 12x fewer moves are held back.
+- One exception: the refined seeds start with more folded triangles (986-1239 vs 885), and end
+  with more (562-724 vs 413).
+- Cotan + directed with equal area breaks down again (1479 degenerate).
+
+## Results without validity checks (source run clamp_check, superseded)
+
+2000 iterations, no new folds, lambda 0.5, local projection.
 
 Table: `output/relaxation_experiments/py_experiments_results_equal_area.md`.
 The edge CV and angle columns show the value at the start -> the value after relaxation.

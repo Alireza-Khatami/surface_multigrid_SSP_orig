@@ -49,7 +49,9 @@ Flags are those of `collapse_viz_bin` (`main.cpp`): `--coarse_subdiv_relax_metho
 `--explicit_max_iter`, `--explicit_tol`, `--explicit_global_proj`, `--explicit_directed_graph`,
 `--coarse_subdiv_relax_weights uniform|cotan|meanvalue`, `--n_coarse_subdiv_samples`,
 `--subdiv_obj_max_verts` (and the Newton-only flags, which only change the file name or
-graph as in C++). Python-only: `--log_every`, `--snapshot_iters`, `--simplified_obj`,
+graph as in C++). Projection is global by default in Python (C++: local), and
+`--explicit_local_proj` gives the local one; `verify_relax.py` adds it when the C++ run used
+local. Python-only: `--log_every`, `--snapshot_iters`, `--simplified_obj`,
 `--no_subdiv_objs`, `--description`, `--stem`.
 
 Outputs, named as in C++: `coarse_subdiv_<stem>.obj`, `coarse_subdiv_at_fine_pos_<stem>.obj`,

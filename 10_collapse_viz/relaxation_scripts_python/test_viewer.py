@@ -71,7 +71,9 @@ def main():
     p.add_argument('--export_dir', default=None, help='default: a temporary folder')
     a = p.parse_args()
     exportDir = a.export_dir or tempfile.mkdtemp(prefix='relax_viewer_export_')
-    v = relax_viewer.main(['--mock', '--coarse_subdiv_relax_no_new_folds', '--export_dir', exportDir])
+    # segment 1 local projection (the default is global), segment 2 switches to global
+    v = relax_viewer.main(['--mock', '--coarse_subdiv_relax_no_new_folds', '--explicit_local_proj',
+                           '--export_dir', exportDir])
     sess, cfg = v.sess, v.cfg
     ok = True
 
@@ -126,8 +128,16 @@ def main():
     v.colorMode = 1
     v.apply_colors()
     m = v.concave_mask()
-    print('concave mask: %d concave fine edges, %d of %d points marked (k=%d, bend > %g deg)'
-          % (len(v.concEdges[1]), int(m.sum()), v.Vs, v.concK, v.concAngle))
+    P = v.concParts
+    print('concave mask: %d concave corners (of %d sheet border corners), %d seam / boundary edges at them, '
+          '%d of %d input points marked (radius %g subdiv edges, k=%d, interior angle > 180 + %g deg)'
+          % (len(P.corners), P.nBorderCorners, len(P.edges), int(m.sum()), v.Vs, v.concRadius, v.concK,
+             v.concAngle))
+    m2 = v.concave_mask()
+    v.step(1)
+    ok &= m2 is m and np.array_equal(v.concave_mask(), m)  # fixed on the input, not on the moving points
+    cn = v.ps.get_curve_network('concave seam / boundary parts')
+    print('curve network nodes: %d (only the vertices of the edges; fine mesh has %d)' % (cn.n_nodes(), v.B.fineV.shape[0]))
     v.clear_selection()
     for t in v.treeLabel:
         v.set_tree(t, True)

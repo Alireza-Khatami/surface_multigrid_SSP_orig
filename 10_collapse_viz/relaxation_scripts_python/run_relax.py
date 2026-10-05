@@ -16,7 +16,9 @@ Relaxation flags (as in main.cpp):
   --explicit_lambda L                     default 0.5
   --explicit_max_iter N                   default 20000
   --explicit_tol T                        default 1e-7 (x diag)
-  --explicit_global_proj                  global closest point instead of local
+  --explicit_global_proj                  global closest point projection (Python DEFAULT since
+                                          2026-10-05; the C++ default is local)
+  --explicit_local_proj                   local projection (the C++ default; Python-only flag)
   --explicit_directed_graph               curves pulled only by curve / junction neighbours
   --coarse_subdiv_relax_weights W         uniform | cotan | meanvalue
   --n_coarse_subdiv_samples N             default 200000 (= the runs' --n_subdiv_samples)
@@ -75,7 +77,8 @@ def parse_args(argv=None):
     p.add_argument('--explicit_lambda', type=float, default=0.5)
     p.add_argument('--explicit_max_iter', type=int, default=20000)
     p.add_argument('--explicit_tol', type=float, default=1e-7)
-    p.add_argument('--explicit_global_proj', action='store_true')
+    p.add_argument('--explicit_global_proj', action='store_true')  # the default; kept for the C++ flag set
+    p.add_argument('--explicit_local_proj', action='store_true')
     p.add_argument('--explicit_directed_graph', action='store_true')
     p.add_argument('--coarse_subdiv_relax_weights', default='uniform')
     p.add_argument('--n_coarse_subdiv_samples', type=int, default=200000)
@@ -129,7 +132,9 @@ def config_from_args(a):
     c.explicitLambda = a.explicit_lambda
     c.explicitMaxIter = a.explicit_max_iter
     c.explicitTol = a.explicit_tol
-    c.explicitGlobalProj = a.explicit_global_proj
+    if a.explicit_global_proj and a.explicit_local_proj:
+        raise SystemExit('--explicit_global_proj and --explicit_local_proj exclude each other')
+    c.explicitGlobalProj = not a.explicit_local_proj  # global by default
     c.explicitDirected = a.explicit_directed_graph
     c.weights = a.coarse_subdiv_relax_weights
     c.logEvery = a.log_every

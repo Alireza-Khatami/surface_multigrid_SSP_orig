@@ -116,9 +116,19 @@ Implemented: `relaxation_scripts_python/relax_viewer.py`. Headless test:
 - BVH nodes visited are recorded for the selected (watched) point only, from the step after it
   was selected. The search region, winning tree and leaf, and all positions are recorded for
   every point at every step.
-- Concave mask: a fine edge with exactly two faces is concave when, with the two normals made
-  consistent across the edge, the second face bends towards the first face's normal by more
-  than the threshold. Edges with three or more faces (seams, junctions) are skipped. On
-  ABC 00040057 at 10 degrees this gives only 5 concave fine edges (1519 marked points at
-  k = 2): the sheets are nearly flat, and the bends sit at the seams. Counting the seams (each
-  pair of faces on a seam edge) is an open choice.
+- Concave mask (revised 2026-10-05, `concave_parts.py`): the concave parts of the MAT's edge
+  structures from the .ma_struct, i.e. its seams (type 1, 3 faces per edge) and boundaries
+  (type 2, 1 face per edge).
+  - A corner (v, s) at a vertex v on the border of sheet s is concave when the interior
+    angle of s at v (the sum of s's face angles at v) is more than 180 degrees + a margin
+    (default 20).
+  - The marked points are the subdivided vertices of the relaxation input (iteration 0)
+    whose fine face is in sheet s and that lie within a radius (default 3 mean subdivided
+    edge lengths) of a concave corner, optionally grown by k rings (default 0).
+  - The set is fixed for the session; it does not follow the moving points.
+  - The curve network "concave seam / boundary parts" holds only the vertices of its edges.
+    A point cloud "concave corners" shows the corners.
+  - On ABC 00040057 (clamp_check bundle): 224 concave corners out of 2209 sheet border
+    corners, 262 seam / boundary edges, and 33,687 of 207,000 points marked.
+  - The first version (two-face dihedral edges, seams and boundaries skipped, marked from the
+    current positions) is in `relaxation_scripts_python/legacy/relax_viewer_concave_dihedral.py`.

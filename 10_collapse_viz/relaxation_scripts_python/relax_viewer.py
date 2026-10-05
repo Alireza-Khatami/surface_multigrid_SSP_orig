@@ -32,6 +32,7 @@ import run_relax  # noqa: E402
 from bundle_io import load_bundle_flat  # noqa: E402
 from coarse_subdiv_relax import CoarseRelaxSession  # noqa: E402
 from matstruct import load_matstruct  # noqa: E402
+from concave_parts import compact, concave_curve_parts  # noqa: E402
 from ply_io import write_ply  # noqa: E402
 from relax_explicit import StepTrace  # noqa: E402
 from relax_exports import export_relax_input, relax_vertex_props  # noqa: E402
@@ -89,35 +90,6 @@ def tree_depths(tr):
     return d
 
 
-def concave_fine_edges(V, F, angle_deg):
-    """Fine edges whose two faces meet at a concave dihedral angle larger than
-    angle_deg. Normals made consistent across the edge (the second face's normal
-    is flipped when both faces run the edge in the same direction); edges with
-    other than two faces are skipped. Returns (edges (m,2), mask over origEdges order)."""
-    F = np.asarray(F, dtype=np.int64)
-    a = F.reshape(-1)
-    b = F[:, [1, 2, 0]].reshape(-1)
-    opp = F[:, [2, 0, 1]].reshape(-1)
-    fid = np.repeat(np.arange(F.shape[0]), 3)
-    key = (np.minimum(a, b) << 32) | np.maximum(a, b)
-    order = np.argsort(key, kind='stable')
-    ks = key[order]
-    start = np.r_[0, np.nonzero(np.diff(ks))[0] + 1]
-    cnt = np.diff(np.r_[start, len(ks)])
-    two = start[cnt == 2]
-    h1, h2 = order[two], order[two + 1]
-    n = np.cross(V[b] - V[a], V[opp] - V[a])
-    nf = n[np.arange(0, len(a), 3)]
-    nf = nf / np.maximum(np.linalg.norm(nf, axis=1, keepdims=True), 1e-300)
-    n1 = nf[fid[h1]]
-    n2 = nf[fid[h2]] * np.where(a[h1] == a[h2], -1.0, 1.0)[:, None]  # same direction: inconsistent
-    s = np.einsum('ij,ij->i', n1, V[opp[h2]] - V[a[h1]])
-    bend = np.degrees(np.arccos(np.clip(np.einsum('ij,ij->i', n1, n2), -1.0, 1.0)))
-    conc = (s > 0) & (bend > angle_deg)
-    E = np.stack([np.minimum(a[h1], b[h1]), np.maximum(a[h1], b[h1])], axis=1)[conc]
-    return E
-
-
 def seg_dist(P, A, B):
     AB = B - A
     l2 = np.einsum('ij,ij->i', AB, AB)
@@ -160,9 +132,15 @@ class RelaxViewer:
                          bvh_targets=True, bvh_visited=True, bvh_winner=True, region=True)
         self.meshOn = dict(committed=False, step=False, proj=False)
         self.colorMode = 0         # 0 random, 1 concave mask
-        self.concK = 2
-        self.concAngle = 10.0
-        self.concEdges = None
+        self.concAngle = 20.0      # concave corner: sheet interior angle > 180 + this
+        self.concCache = None      # ((margin, radius, k), mask)
+        self.concRadius = 3.0      # in mean subdivided edge lengths (of the input)
+        self.concK = 0
+        self.fineSheet = np.array([ids[0] if ids else -1 for ids in ms.faceIds], dtype=np.int64)
+        self.concParts = None
+        Fm = self.F
+        self.meshEdges = np.unique(np.sort(np.concatenate([Fm[:, [0, 1]], Fm[:, [1, 2]], Fm[:, [2, 0]]]), axis=1),
+                                   axis=0)
         self.running = False
         self.stepsPerFrame = 1
         self.runTo = 0
@@ -356,52 +334,52 @@ class RelaxViewer:
             self.pc.clear_transparency_quantity()
 
     def concave_mask(self):
-        """Points within k rings of a concave fine edge. Seeds: points whose current
-        fine face (from the relaxation state) has a concave edge closer than the mean
-        subdivided edge length; then k rings over the subdivided mesh."""
-        B = self.B
-        if self.concEdges is None or self.concEdges[0] != self.concAngle:
-            E = concave_fine_edges(B.fineV, B.fineF, self.concAngle)
-            self.concEdges = (self.concAngle, E)
-            # per fine face corner c: is edge (F[f,c], F[f,c+1]) concave
-            FO = B.fineF
-            ck = np.sort((E[:, 0] << 32) | E[:, 1])
-            self.concCorner = np.zeros((FO.shape[0], 3), bool)
-            for c in range(3):
-                a, b = FO[:, c], FO[:, (c + 1) % 3]
-                k = (np.minimum(a, b) << 32) | np.maximum(a, b)
-                j = np.clip(np.searchsorted(ck, k), 0, max(len(ck) - 1, 0))
-                self.concCorner[:, c] = (len(ck) > 0) & (ck[j] == k) if len(ck) else False
-            if len(E):
-                nodes, edges = B.fineV, E
-                self.ps.register_curve_network('concave fine edges', nodes, edges, color=(0.9, 0.1, 0.1),
-                                               radius=0.002).add_to_group('fine MAT')
-            elif self.ps.has_curve_network('concave fine edges'):
-                self.ps.remove_curve_network('concave fine edges')
-        X, face = self.rel.X, self.rel.face
-        FO = B.fineF
-        ok = face >= 0
-        mask = np.zeros(self.Vs, bool)
-        if not self.concCorner.any():
-            return mask
-        fc = np.where(ok, face, 0)
-        Fe = self.F
-        el = np.linalg.norm(X[Fe[:, 0]] - X[Fe[:, 1]], axis=1).mean()
-        for c in range(3):
-            a, b = FO[fc, c], FO[fc, (c + 1) % 3]
-            isc = self.concCorner[fc, c] & ok
-            idx = np.nonzero(isc)[0]
-            d = seg_dist(X[idx], B.fineV[a[idx]], B.fineV[b[idx]])
-            mask[idx[d <= el]] = True
-        G = self.rel.G
-        rows = np.repeat(np.arange(self.Vs), np.diff(G.rowOffs))
+        """Subdivided vertices of the relaxation input (iteration 0) at the concave parts of
+        the seams / boundaries (concave_parts.py): for a concave corner (v, s), the input
+        points whose fine face belongs to sheet s and that lie within concRadius mean
+        subdivided edge lengths of v; then k rings over the subdivided mesh. Fixed for the
+        session; recomputed only when the margin, the radius or k change."""
+        key = (self.concAngle, self.concRadius, self.concK)
+        if self.concCache is not None and self.concCache[0] == key:
+            return self.concCache[1]
+        B, ps = self.B, self.ps
+        P = self.concParts = concave_curve_parts(B.fineV, B.fineF, self.ms, self.concAngle)
+        for name in ('concave seam / boundary parts', 'concave corners'):
+            if name == 'concave seam / boundary parts' and ps.has_curve_network(name):
+                ps.remove_curve_network(name)
+            if name == 'concave corners' and ps.has_point_cloud(name):
+                ps.remove_point_cloud(name)
+        if len(P.edges):
+            nodes, edges, _ = compact(B.fineV, P.edges)  # only the vertices the edges use
+            cn = ps.register_curve_network('concave seam / boundary parts', nodes, edges, color=(0.9, 0.1, 0.1),
+                                           radius=0.002, material=POINT_MATERIAL)
+            cn.add_scalar_quantity('type (1 seam, 2 boundary)', P.edgeType.astype(float), defined_on='edges')
+            cn.add_to_group('fine MAT')
+        if len(P.corners):
+            cv = np.unique(P.corners[:, 0])
+            register_pc(ps, 'concave corners', B.fineV[cv, :3], radius=0.003,
+                        color=(0.6, 0.0, 0.0)).add_to_group('fine MAT')
+        X0, f0 = self.input0.X, self.input0.face
+        ok = f0 >= 0
+        pSheet = np.where(ok, self.fineSheet[np.where(ok, f0, 0)], -2)
+        E0 = self.meshEdges
+        r = self.concRadius * float(np.linalg.norm(X0[E0[:, 0]] - X0[E0[:, 1]], axis=1).mean())
+        mask = np.zeros(self.Vs, dtype=bool)
+        bySheet = {}
+        for v, sh in P.corners.tolist():
+            if sh not in bySheet:
+                bySheet[sh] = np.nonzero(pSheet == sh)[0]
+            idx = bySheet[sh]
+            d = np.linalg.norm(X0[idx] - B.fineV[v, :3], axis=1)
+            mask[idx[d <= r]] = True
+        E = self.meshEdges
         for _ in range(self.concK):
-            grow = np.zeros(self.Vs, bool)
-            grow[rows[mask[G.cols]]] = True
-            mask |= grow
+            grow = mask.copy()
+            grow[E[mask[E[:, 1]], 0]] = True
+            grow[E[mask[E[:, 0]], 1]] = True
+            mask = grow
+        self.concCache = (key, mask)
         return mask
-
-    # -------------------------------------------------------------- selection
     def select(self, i):
         self.sel = int(i)
         self.trace.watch = self.sel
@@ -621,8 +599,10 @@ class RelaxViewer:
         if psim.CollapsingHeader('Display', psim.ImGuiTreeNodeFlags_DefaultOpen):
             ch, self.colorMode = psim.Combo('point colours', self.colorMode, ['random (fixed per point)', 'concave mask'])
             ch1, self.concK = psim.SliderInt('concave mask: rings k', self.concK, 0, 10)
-            ch2, self.concAngle = psim.SliderFloat('concave mask: min bend (deg)', self.concAngle, 0.0, 90.0)
-            if ch or ch1 or ch2:
+            ch2, self.concAngle = psim.SliderFloat('concave corner: interior angle > 180 + (deg)', self.concAngle,
+                                                   0.0, 90.0)
+            ch3, self.concRadius = psim.SliderFloat('concave mask: radius (subdiv edges)', self.concRadius, 0.5, 30.0)
+            if ch or ch1 or ch2 or ch3:
                 self.apply_colors()
             for key, label in (('committed', 'mesh: committed (held back flagged)'), ('step', 'mesh: step y'),
                                ('proj', 'mesh: projection Pi(y)')):
