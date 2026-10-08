@@ -312,6 +312,31 @@ def main():
     v.meshTransp, v.meshCull, v.fineTransp = 1.0, False, 0.3
     v.apply_mesh_looks()
 
+    # 5e: Rebuild with another sampling (equal-area split to N + flips), then back to uniform
+    import copy
+    from coarse_subdiv_relax import CoarseRelaxSession
+    Vs0, F0 = v.Vs, v.F.copy()
+    v.sampling.update(mode=3, n=60000, flips=True)
+    v.rebuild()
+    okr = (v.Vs == 60000 and v.pc.n_points() == 60000 and v.iters == 0 and v.C.flipStats is not None
+           and all(v.ps.get_surface_mesh(n).n_faces() == v.F.shape[0] for _, n in v.STEP_MESHES)
+           and np.array_equal(v.rel.X, v.sess.Vseed))
+    a2 = copy.copy(v.args)
+    C2 = relax_viewer.run_relax.build_c2f(v.B, a2, v.ms)
+    s2 = CoarseRelaxSession(v.B, C2, v.ms)
+    r2 = s2.make_relaxer(v.cfg, '', state=None, it0=0)
+    for _ in range(2):
+        v.step(1)
+        r2.step()
+    okr &= np.array_equal(C2.S.F, v.F) and same_state(v.rel, r2)
+    print('rebuild: equal-area split to 60000 + flips -> %d samples, %d faces, run %d; 2 steps == fresh run: %s'
+          % (v.Vs, v.F.shape[0], v.runId, same_state(v.rel, r2)))
+    v.sampling.update(mode=0, n=200000, flips=False)
+    v.rebuild()
+    okr &= v.Vs == Vs0 and np.array_equal(v.F, F0)
+    print('rebuild back to uniform subdivision: %d samples, same mesh as at start: %s' % (v.Vs, np.array_equal(v.F, F0)))
+    ok &= okr
+
     # 6: real GUI frames (mock backend): every panel's imgui / polyscope calls run
     v.cam['on'] = True
     v.colorMode = 1

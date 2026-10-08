@@ -156,6 +156,17 @@ class RelaxViewer:
         self.keep_input()
         self.exportDir = None
         self.exported = []         # paths written this session
+        a = args
+        if getattr(a, 'equal_area_samples', 0) and a.equal_area_samples > 0:
+            mode, n = 3, a.equal_area_samples
+        elif a.equal_area_target == 'min':
+            mode, n = 2, a.n_coarse_subdiv_samples
+        elif a.equal_area_levels > 0:
+            mode, n = 1, a.n_coarse_subdiv_samples
+        else:
+            mode, n = 0, a.n_coarse_subdiv_samples
+        self.sampling = dict(mode=mode, n=int(n), K=max(1, int(a.equal_area_levels or 2)),
+                             flips=bool(getattr(a, 'delaunay_flips', False)))
 
         # display state
         rng = np.random.default_rng(12345)
@@ -242,17 +253,69 @@ class RelaxViewer:
         a new relaxer is made for the configuration, as for the first run."""
         self.running = False
         self.runTo = 0
+        self.restart('reset')
+        self.concCache = None
+        self.status = 'run %d: started again from the relaxation input' % self.runId
+        self.refresh()
+
+    SAMPLING_MODES = ['uniform subdivision (until >= N samples)', 'equal-area levels K, then uniform subdivision',
+                      'equal-area down to the smallest coarse face, then uniform subdivision',
+                      'equal-area split until N samples (no uniform subdivision)']
+
+    def sampling_args(self):
+        """Writes self.sampling into the run_relax arguments (the flags build_c2f reads)."""
+        a, sm = self.args, self.sampling
+        a.equal_area_levels, a.equal_area_target, a.equal_area_samples = 0, -1.0, 0
+        a.n_coarse_subdiv_samples = int(sm['n'])
+        if sm['mode'] == 1:
+            a.equal_area_levels = int(sm['K'])
+        elif sm['mode'] == 2:
+            a.equal_area_target = 'min'
+        elif sm['mode'] == 3:
+            a.equal_area_samples = int(sm['n'])
+        a.delaunay_flips = bool(sm['flips'])
+        a.delaunay_scope = getattr(a, 'delaunay_scope', 'sheet')
+
+    def rebuild(self):
+        """New subdivided mesh with the chosen sampling (and flips), its session (struct ids,
+        seeds on the fine mesh, projector), then the relaxation from iteration 0. Everything is
+        built by the same code as run_relax.py; the old points / step meshes are replaced."""
+        t0 = time.perf_counter()
+        self.running = False
+        self.runTo = 0
+        if self.sel >= 0:
+            self.clear_selection()
+        self.sampling_args()
+        B, ms = self.B, self.ms
+        C = run_relax.build_c2f(B, self.args, ms)
+        sess = CoarseRelaxSession(B, C, ms)
+        self.C, self.sess, self.Vs = C, sess, sess.Vs
+        self.F = np.ascontiguousarray(sess.M.F)
+        self.trace = StepTrace(self.Vs)
+        self.colors = np.random.default_rng(12345).uniform(0.1, 0.95, size=(self.Vs, 3))
+        Fm = self.F
+        self.meshEdges = np.unique(np.sort(np.concatenate([Fm[:, [0, 1]], Fm[:, [1, 2]], Fm[:, [2, 0]]]), axis=1),
+                                   axis=0)
+        self.treeDepth = [tree_depths(tr) for tr in sess.proj.trees]
+        self.concCache = None
+        self.restart('rebuilt (%s)' % run_relax.equal_area_text(self.args))
+        self.register_relax_structures()
+        self.refresh()
+        self.status = ('rebuilt in %.1f s: %d samples, %d faces (%s); run %d from iteration 0'
+                       % (time.perf_counter() - t0, self.Vs, self.F.shape[0], run_relax.equal_area_text(self.args),
+                          self.runId))
+        log_util.log('[relax_viewer] ' + self.status)
+
+    def restart(self, why):
+        """Run bookkeeping of a new run from the relaxation input (Reset and Rebuild)."""
         self.pastRuns.append((self.runId, list(self.history), self.iters))
         self.runId += 1
         self.iters = 0
         self.hasTrace = False
         self.history = []
-        log_util.log('[relax_viewer] reset: run %d starts from the relaxation input' % self.runId)
+        log_util.log('[relax_viewer] run %d starts from the relaxation input (%s)' % (self.runId, why))
         self.make_relaxer(state=None)
         self.keep_input()
-        self.concCache = None
-        self.status = 'run %d: started again from the relaxation input' % self.runId
-        self.refresh()
 
     def run_prefix(self):
         return '' if self.runId == 0 else 'run%02d_' % self.runId
@@ -460,15 +523,24 @@ class RelaxViewer:
         LEN0[0] = ps.get_length_scale()  # sizes and the camera speed are relative to this
         ps.set_automatically_compute_scene_extents(False)
         self.cam['scale'] = LEN0[0]
+        self.register_relax_structures()
+        self.refresh()
+
+    def register_relax_structures(self):
+        """The points cloud and the three step meshes (replaced when the mesh is rebuilt)."""
+        ps = self.ps
+        if ps.has_point_cloud('points'):
+            ps.remove_point_cloud('points')
         pc = register_pc(ps, 'points', self.rel.X, radius=self.pointRadius)
         pc.add_color_quantity('random colour', self.colors, enabled=True)
         pc.add_to_group('points')
         self.pc = pc
-        for key, name in (('committed', 'mesh: committed'), ('step', 'mesh: step y'), ('proj', 'mesh: projection Pi(y)')):
-            sm = ps.register_surface_mesh(name, self.rel.X, self.F, enabled=False, edge_width=0.9)
+        for key, name in self.STEP_MESHES:
+            if ps.has_surface_mesh(name):
+                ps.remove_surface_mesh(name)
+            sm = ps.register_surface_mesh(name, self.rel.X, self.F, enabled=self.meshOn[key], edge_width=0.9)
             sm.add_to_group('step meshes')
         self.apply_mesh_looks()
-        self.refresh()
 
     def mesh_positions(self, key):
         t, X = self.trace, self.rel.X
@@ -819,6 +891,20 @@ class RelaxViewer:
                                % (r.energy(r.X), r.count_folded(r.X)))
             if self.status:
                 psim.Text(self.status)
+
+        if psim.CollapsingHeader('Sampling (rebuilds the mesh, starts from iteration 0)', psim.ImGuiTreeNodeFlags_DefaultOpen):
+            sm = self.sampling
+            psim.TextUnformatted('current mesh: %d samples, %d faces | %s'
+                                 % (self.Vs, self.F.shape[0], run_relax.equal_area_text(self.args)))
+            _, sm['mode'] = psim.Combo('sampling', sm['mode'], self.SAMPLING_MODES)
+            _, sm['n'] = psim.InputInt('N samples (target)', sm['n'])
+            sm['n'] = max(1000, sm['n'])
+            if sm['mode'] == 1:
+                _, sm['K'] = psim.SliderInt('K (about |F| x 4^K equal-area faces)', sm['K'], 1, 4)
+            _, sm['flips'] = psim.Checkbox('Delaunay edge flips (seams / boundaries never flipped)', sm['flips'])
+            if psim.Button('Rebuild and start from iteration 0'):
+                self.rebuild()
+            psim.TextUnformatted('Rebuilding takes from a few seconds to about a minute (all in Python).')
 
         if psim.CollapsingHeader('Configuration', psim.ImGuiTreeNodeFlags_DefaultOpen):
             c = self.cfg
