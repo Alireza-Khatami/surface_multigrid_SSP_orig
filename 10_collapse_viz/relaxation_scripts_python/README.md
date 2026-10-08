@@ -82,6 +82,17 @@ the coarse face of each face.
 - `test_projector.py`: BVH structure and BVH vs brute-force closest points.
 - `cpp_reference_run.sh`: a headless C++ Release run, for flags no earlier run used.
 
+## Relaxed correspondence (.sdt)
+
+Every `run_relax.py` run also writes `coarse_subdiv_relaxed_<stem>.sdt` (`sdt_io.py`).
+- **Format:** the same binary layout as `collapse_viz_bin`'s `subdiv_<stem>.sdt` (relaxed
+  variant), readable with `subdiv_sample_tracker/tools/read_sdt.py`.
+- **Content:** each sample of the subdivided coarse mesh with its coarse location
+  (`coarse_face`, `coarse_bary`, unchanged) and its fine location after relaxation (`fine_face`,
+  `fine_bary`).
+- **Spec for consumers:** `md_files/coarse_subdiv_relaxed_sdt.md`.
+- **Check:** `python check_relaxed_sdt.py --run_dir <run>`.
+
 ## Equal-area mode (Python only)
 
 `equal_area_refine.py`: before the uniform subdivision, the big coarse faces are split

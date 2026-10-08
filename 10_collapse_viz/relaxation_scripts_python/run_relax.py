@@ -44,6 +44,8 @@ Python-only extras:
                             boundary edges are never flipped
   --delaunay_scope S        sheet (default: also coarse edges inside a sheet) | face (only inside
                             one coarse face)
+  (always written: coarse_subdiv_relaxed_<stem>.sdt, the relaxed coarse <-> fine correspondence
+   in the collapse_viz_bin .sdt format; spec md_files/coarse_subdiv_relaxed_sdt.md)
   --no_input_ply            do not write relax_input/*.ply (default: written, see relax_exports.py:
                             coarse mesh, equal-area refined mesh if on, subdivided mesh, its c2f
                             positions, and the relaxation input at the relaxer's initialization)
@@ -66,6 +68,7 @@ from bundle_io import load_bundle_flat  # noqa: E402
 from c2f_walk import coarse_subdiv_c2f_build  # noqa: E402
 from equal_area_refine import refine_from_args, target_arg, target_on  # noqa: E402
 from relax_exports import export_relax_input  # noqa: E402
+from sdt_io import export_relaxed_sdt  # noqa: E402
 from coarse_subdiv_relax import CoarseSubdivRelaxConfig, coarse_subdiv_relax_export, relaxed_obj_prefix  # noqa: E402
 from matstruct import load_matstruct  # noqa: E402
 from obj_io import read_obj, write_obj  # noqa: E402
@@ -258,13 +261,20 @@ def main(argv=None):
     write_clamp_csv(C, out('coarse_subdiv_c2f_clamp_', '.csv'))
     status = 0
     try:
-        on_rel = None
-        if not a.no_input_ply:
-            def on_rel(sess, rel):
+        held = {}
+
+        def on_rel(sess, rel):
+            held['sess'] = sess
+            if not a.no_input_ply:
                 export_relax_input(os.path.join(out_dir, 'relax_input'), '_' + stem, B, C, sess, rel,
                                    'experiment %s' % os.path.basename(os.path.normpath(out_dir)))
         M, R, q0, q1 = coarse_subdiv_relax_export(B, C, ms, cfg, a.subdiv_obj_max_verts, objPath, log,
                                                   on_relaxer=on_rel)
+        # the relaxed correspondence in the collapse_viz_bin .sdt format (sdt_io.py)
+        sdtPath = out('coarse_subdiv_relaxed_', '.sdt')
+        nReq = a.equal_area_samples if a.equal_area_samples > 0 else a.n_coarse_subdiv_samples
+        nb = export_relaxed_sdt(sdtPath, B, C, held['sess'], M, nReq)
+        log('[run_relax] relaxed coarse <-> fine correspondence -> %s (%.1f MB)' % (sdtPath, nb / 1048576.0))
         result = [
             '[relax_explicit] %s after %d iterations (last max move %.3g x diag) | move max %.3g mean %.3g (x diag) | '
             'folded %d -> %d, moves held back %d' % ('converged' if R.converged else 'NOT CONVERGED', R.itersSheet,
