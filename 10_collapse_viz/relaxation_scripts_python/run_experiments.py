@@ -52,6 +52,23 @@ SETS = {
         ('py_mv_nofold_lam1_2k', 'mean-value weights, symmetric graph, no new folds, lambda 1',
          E + NF + IT + ['--coarse_subdiv_relax_weights', 'meanvalue', '--explicit_lambda', '1']),
     ],
+    # equal-area splitting to N samples (no uniform subdivision), Delaunay flips, cotan weights:
+    # the adviser's pipeline (D) and its parts (A-C); N = 277,700 (as py_eqarea2_nofold_2k_valid)
+    'delaunay': [
+        ('py_eqs278k_nofold_global_2k', 'A: equal-area split to 277700 samples, no flips, uniform weights, '
+         'symmetric graph, no new folds, global projection',
+         E + NF + IT + ['--explicit_global_proj', '--equal_area_samples', '277700']),
+        ('py_eqs278k_flip_nofold_global_2k', 'B: as A + Delaunay flips (scope sheet), uniform weights',
+         E + NF + IT + ['--explicit_global_proj', '--equal_area_samples', '277700', '--delaunay_flips']),
+        ('py_eqs278k_cotan_nofold_global_2k', 'C: as A (no flips), cotan weights from the coarse geometry',
+         E + NF + IT + ['--explicit_global_proj', '--equal_area_samples', '277700',
+                        '--coarse_subdiv_relax_weights', 'cotan']),
+        ('py_eqs278k_flip_cotan_nofold_global_2k', 'D: as A + Delaunay flips (scope sheet) + cotan weights from '
+         'the coarse geometry (adviser pipeline)',
+         E + NF + IT + ['--explicit_global_proj', '--equal_area_samples', '277700', '--delaunay_flips',
+                        '--coarse_subdiv_relax_weights', 'cotan']),
+        ('py_eqarea2_nofold_2k', 'current best (existing run)', None),
+    ],
     # equal-area refinement of the coarse mesh before the subdivision (equal_area_refine.py);
     # flags None: an existing run, listed in the table for comparison
     'equal_area': [

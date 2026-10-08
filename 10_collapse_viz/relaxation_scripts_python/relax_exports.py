@@ -3,6 +3,8 @@
 Stages written by export_relax_input (run_relax.py, every experiment; folder relax_input/):
   00_coarse_<stem>.ply              the bundle's coarse mesh
   01_coarse_equal_area_<stem>.ply   the equal-area refined coarse mesh (only when that mode is on)
+  02a_before_flips / 02b_after_flips_<stem>.ply   the mesh before / after the Delaunay flips (only
+                                    with --delaunay_flips; face properties min_angle, changed)
   02_subdiv_<stem>.ply              the subdivided coarse mesh, on the coarse geometry
   03_subdiv_at_fine_<stem>.ply      the same vertices at their c2f positions on the fine mesh
   04_relax_input_<stem>.ply         what the relaxation starts from: the relaxer's positions at its
@@ -63,6 +65,9 @@ def export_relax_input(out_dir, stem, B, C, sess, rel, comment=''):
                   carrier_index=np.asarray(R.carrierIndex, dtype=np.int32)),
           fp=dict(coarse_face=R.faceOrig.astype(np.int32)),
           extra=['equal-area refined coarse mesh, target area %.6g' % R.Astar])
+    if getattr(C, 'flipStats', None) is not None:
+        from delaunay_flip import flip_plys
+        out += list(flip_plys(out_dir, stem, S, C.Fbefore, C.faceOrigBefore, comment))
     w('02_subdiv', S.V, S.F, _carrier_props(S), cf, ['subdivided coarse mesh, coarse geometry'])
     vp = _carrier_props(S)
     vp['fine_face'] = C.fineFace.astype(np.int32)

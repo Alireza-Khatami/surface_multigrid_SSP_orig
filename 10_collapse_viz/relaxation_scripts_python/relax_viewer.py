@@ -140,7 +140,7 @@ class RelaxViewer:
         t0 = time.perf_counter()
         B = self.B = load_bundle_flat(args.bundle)
         ms = self.ms = load_matstruct(args.matstruct_path, B.fineV, B.fineF)
-        C = self.C = run_relax.build_c2f(B, args)
+        C = self.C = run_relax.build_c2f(B, args, ms)
         sess = self.sess = CoarseRelaxSession(B, C, ms)
         self.cfg = cfg
         self.Vs = sess.Vs
@@ -576,6 +576,19 @@ class RelaxViewer:
                 ps.remove_surface_mesh(nm)
         self.ui[prefix] = []
 
+    def add_target_trees(self, G2, info, proj):
+        """The BVH trees the selected point's projection searches (its own structure's)."""
+        ps = self.ps
+        for t in info['targets']:
+            tr = proj.trees[t]
+            d = self.treeDepth[t]
+            keep = [j for j, nd in enumerate(tr.nodes) if d[j] <= self.bvhDepth and (not self.bvhLeaves or nd[2] < 0)]
+            if keep:
+                nodes, edges = box_wire([tr.nodes[j][0] for j in keep], [tr.nodes[j][1] for j in keep])
+                nm = 'sel: target tree %s' % self.treeLabel.get(t, t)
+                self._add(G2, 'cn', nm, register_cn(ps, nm, nodes, edges, color=(0.6, 0.6, 0.6),
+                                                    radius=0.0006, transparency=0.5))
+
     def _add(self, group, kind, name, obj):
         obj.add_to_group(group)
         self.ui.setdefault(group, []).append((kind, name))
@@ -610,23 +623,32 @@ class RelaxViewer:
         G1, G2 = 'selection', 'BVH (selected point)'
         sh = self.show
         col = self.colors[info['i']]
+        proj = self.sess.proj
         if not self.hasTrace:
+            # no step data yet (start, after Reset, or checkpoints off): the point and its
+            # structure's trees are known; y, Pi(y), vectors, region, visited nodes need a step
             self._add(G1, 'pc', 'sel: point', register_pc(ps, 'sel: point', info['X'][None], radius=0.006,
                                                                     color=col))
+            if sh['bvh_targets']:
+                self.add_target_trees(G2, info, proj)
             return
         x0, y, p, x1 = info['x0'], info['y'], info['p'], info['x1']
         at = (x0, y, p)[self.selAt]
         self._add(G1, 'pc', 'sel: point', register_pc(ps, 'sel: point', at[None], radius=0.007, color=col))
         if sh['x']:
-            c = self._add(G1, 'pc', 'sel: x (start)', register_pc(ps, 'sel: x (start)', x0[None], radius=0.004,
-                                                                            color=(0.2, 0.2, 0.2)))
-            if sh['vstep']:
-                add_ambient_vectors(c, 'step x -> y', (y - x0)[None], (0.1, 0.4, 0.95))
+            self._add(G1, 'pc', 'sel: x (start)', register_pc(ps, 'sel: x (start)', x0[None], radius=0.004,
+                                                                        color=(0.6, 0.6, 0.6)))
         if sh['y']:
-            c = self._add(G1, 'pc', 'sel: y (step)', register_pc(ps, 'sel: y (step)', y[None], radius=0.004,
-                                                                           color=(0.1, 0.4, 0.95)))
-            if sh['vproj']:
-                add_ambient_vectors(c, 'projection y -> Pi(y)', (p - y)[None], (0.95, 0.5, 0.05))
+            self._add(G1, 'pc', 'sel: y (step)', register_pc(ps, 'sel: y (step)', y[None], radius=0.004,
+                                                                       color=(0.1, 0.4, 0.95)))
+        if sh['vstep']:  # arrow x -> y on its own (tiny) anchor point
+            c = self._add(G1, 'pc', 'sel: vector x -> y', register_pc(ps, 'sel: vector x -> y', x0[None],
+                                                                            radius=0.0005, color=(0.1, 0.4, 0.95)))
+            add_ambient_vectors(c, 'step x -> y', (y - x0)[None], (0.1, 0.4, 0.95))
+        if sh['vproj']:  # arrow y -> Pi(y)
+            c = self._add(G1, 'pc', 'sel: vector y -> Pi(y)', register_pc(ps, 'sel: vector y -> Pi(y)', y[None],
+                                                                                radius=0.0005, color=(0.95, 0.5, 0.05)))
+            add_ambient_vectors(c, 'projection y -> Pi(y)', (p - y)[None], (0.95, 0.5, 0.05))
         if sh['p']:
             self._add(G1, 'pc', 'sel: Pi(y) (projection)',
                       register_pc(ps, 'sel: Pi(y) (projection)', p[None], radius=0.004, color=(0.95, 0.5, 0.05)))
@@ -634,7 +656,6 @@ class RelaxViewer:
             self._add(G1, 'pc', 'sel: committed (held back)',
                       register_pc(ps, 'sel: committed (held back)', x1[None], radius=0.005, color=(0.9, 0.1, 0.1)))
         # BVH / search region of this point in this step
-        proj = self.sess.proj
         B = self.B
         if sh['region'] and info['local'] and info['regCnt'] >= 0 and len(info['reg']):
             if info['role'] == 'curve':
@@ -654,15 +675,7 @@ class RelaxViewer:
                 self._add(G2, 'sm', 'sel: result face', ps.register_surface_mesh(
                     'sel: result face', B.fineV, B.fineF[[info['pface']]], color=(0.95, 0.5, 0.05)))
         if sh['bvh_targets']:
-            for t in info['targets']:
-                tr = proj.trees[t]
-                d = self.treeDepth[t]
-                keep = [j for j, nd in enumerate(tr.nodes) if d[j] <= self.bvhDepth and (not self.bvhLeaves or nd[2] < 0)]
-                if keep:
-                    nodes, edges = box_wire([tr.nodes[j][0] for j in keep], [tr.nodes[j][1] for j in keep])
-                    nm = 'sel: target tree %s' % self.treeLabel.get(t, t)
-                    self._add(G2, 'cn', nm, register_cn(ps, nm, nodes, edges, color=(0.6, 0.6, 0.6),
-                                                                      radius=0.0006, transparency=0.5))
+            self.add_target_trees(G2, info, proj)
         pj = proj.pj
         if sh['bvh_visited'] and info.get('visited') is not None and len(info['visited']):
             g = info['visited']
@@ -845,12 +858,18 @@ class RelaxViewer:
                     self.clear_selection()
                     info = None
             if info is not None:
+                if not self.hasTrace:
+                    psim.TextUnformatted('No step data yet (start, after Reset, or checkpoints off): only the point'
+                                         + chr(10) + 'and its BVH target trees are drawn. Press Step with "record '
+                                         'checkpoints"' + chr(10) + 'on for x / y / Pi(y), the arrows, the search '
+                                         'region and the BVH visits.')
                 ch = False
                 for key, label in (('x', 'start x'), ('y', 'step y'), ('p', 'projection Pi(y)'),
                                    ('committed', 'committed (if held back)'), ('vstep', 'vector x -> y'),
-                                   ('vproj', 'vector y -> Pi(y)'), ('region', 'local search region / result'),
-                                   ('bvh_targets', 'BVH: target trees'), ('bvh_visited', 'BVH: nodes visited'),
-                                   ('bvh_winner', 'BVH: winning leaf')):
+                                   ('vproj', 'vector y -> Pi(y)'), ('region', 'search region (local projection) / result'),
+                                   ('bvh_targets', 'BVH: target trees'),
+                                   ('bvh_visited', 'BVH: nodes visited (global projection)'),
+                                   ('bvh_winner', 'BVH: winning leaf (global projection)')):
                     c1, self.show[key] = psim.Checkbox(label, self.show[key])
                     ch |= c1
                 psim.Text('selected point drawn at:')

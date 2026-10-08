@@ -38,6 +38,12 @@ Python-only extras:
                             before the uniform subdivision (0 = off, the C++ behaviour)
   --equal_area_target A     same, with the target face area A given directly; 'min': the
                             smallest coarse face area
+  --equal_area_samples N    split the largest face until the mesh has N vertices (no uniform
+                            subdivision after it)
+  --delaunay_flips          Delaunay edge flips on the subdivided mesh (delaunay_flip.py); seam /
+                            boundary edges are never flipped
+  --delaunay_scope S        sheet (default: also coarse edges inside a sheet) | face (only inside
+                            one coarse face)
   --no_input_ply            do not write relax_input/*.ply (default: written, see relax_exports.py:
                             coarse mesh, equal-area refined mesh if on, subdivided mesh, its c2f
                             positions, and the relaxation input at the relaxer's initialization)
@@ -113,6 +119,9 @@ def parse_args(argv=None):
     p.add_argument('--description', default='')
     p.add_argument('--equal_area_levels', type=int, default=0)
     p.add_argument('--equal_area_target', type=target_arg, default=-1.0)
+    p.add_argument('--equal_area_samples', type=int, default=0)
+    p.add_argument('--delaunay_flips', action='store_true')
+    p.add_argument('--delaunay_scope', default='sheet', choices=['sheet', 'face'])
     p.add_argument('--no_input_ply', action='store_true')
     return p.parse_args(argv)
 
@@ -124,15 +133,33 @@ def bundle_stem(bundle):
     return stem[:-4] if stem.endswith('.c2f') else stem
 
 
-def build_c2f(B, a):
-    """Subdivided coarse mesh + c2f walk; with the equal-area mode, from the refined coarse mesh."""
-    R = refine_from_args(B.coarseV, B.coarseF, a.equal_area_levels, a.equal_area_target)
-    C = coarse_subdiv_c2f_build(B, a.n_coarse_subdiv_samples, refined=R)
+def build_c2f(B, a, ms=None):
+    """Subdivided coarse mesh + c2f walk; with the equal-area mode, from the refined coarse
+    mesh (--equal_area_samples N: split until N vertices, no uniform subdivision); with
+    --delaunay_flips, Delaunay edge flips on the result (delaunay_flip.py; needs ms)."""
+    samples = getattr(a, 'equal_area_samples', 0)
+    R = refine_from_args(B.coarseV, B.coarseF, a.equal_area_levels, a.equal_area_target, samples)
+    nTarget = samples if samples and samples > 0 else a.n_coarse_subdiv_samples
+    C = coarse_subdiv_c2f_build(B, nTarget, refined=R)
     C.refined = R
+    C.flipStats = None
+    if getattr(a, 'delaunay_flips', False):
+        if ms is None:
+            raise SystemExit('--delaunay_flips needs the .ma_struct (build_c2f(B, a, ms))')
+        from delaunay_flip import delaunay_flip
+        C.Fbefore, C.faceOrigBefore = C.S.F.copy(), C.S.faceOrig.copy()  # for the before / after PLYs
+        C.flipStats = delaunay_flip(C.S, B, ms, a.delaunay_scope)
     return C
 
 
 def equal_area_text(a):
+    flips = (', then Delaunay edge flips (scope %s)' % a.delaunay_scope) if getattr(a, 'delaunay_flips', False) else ''
+    if getattr(a, 'equal_area_samples', 0) and a.equal_area_samples > 0:
+        return 'on, largest face split until %d samples (no uniform subdivision)%s' % (a.equal_area_samples, flips)
+    return _equal_area_text(a) + flips
+
+
+def _equal_area_text(a):
     if a.equal_area_target == 'min':
         return 'on, target face area = the smallest coarse face area'
     if target_on(a.equal_area_target):
@@ -222,7 +249,7 @@ def main(argv=None):
         if not (okF and okV):
             raise SystemExit('simplified mesh does not match the bundle')
     ms = load_matstruct(a.matstruct_path, B.fineV, B.fineF)
-    C = build_c2f(B, a)
+    C = build_c2f(B, a, ms)
     if not a.no_subdiv_objs and C.S.V.shape[0] <= a.subdiv_obj_max_verts:
         write_obj(out('coarse_subdiv_', '.obj'), C.S.V, C.S.F)
         write_obj(out('coarse_subdiv_at_fine_pos_', '.obj'), C.P, C.S.F)
@@ -248,7 +275,7 @@ def main(argv=None):
             % (q0.edgeCV, q1.edgeCV, q0.p1, q1.p1, q0.p5, q1.p5, q0.median, q1.median, q0.degenerate,
                q1.degenerate, q1.flippedVsRef)]
         res = dict(folder=os.path.basename(os.path.normpath(out_dir)), config=dataclasses.asdict(cfg),
-                   equal_area=equal_area_text(a), n_subdiv_verts=int(C.S.V.shape[0]),
+                   equal_area=equal_area_text(a), n_subdiv_verts=int(C.S.V.shape[0]), flips=C.flipStats,
                    n_subdiv_faces=int(C.S.F.shape[0]),
                    report=dataclasses.asdict(R), quality_before=dataclasses.asdict(q0),
                    quality_after=dataclasses.asdict(q1), seconds=time.perf_counter() - t0, relaxed_obj=objPath)

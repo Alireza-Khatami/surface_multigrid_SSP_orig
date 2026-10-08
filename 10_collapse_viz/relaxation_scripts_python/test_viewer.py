@@ -233,6 +233,37 @@ def main():
     okr &= abs(v.pc.get_radius() - 0.0003 * L0) <= 1e-9 * L0
     print('point radius unchanged by the length scale: %s' % okr)
     ok &= okr
+    # 5b: every selected-point checkbox changes what is drawn (after a step; before a step
+    # only the point and its target trees exist)
+    def sel_names():
+        return {nm for g in ('selection', 'BVH (selected point)') for _, nm in v.ui.get(g, [])}
+    v.reset()
+    v.select(1234)
+    pre = sel_names()
+    okc = 'sel: point' in pre and any(n.startswith('sel: target tree') for n in pre)
+    print('selected point before any step: %s' % sorted(pre))
+    v.step(1)
+    base = sel_names()
+    for key in v.show:
+        if key == 'committed' and not v.selection_info()['held']:
+            continue  # only drawn for a held-back point
+        vis = v.selection_info().get('visited')
+        if key == 'bvh_visited' and (vis is None or len(vis) == 0):
+            continue  # local projection: no BVH query in this step
+        if key == 'bvh_winner' and v.selection_info()['winTree'] < 0:
+            continue  # no BVH leaf beat the start candidate in this step
+        if key == 'region' and not (v.selection_info()['pface'] >= 0 or v.selection_info()['pedge'] >= 0):
+            continue
+        v.show[key] = False
+        v.update_selection()
+        gone = base - sel_names()
+        v.show[key] = True
+        v.update_selection()
+        back = sel_names() == base
+        print('checkbox %-12s off removes %s, back on restores: %s' % (key, sorted(gone) or 'NOTHING', back))
+        okc &= bool(gone) and back
+    ok &= okc
+
     # 6: real GUI frames (mock backend): every panel's imgui / polyscope calls run
     v.cam['on'] = True
     v.colorMode = 1

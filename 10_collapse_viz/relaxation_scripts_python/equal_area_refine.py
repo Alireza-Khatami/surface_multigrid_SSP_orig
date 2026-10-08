@@ -72,7 +72,7 @@ def tri_areas(V, F):
     return 0.5 * np.linalg.norm(np.cross(u, w), axis=1)
 
 
-def refine_equal_area(VO, FO, Astar, maxFaces=50000000):
+def refine_equal_area(VO, FO, Astar, maxFaces=50000000, maxVerts=None):
     """Longest-edge bisection of (VO, FO) until every face has area <= Astar."""
     VO = np.asarray(VO, dtype=np.float64)[:, :3]
     FO = np.asarray(FO, dtype=np.int64)
@@ -222,6 +222,8 @@ def refine_equal_area(VO, FO, Astar, maxFaces=50000000):
     heap = [(-area(f), f) for f in range(nFO)]
     heapq.heapify(heap)
     while heap:
+        if maxVerts is not None and len(ctype) >= maxVerts:
+            break  # sample-count mode: stop once the mesh has maxVerts vertices
         na, f = heapq.heappop(heap)
         if not alive[f]:
             continue
@@ -242,7 +244,7 @@ def refine_equal_area(VO, FO, Astar, maxFaces=50000000):
     R.carrierIndex = cidx
     R.carrierCoord = ccoord
     R.V = np.array(P, dtype=np.float64)
-    R.Astar = Astar
+    R.Astar = Astar if maxVerts is None else float(tri_areas(R.V, R.F).max())  # sample mode: largest area left
 
     # conformity: a refined edge inside a coarse face has 2 faces, one on a coarse
     # edge has as many faces as that coarse edge (no T-junctions)
@@ -322,14 +324,19 @@ def target_on(target):
     return target == 'min' or (target is not None and target > 0)
 
 
-def refine_from_args(VO, FO, levels=None, target=None):
-    """None when the mode is off (no levels, no target). target: an area, or 'min' for
-    the smallest coarse face area; it takes precedence over levels."""
-    if (levels is None or levels <= 0) and not target_on(target):
+def refine_from_args(VO, FO, levels=None, target=None, samples=None):
+    """None when the mode is off (no levels, no target, no samples). samples: split the
+    largest face until the mesh has that many vertices (then no uniform subdivision is
+    needed); else target: an area, or 'min' for the smallest coarse face area; it takes
+    precedence over levels."""
+    if (levels is None or levels <= 0) and not target_on(target) and not (samples and samples > 0):
         return None
     VO = np.asarray(VO, dtype=np.float64)[:, :3]
     FO = np.asarray(FO, dtype=np.int64)
-    if target == 'min':
+    if samples and samples > 0:
+        R = refine_equal_area(VO, FO, 0.0, maxVerts=int(samples))
+        how = 'largest face split until %d samples; area of the largest face left' % samples
+    elif target == 'min':
         A = float(tri_areas(VO, FO).min())
         R = refine_equal_area(VO, FO, A)
         how = 'the smallest coarse face area'
