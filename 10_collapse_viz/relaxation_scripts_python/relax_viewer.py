@@ -165,6 +165,15 @@ class RelaxViewer:
         self.show = dict(x=True, y=True, p=True, committed=True, vstep=True, vproj=True,
                          bvh_targets=True, bvh_visited=True, bvh_winner=True, region=True)
         self.meshOn = dict(committed=False, step=False, proj=False)
+        self.meshMoveColor = False   # colour step meshes by the distance from x this step
+        # transparency: 'pretty' = depth peeling, transparent surfaces layered by depth (correct);
+        # 'simple' = blended in draw order (fast, back faces / hidden surfaces show through)
+        self.transpMode = 0          # index in TRANSP_MODES
+        self.transpPasses = 8        # depth-peeling passes (pretty)
+        self.fineTransp = 0.3        # fine MAT mesh
+        self.meshTransp = 1.0        # the three step meshes (1 = opaque)
+        self.meshCull = False        # hide the back faces of the step meshes
+        self.meshPushed = {}         # key -> (iteration, positions last given to the mesh)
         self.colorMode = 0         # 0 random, 1 concave mask
         self.fineOn = True         # fine MAT mesh shown
         self.pointRadius = 0.0008  # 'points' radius, x the starting length scale (was 0.0015)
@@ -442,7 +451,7 @@ class RelaxViewer:
     # -------------------------------------------------------------- polyscope structures
     def register(self):
         ps = self.ps
-        ps.set_transparency_mode('simple')
+        self.apply_transparency_mode()
         B = self.B
         for g in ('fine MAT', 'points', 'selection', 'step meshes', 'BVH (selected point)', 'BVH inspector'):
             ps.create_group(g)
@@ -456,8 +465,9 @@ class RelaxViewer:
         pc.add_to_group('points')
         self.pc = pc
         for key, name in (('committed', 'mesh: committed'), ('step', 'mesh: step y'), ('proj', 'mesh: projection Pi(y)')):
-            sm = ps.register_surface_mesh(name, self.rel.X, self.F, enabled=False, edge_width=0.5)
+            sm = ps.register_surface_mesh(name, self.rel.X, self.F, enabled=False, edge_width=0.9)
             sm.add_to_group('step meshes')
+        self.apply_mesh_looks()
         self.refresh()
 
     def mesh_positions(self, key):
@@ -473,15 +483,58 @@ class RelaxViewer:
         if self.hasTrace:
             self.pc.add_scalar_quantity('held back (this step)', self.trace.held.astype(float), enabled=False)
         self.apply_colors()
-        for key, name in (('committed', 'mesh: committed'), ('step', 'mesh: step y'), ('proj', 'mesh: projection Pi(y)')):
-            sm = ps.get_surface_mesh(name)
-            sm.set_enabled(self.meshOn[key])
-            if self.meshOn[key]:
-                sm.update_vertex_positions(self.mesh_positions(key))
-                if key == 'committed' and self.hasTrace:
-                    sm.add_scalar_quantity('held back', self.trace.held.astype(float), enabled=True,
-                                           cmap='reds')
+        self.sync_step_meshes()  # a mesh turned on / off in polyscope's list since the last frame
+        self.update_step_meshes()
         self.update_selection()
+
+    STEP_MESHES = (('committed', 'mesh: committed'), ('step', 'mesh: step y'), ('proj', 'mesh: projection Pi(y)'))
+
+    TRANSP_MODES = ['pretty', 'simple', 'none']
+    TRANSP_LABELS = ['pretty (depth peeling, correct layering)', 'simple (fast; back faces show through)',
+                     'none (all opaque)']
+
+    def apply_transparency_mode(self):
+        ps = self.ps
+        ps.set_transparency_mode(self.TRANSP_MODES[self.transpMode])
+        if self.TRANSP_MODES[self.transpMode] == 'pretty':
+            ps.set_transparency_render_passes(int(self.transpPasses))
+
+    def apply_mesh_looks(self):
+        """Transparency of the fine MAT and the step meshes; back-face culling of the step meshes."""
+        ps = self.ps
+        ps.get_surface_mesh('fine MAT').set_transparency(float(self.fineTransp))
+        for _, name in self.STEP_MESHES:
+            sm = ps.get_surface_mesh(name)
+            sm.set_transparency(float(self.meshTransp))
+            sm.set_back_face_policy('cull' if self.meshCull else 'different')
+
+    def update_step_meshes(self):
+        """The three step meshes get this iteration's positions (from the relaxation state /
+        checkpoint) every time, shown or not, so turning one on (here or in polyscope's
+        structure list) always shows the current step. Optional colour: how far each vertex
+        is from its position at the start of the iteration (x), so a step's change is visible."""
+        ps, t = self.ps, self.trace
+        x0 = t.X0 if self.hasTrace else self.rel.X
+        for key, name in self.STEP_MESHES:
+            sm = ps.get_surface_mesh(name)
+            P = self.mesh_positions(key)
+            sm.update_vertex_positions(P)
+            self.meshPushed[key] = (self.iters, P.copy())  # what the mesh now shows (tests)
+            sm.set_enabled(self.meshOn[key])
+            if self.meshMoveColor:
+                d = np.linalg.norm(P - x0, axis=1) / self.rel.diag
+                sm.add_scalar_quantity('distance from x this step (x diag)', d, enabled=True, cmap='viridis')
+            elif key == 'committed' and self.hasTrace:
+                sm.add_scalar_quantity('held back', t.held.astype(float), enabled=True, cmap='reds')
+            else:
+                sm.remove_all_quantities()
+
+    def sync_step_meshes(self):
+        """Picks up a step mesh turned on / off in polyscope's own structure list."""
+        for key, name in self.STEP_MESHES:
+            on = self.ps.get_surface_mesh(name).is_enabled()
+            if on != self.meshOn[key]:
+                self.meshOn[key] = on
 
     def set_point_radius(self, r):
         """Radius of the 'points' cloud, relative to the starting length scale, set as an
@@ -801,6 +854,15 @@ class RelaxViewer:
             ch, self.fineOn = psim.Checkbox('fine MAT mesh', self.fineOn)
             if ch:
                 self.ps.get_surface_mesh('fine MAT').set_enabled(self.fineOn)
+            ch, self.fineTransp = psim.SliderFloat('fine MAT: opacity (1 = opaque)', self.fineTransp, 0.0, 1.0)
+            if ch:
+                self.apply_mesh_looks()
+            ch, self.transpMode = psim.Combo('transparency rendering', self.transpMode, self.TRANSP_LABELS)
+            if self.TRANSP_MODES[self.transpMode] == 'pretty':
+                c2, self.transpPasses = psim.SliderInt('depth-peeling passes', self.transpPasses, 1, 32)
+                ch |= c2
+            if ch:
+                self.apply_transparency_mode()
             ch, self.pointRadius = psim.SliderFloat('point radius (x scene size)', self.pointRadius, 0.00005, 0.004,
                                                     format='%.5f')
             if ch:
@@ -812,11 +874,26 @@ class RelaxViewer:
             ch3, self.concRadius = psim.SliderFloat('concave mask: radius (subdiv edges)', self.concRadius, 0.5, 30.0)
             if ch or ch1 or ch2 or ch3:
                 self.apply_colors()
-            for key, label in (('committed', 'mesh: committed (held back flagged)'), ('step', 'mesh: step y'),
-                               ('proj', 'mesh: projection Pi(y)')):
-                ch, self.meshOn[key] = psim.Checkbox(label, self.meshOn[key])
-                if ch:
-                    self.refresh()
+
+        if psim.CollapsingHeader('Step meshes', psim.ImGuiTreeNodeFlags_DefaultOpen):
+            self.sync_step_meshes()
+            ch = False
+            for key, label in (('committed', 'committed (current positions; held back flagged)'),
+                               ('step', 'step y = x + lambda (mean - x)'), ('proj', 'projection Pi(y)')):
+                c1, self.meshOn[key] = psim.Checkbox(label, self.meshOn[key])
+                ch |= c1
+            c1, self.meshMoveColor = psim.Checkbox('colour: distance from x this step', self.meshMoveColor)
+            ch |= c1
+            c2, self.meshTransp = psim.SliderFloat('step meshes: opacity (1 = opaque)', self.meshTransp, 0.0, 1.0)
+            c3, self.meshCull = psim.Checkbox('step meshes: hide back faces', self.meshCull)
+            if c2 or c3:
+                self.apply_mesh_looks()
+            if ch:
+                self.update_step_meshes()
+            if not self.hasTrace:
+                psim.TextUnformatted('No step data yet: step y and Pi(y) show the current positions until a Step.')
+            else:
+                psim.Text('showing iteration %d' % self.iters)
 
         if psim.CollapsingHeader('Camera speed', psim.ImGuiTreeNodeFlags_DefaultOpen):
             c = self.cam

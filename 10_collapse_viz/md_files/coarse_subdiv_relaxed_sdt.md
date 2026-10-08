@@ -119,6 +119,14 @@ nested, so the helper does not apply.
 ## Guarantees (checked by `relaxation_scripts_python/check_relaxed_sdt.py`)
 
 - `(fine_face, fine_bary)` interpolated on the fine mesh equals `sub_V` exactly (difference 0).
+- `(fine_face, fine_bary)` is the location **after** the relaxation. The relaxation slides
+  samples along the surface, so many samples end up in another fine triangle than the one
+  they started in (12,407 after 30 iterations on ABC 00040057). For those, the file stores
+  the new triangle.
+  - Check 1: barycentrics recomputed directly from `sub_V` in the stored triangle equal the
+    stored ones, to 2e-13.
+  - Check 2: a sample that changed triangle lies outside its starting triangle, or on an
+    edge shared with the new one.
 - `(coarse_face, coarse_bary)` interpolated on the coarse mesh equals the sample's position on
   the coarse geometry exactly.
 - Both sets of barycentric coordinates are ≥ 0 and sum to 1 (up to 2.2e-16).

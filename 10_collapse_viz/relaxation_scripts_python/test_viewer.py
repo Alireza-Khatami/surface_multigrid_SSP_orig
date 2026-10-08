@@ -264,6 +264,54 @@ def main():
         okc &= bool(gone) and back
     ok &= okc
 
+    # 5c: step meshes follow every step, also when turned on in polyscope's own structure list
+    for key, name in v.STEP_MESHES:
+        v.meshOn[key] = False
+        v.ps.get_surface_mesh(name).set_enabled(True)   # as the polyscope UI does
+    prev = None
+    okm = True
+    for _ in range(3):
+        v.step(1)
+        want = dict(committed=v.rel.X, step=v.trace.Y, proj=v.trace.P)
+        for key, name in v.STEP_MESHES:
+            it, Pm = v.meshPushed[key]
+            okm &= it == v.iters and np.array_equal(Pm, want[key]) and v.meshOn[key]                 and v.ps.get_surface_mesh(name).is_enabled()
+        cur = {k: v.meshPushed[k][1] for k, _ in v.STEP_MESHES}
+        if prev is not None:
+            okm &= all(not np.array_equal(cur[k], prev[k]) for k in cur)
+        prev = cur
+    v.meshMoveColor = True
+    v.update_step_meshes()
+    # our checkboxes: a click (meshOn flipped, then update_step_meshes) must stick
+    okb = True
+    for key, name in v.STEP_MESHES:
+        for want in (False, True, False):
+            v.meshOn[key] = want
+            v.update_step_meshes()
+            v.ps.frame_tick()
+            okb &= v.meshOn[key] == want and v.ps.get_surface_mesh(name).is_enabled() == want
+    print('step mesh checkboxes toggle on / off and stay: %s' % okb)
+    okm &= okb
+    print('step meshes: turned on from polyscope, follow 3 steps (positions = state / checkpoint, change each '
+          'step): %s' % okm)
+    ok &= okm
+
+    # 5d: transparency controls (mode, opacities, back faces) apply without errors
+    for m in range(len(v.TRANSP_MODES)):
+        v.transpMode = m
+        v.apply_transparency_mode()
+    v.transpMode = 0
+    v.apply_transparency_mode()
+    v.meshTransp, v.meshCull, v.fineTransp = 0.5, True, 0.6
+    v.apply_mesh_looks()
+    okt = (abs(v.ps.get_surface_mesh('mesh: committed').get_transparency() - 0.5) < 1e-6
+           and v.ps.get_surface_mesh('mesh: committed').get_back_face_policy() == 'cull'
+           and abs(v.ps.get_surface_mesh('fine MAT').get_transparency() - 0.6) < 1e-6)
+    print('transparency controls: %s' % okt)
+    ok &= okt
+    v.meshTransp, v.meshCull, v.fineTransp = 1.0, False, 0.3
+    v.apply_mesh_looks()
+
     # 6: real GUI frames (mock backend): every panel's imgui / polyscope calls run
     v.cam['on'] = True
     v.colorMode = 1

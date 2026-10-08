@@ -131,6 +131,38 @@ def main(argv=None):
     moved = np.linalg.norm(A['sub_V'] - A['sub_V_seed'], axis=1)
     print('     relaxation moved %d of %d samples, max %.3g x diag' % ((moved > 0).sum(), Vs, moved.max() / diag))
 
+    # 5b. sliding: barycentrics recomputed from the relaxed xyz in the stored fine triangle
+    # (independent of the relaxation code) = the stored ones; samples that slid into another
+    # triangle are outside their seed triangle
+    def bary_in(Pt, f):
+        a_, b_, c_ = B.fineV[B.fineF[f, 0], :3], B.fineV[B.fineF[f, 1], :3], B.fineV[B.fineF[f, 2], :3]
+        e1, e2, r = b_ - a_, c_ - a_, Pt - a_
+        d11, d12, d22 = (e1 * e1).sum(1), (e1 * e2).sum(1), (e2 * e2).sum(1)
+        r1, r2 = (r * e1).sum(1), (r * e2).sum(1)
+        den = d11 * d22 - d12 * d12
+        v = (d22 * r1 - d12 * r2) / den
+        w = (d11 * r2 - d12 * r1) / den
+        q = a_ + v[:, None] * e1 + w[:, None] * e2
+        return np.stack([1 - v - w, v, w], 1), np.linalg.norm(Pt - q, axis=1)
+    bs, dist = bary_in(A['sub_V'], ff)
+    check('sliding: barycentrics recomputed from the relaxed xyz in the stored triangle = the stored ones',
+          np.abs(bs - fb).max() <= 1e-9 and bs.min() >= -1e-9 and dist.max() <= 1e-12 * diag,
+          'max diff %.2e, min %.2e, off-plane %.2e x diag' % (np.abs(bs - fb).max(), bs.min(), dist.max() / diag))
+    if inp:
+        f0 = read_ply(inp[0])[2]['fine_face'].astype(np.int64)
+        slid = ff != f0
+        if slid.any():
+            bo, do = bary_in(A['sub_V'][slid], f0[slid])
+            out = int(((bo.min(1) < -1e-9) | (do > 1e-9 * diag)).sum())
+            onEdge = int(slid.sum()) - out
+            # a sample that stayed in its seed triangle's closure is on an edge shared with the new one
+            okEdge = True
+            if onEdge:
+                keep = ~((bo.min(1) < -1e-9) | (do > 1e-9 * diag))
+                okEdge = bool((np.abs(bo[keep]).min(1) <= 1e-9).all())
+            check('sliding: %d samples moved to another fine triangle; %d of them are outside their seed triangle, '
+                  '%d on an edge it shares with the new one' % (slid.sum(), out, onEdge), okEdge)
+
     # 6 / 7 / 8. carriers, palette, own structure
     off, ids, mask, sid = A['palette_offsets'], A['palette_ids'], A['palette_type_mask'], A['struct_set_id']
     P = H['P']
