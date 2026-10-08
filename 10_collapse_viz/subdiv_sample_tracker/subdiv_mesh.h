@@ -16,6 +16,7 @@
 
 #include <Eigen/Core>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 enum SubdivCarrier : uint8_t {
@@ -71,3 +72,8 @@ Eigen::MatrixXi subdiv_unique_edges(const Eigen::MatrixXi & F);
 
 // Index of edge (a, b) in `edges` (from subdiv_unique_edges), -1 if absent.
 int subdiv_find_edge(const Eigen::MatrixXi & edges, int a, int b);
+
+// Path for opening a file for writing. On Windows, returns the absolute path in
+// long-path form (prefix backslash backslash ? backslash), so output paths over 260 characters (long run folders
+// + long mesh stems) do not fail. Elsewhere, returns path unchanged.
+std::string subdiv_long_path(const std::string & path);

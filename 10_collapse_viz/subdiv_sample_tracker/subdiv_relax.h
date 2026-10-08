@@ -161,11 +161,6 @@ RelaxReport subdiv_relax_solve_project(SubdivMesh & M,
                                        const RelaxGraph & G,
                                        const RelaxOptions & opt = RelaxOptions());
 
-// Path for opening a file for writing. On Windows, returns the absolute path in
-// long-path form (prefix backslash backslash ? backslash), so output paths over 260 characters (long run folders
-// + long mesh stems) do not fail. Elsewhere, returns path unchanged.
-std::string subdiv_long_path(const std::string & path);
-
 struct MeshQuality {
     double  edgeCV = 0.0;               // std / mean of edge lengths
     double  minAngle = 0.0, p1 = 0.0, p5 = 0.0, median = 0.0;  // per-triangle min angle, degrees

@@ -32,9 +32,9 @@ set(APP_SRCS
     coarse_mesh_export.cpp
     coarse_mesh_sanity_check.cpp
     coarse_fine_viz.cpp
-    coarse_subdiv_c2f.cpp
-    coarse_subdiv_relax.cpp
-    coarse_subdiv_relax_explicit.cpp
+    # coarse_subdiv_c2f.cpp, coarse_subdiv_relax.cpp, coarse_subdiv_relax_explicit.cpp:
+    # out of the build. Subdividing the simplified mesh and relaxing it on the fine MAT
+    # now runs in Python (relaxation_scripts_python/run_relax.py, from correspondence_*.c2f).
     orient_faces_consistently.cpp
     meshlab_qslim_callbacks.cpp
     meshlab_qslim_config.cpp
@@ -42,8 +42,9 @@ set(APP_SRCS
     subdiv_sample_tracker/subdiv_mesh.cpp
     subdiv_sample_tracker/subdiv_struct_ids.cpp
     subdiv_sample_tracker/subdiv_tracker.cpp
-    subdiv_sample_tracker/subdiv_relax.cpp
-    subdiv_sample_tracker/subdiv_relax_solve_project.cpp
+    # subdiv_sample_tracker/subdiv_relax.cpp, subdiv_relax_solve_project.cpp: fine-mesh
+    # relaxation (newton / solve_project), out of the build; subdiv_tracker.cpp guards
+    # its calls with SUBDIV_FINE_RELAX.
     subdiv_sample_tracker/debug_trackers.cpp
 )
 

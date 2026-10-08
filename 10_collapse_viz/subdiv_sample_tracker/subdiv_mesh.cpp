@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <filesystem>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -319,4 +320,16 @@ MatrixXi subdiv_level_faces(const SubdivMesh & M, int level)
         Fl((Index)r, 2) = M.F((Index)(base + 2 * off1), 2);
     }
     return Fl;
+}
+
+std::string subdiv_long_path(const std::string & path)
+{
+#ifdef _WIN32
+    namespace fs = std::filesystem;
+    const std::string abs = fs::absolute(fs::path(path)).lexically_normal().make_preferred().string();
+    if (abs.rfind("\\\\", 0) == 0) return abs;  // already long-path form, or a UNC path
+    return "\\\\?\\" + abs;
+#else
+    return path;
+#endif
 }

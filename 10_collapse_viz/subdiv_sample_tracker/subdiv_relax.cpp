@@ -850,18 +850,6 @@ RelaxReport subdiv_relax(SubdivMesh & M, const MatrixXd & VO, const MatrixXi & F
     return R;
 }
 
-std::string subdiv_long_path(const std::string & path)
-{
-#ifdef _WIN32
-    namespace fs = std::filesystem;
-    const std::string abs = fs::absolute(fs::path(path)).lexically_normal().make_preferred().string();
-    if (abs.rfind("\\\\", 0) == 0) return abs;  // already long-path form, or a UNC path
-    return "\\\\?\\" + abs;
-#else
-    return path;
-#endif
-}
-
 // ---------------------------------------------------------------- quality
 
 MeshQuality subdiv_mesh_quality(const MatrixXd & V, const MatrixXi & F, const MatrixXd * Vref)

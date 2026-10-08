@@ -58,8 +58,6 @@
 #include "visualizer.h"
 #endif
 #include "coarse_fine_viz.h"
-#include "coarse_subdiv_c2f.h"
-#include "coarse_subdiv_relax.h"
 
 #include "load_matstruct.h"
 #include "subdiv_sample_tracker/subdiv_tracker.h"
@@ -360,19 +358,9 @@ static void save_simplified_mesh(const CoarseMeshCompaction & cmc, const std::st
 // Correspondence meshes, named <topology>_at_<positions>:
 //   subdiv_fine_at_coarse_pos_*.obj   subdivided fine mesh, each vertex at its tracked coarse position
 //   subdiv_coarse_at_fine_pos_*.obj   those tracked samples replaced by their fine positions
-//   coarse_subdiv_*.obj               the simplified mesh subdivided (build_subdiv_mesh)
-//   coarse_subdiv_at_fine_pos_*.obj   its vertices mapped to fine with query_coarse_to_fine
-//   coarse_subdiv_at_fine_pos_relaxed_solve_project_*.obj
-//                                     those vertices relaxed on the fine MAT (coarse_subdiv_relax)
+// The subdivided simplified mesh (coarse_subdiv_*) and its relaxation on the fine MAT are
+// no longer built here: relaxation_scripts_python/run_relax.py does both from correspondence_*.c2f.
 static long long gSubdivObjMaxVerts = 2000000;
-// --n_coarse_subdiv_samples N: subdivide the simplified mesh to >= N vertices and map
-// them to fine (default: --n_subdiv_samples; -1 = off)
-static long long gCoarseSubdivSamples = -1;
-// --no_coarse_subdiv_relax: skip relaxing the subdivided coarse mesh on the fine MAT
-static bool   gCoarseSubdivRelax = true;
-static bool   gStructGateOn = false;         // --mat_struct_check (the relaxation needs it)
-static double gRelaxAnchorTol = 3e-3;        // --subdiv_relax_anchor_tol
-static CoarseSubdivRelaxConfig gCoarseRelax;  // --coarse_subdiv_relax_* / --explicit_* flags
 
 static bool export_final_outputs(const std::string & out_dir, const std::string & stem)
 {
@@ -397,33 +385,8 @@ static bool export_final_outputs(const std::string & out_dir, const std::string 
     }
 
     subdiv_tracker_save(lookup, out("subdiv_", ".sdt"));
-    subdiv_tracker_export_deformed_obj(out("subdiv_fine_at_coarse_pos_" + subdiv_tracker_relax_tag(), ".obj"), gSubdivObjMaxVerts);
-    subdiv_tracker_export_coarse_at_fine_obj(out("subdiv_coarse_at_fine_pos_" + subdiv_tracker_relax_tag(), ".obj"), gSubdivObjMaxVerts);
-    if (gCoarseSubdivSamples >= 0) {
-        const CoarseSubdivC2F csub = coarse_subdiv_c2f_build(cmc, gCoarseSubdivSamples);
-        coarse_subdiv_c2f_write(csub, gSubdivObjMaxVerts,
-                                out("coarse_subdiv_", ".obj"), out("coarse_subdiv_at_fine_pos_", ".obj"));
-        coarse_subdiv_c2f_write_clamp_csv(csub, out("coarse_subdiv_c2f_clamp_", ".csv"));
-        if (gCoarseSubdivRelax && (!gHaveMatStruct || !gStructGateOn))
-            fprintf(stderr, "[coarse_subdiv_relax] skipped: needs --matstruct_path and --mat_struct_check "
-                            "(struct IDs of the coarse vertices)\n");
-        else if (gCoarseSubdivRelax)
-        {
-            gCoarseRelax.curveAnchorTol = gRelaxAnchorTol;
-            const CoarseSubdivRelaxConfig & c = gCoarseRelax;
-            coarse_subdiv_relax_export(cmc, csub, gMatStruct, c, gSubdivObjMaxVerts,
-                                       out("coarse_subdiv_at_fine_pos_relaxed_" + c.method
-                                           + (c.perCoarseFace ? "_perface" : "")
-                                           + (c.noNewFolds ? "_nofold" : "")
-                                           + (c.localProjection ? "_local" : "")
-                                           + (c.jointPass ? "_joint" : "")
-                                           + (c.jointSolve ? "_jointsolve" : "")
-                                           + (c.weights != "uniform" ? "_" + c.weights : std::string())
-                                           + (c.method == "explicit" && c.explicitGlobalProj ? "_global" : "")
-                                           + (c.method == "explicit" && c.explicitDirected ? "_directed" : "") + "_", ".obj"),
-                                       out_dir + "laplacian_graph", "coarse_subdiv_" + stem);
-        }
-    }
+    subdiv_tracker_export_deformed_obj(out("subdiv_fine_at_coarse_pos_", ".obj"), gSubdivObjMaxVerts);
+    subdiv_tracker_export_coarse_at_fine_obj(out("subdiv_coarse_at_fine_pos_", ".obj"), gSubdivObjMaxVerts);
     simp_viz_tracker_write_json(cmc, json);
 
     // Re-read the files and cross-check that they agree on the vertex ordering.
@@ -616,10 +579,6 @@ int main(int argc, char * argv[])
     bool        matStructCheck = false;  // --mat_struct_check: enable struct-ID collapse gate
     int         trackFaceFlip     = -1;  // --track_face_flip <idx>
     long long   nSubdivSamples   = -1;   // --n_subdiv_samples N; -1 = subdivided-mesh tracker off
-    bool        subdivRelax      = false; // --subdiv_relax: opt in (off for now: relaxation is not part of the pipeline yet)
-    std::string subdivRelaxMethod = "solve_project";  // --subdiv_relax_method solve_project|newton
-    int         subdivCurveAnchors = 0;        // --subdiv_relax_curve_anchors N (solve_project only; fixed count)
-    double      subdivAnchorTol   = 3e-3;      // --subdiv_relax_anchor_tol t (solve_project only; adaptive)
 
 
     //usage
@@ -632,43 +591,10 @@ int main(int argc, char * argv[])
     // [--seam_pin_fixed]       seam collapses pin vj/vi/merged point to the old fixed UV targets
     //                          instead of their 3D arc-length fractions (default); the fixed
     //                          targets stretch samples unevenly along seams
-    // [--subdiv_relax]         run the structure-aware relaxation of the subdivided vertices
-    //                          (md_files/subdiv_relax_plan.md). Off by default for now: the pipeline
-    //                          tracks the plain midpoint subdivision. --no_subdiv_relax is still accepted.
-    // [--subdiv_relax_method M] solve_project (default: one 3D solve of L x = 0 per pass, then
-    //                          projection; subdiv_relax_solve_project.cpp) | newton (exact resting
-    //                          state, much slower; subdiv_relax.cpp). See md_files/subdiv_tracker_cli.md
-    // [--subdiv_relax_anchor_tol t]  default 3e-3: solve_project only, adaptive anchors: a seam
-    //                          vertex is fixed where the seam leaves the chord between anchors by
-    //                          more than t x bbox diagonal (Douglas-Peucker)
-    // [--subdiv_relax_curve_anchors N]  solve_project only, overrides the adaptive anchors with
-    //                          N vertices per seam/boundary group, evenly spaced along it
-    // [--n_coarse_subdiv_samples N]  default: --n_subdiv_samples. After decimation, subdivide the
-    //                          simplified mesh until it has >= N vertices, map every vertex to the fine
-    //                          mesh (query_coarse_to_fine), write coarse_subdiv_[at_fine_pos_]*.obj
-    // [--no_coarse_subdiv_relax]  skip relaxing those vertices on the fine MAT (on by default; needs
-    //                          --matstruct_path and --mat_struct_check); relaxed result:
-    //                          coarse_subdiv_at_fine_pos_relaxed_<method>_*.obj
-    // [--coarse_subdiv_relax_per_face]  hold the vertices on coarse vertices / edges at their
-    //                          seeds and relax only each coarse face's interior (*_<method>_perface_*.obj)
-    // [--coarse_subdiv_relax_no_new_folds]  newton only: no step may fold a triangle that is not
-    //                          folded at the seed (folded ones may unfold) (*_<method>[_perface]_nofold_*.obj)
-    // [--coarse_subdiv_relax_local_proj]  newton only: project each step to the closest point
-    //                          reachable from the vertex's current location, not the global closest (*_local_*.obj)
-    // [--coarse_subdiv_relax_joint]  newton only: relax curves and sheets in one pass on the symmetric
-    //                          mesh graph (curve vertices also pulled by sheet neighbours) (*_joint_*.obj)
-    // [--coarse_subdiv_relax_joint_solve]  solve_project only: one LU solve of curves + sheets at once
-    //                          (directed graph, DP anchors + junctions fixed), then projection (*_jointsolve_*.obj)
-    // [--coarse_subdiv_relax_method explicit]  small Laplacian steps x <- Pi(x + lambda (mean - x)) on all
-    //                          free vertices at once, symmetric graph, no linear solve
-    //                          (coarse_subdiv_relax_explicit.cpp); snapshots *_it<N>.obj
-    // [--explicit_lambda L]    default 0.5   [--explicit_max_iter N] default 20000
-    // [--explicit_tol T]       default 1e-7 (x diag)   [--explicit_global_proj] global closest point
-    // [--explicit_directed_graph]  explicit: curves pulled only by curve/junction neighbours (directed
-    //                          structure graph), sheets by all; default: symmetric mesh graph (*_directed_*.obj)
-    // [--coarse_subdiv_relax_weights uniform|cotan|meanvalue]  explicit only, default uniform; cotan =
-    //                          cotangent weights of the subdivided coarse mesh at coarse positions (negatives
-    //                          clamped to 0), meanvalue = mean-value weights there (*_cotan_* / *_meanvalue_*.obj)
+    // (fine-mesh relaxation, --subdiv_relax*: out of the build (subdiv_relax*.cpp); the tracker
+    //  follows the plain midpoint subdivision; those flags are ignored here)
+    // (coarse-mesh subdivision + relaxation, --n_coarse_subdiv_samples / --coarse_subdiv_relax_* /
+    //  --explicit_*: moved to relaxation_scripts_python/run_relax.py; those flags are ignored here)
     // [--subdiv_obj_max_verts N]  default: 2000000 — write subdiv_fine_*.obj (incl. subdiv_fine_at_coarse_pos_*.obj)
     //                             only up to N vertices
     // [--track_face_flip F]    face-flip debug tracker on gFO face F (needs --n_subdiv_samples)
@@ -687,26 +613,6 @@ int main(int argc, char * argv[])
 #ifdef SSP_SEAM_UV_PINNING
             gSeamPinArcLength = false;
 #endif
-        } else if (a == "--subdiv_relax") {
-            subdivRelax = true;
-        } else if (a == "--no_subdiv_relax") {
-            subdivRelax = false;
-        } else if (a == "--no_coarse_subdiv_relax") {
-            gCoarseSubdivRelax = false;
-        } else if (a == "--coarse_subdiv_relax_per_face") {
-            gCoarseRelax.perCoarseFace = true;
-        } else if (a == "--coarse_subdiv_relax_no_new_folds") {
-            gCoarseRelax.noNewFolds = true;
-        } else if (a == "--coarse_subdiv_relax_local_proj") {
-            gCoarseRelax.localProjection = true;
-        } else if (a == "--coarse_subdiv_relax_joint") {
-            gCoarseRelax.jointPass = true;
-        } else if (a == "--coarse_subdiv_relax_joint_solve") {
-            gCoarseRelax.jointSolve = true;
-        } else if (a == "--explicit_directed_graph") {
-            gCoarseRelax.explicitDirected = true;
-        } else if (a == "--explicit_global_proj") {
-            gCoarseRelax.explicitGlobalProj = true;
         } else if (i + 1 < argc) {
             if      (a == "--mesh_path")        meshPath          = argv[i+1];
             else if (a == "--target_faces")     targetFaces       = std::stoi(argv[i+1]);
@@ -716,16 +622,6 @@ int main(int argc, char * argv[])
             else if (a == "--track_face_flip")  trackFaceFlip     = std::stoi(argv[i+1]);
             else if (a == "--n_subdiv_samples") nSubdivSamples = std::stoll(argv[i+1]);
             else if (a == "--subdiv_obj_max_verts") gSubdivObjMaxVerts = std::stoll(argv[i+1]);
-            else if (a == "--n_coarse_subdiv_samples") gCoarseSubdivSamples = std::stoll(argv[i+1]);
-            else if (a == "--subdiv_relax_method") subdivRelaxMethod = argv[i+1];
-            else if (a == "--coarse_subdiv_relax_method") gCoarseRelax.method = argv[i+1];
-            else if (a == "--coarse_subdiv_relax_max_iter") gCoarseRelax.maxIter = std::stoll(argv[i+1]);
-            else if (a == "--explicit_lambda") gCoarseRelax.explicitLambda = std::stod(argv[i+1]);
-            else if (a == "--explicit_max_iter") gCoarseRelax.explicitMaxIter = std::stoll(argv[i+1]);
-            else if (a == "--explicit_tol") gCoarseRelax.explicitTol = std::stod(argv[i+1]);
-            else if (a == "--coarse_subdiv_relax_weights") gCoarseRelax.weights = argv[i+1];
-            else if (a == "--subdiv_relax_curve_anchors") subdivCurveAnchors = std::stoi(argv[i+1]);
-            else if (a == "--subdiv_relax_anchor_tol") subdivAnchorTol = std::stod(argv[i+1]);
             else { continue; }
             ++i;
         }
@@ -932,21 +828,10 @@ int main(int argc, char * argv[])
         };
     }
 
-    if (gCoarseSubdivSamples < 0) gCoarseSubdivSamples = nSubdivSamples;
-    gStructGateOn   = matStructCheck;
-    gRelaxAnchorTol = subdivAnchorTol;
     if (nSubdivSamples >= 0) {
         try {
-            subdiv_tracker_init(nSubdivSamples, gHaveMatStruct ? &gMatStruct : nullptr, subdivRelax,
-                                subdivRelaxMethod, subdivCurveAnchors, subdivAnchorTol);
-            const std::string tag = subdiv_tracker_relax_tag();  // "relaxed_<method>_" or ""
-            subdiv_tracker_export_fine_obj(out_dir + "subdiv_fine_" + tag + stem + ".obj", gSubdivObjMaxVerts);
-            subdiv_tracker_export_anchor_ply(out_dir + "subdiv_fine_" + tag + "with_anchors_" + stem + ".ply",
-                                             gSubdivObjMaxVerts);
-            if (subdivRelax) {
-                subdiv_tracker_export_seed_obj(out_dir + "subdiv_fine_seed_" + stem + ".obj", gSubdivObjMaxVerts);
-                subdiv_tracker_export_graph(out_dir + "subdiv_graph_" + stem + ".slg");
-            }
+            subdiv_tracker_init(nSubdivSamples, gHaveMatStruct ? &gMatStruct : nullptr);
+            subdiv_tracker_export_fine_obj(out_dir + "subdiv_fine_" + stem + ".obj", gSubdivObjMaxVerts);
         } catch (const std::exception & e) {
             fprintf(stderr, "[FATAL] %s\n", e.what());
             return 1;

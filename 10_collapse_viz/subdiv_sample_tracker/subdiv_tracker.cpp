@@ -113,6 +113,7 @@ void subdiv_tracker_init(int64_t nTarget, const MatStruct * ms, bool relax, cons
     gRelaxMethod.clear();
     gAnchors.clear();
     gAnchorKey.clear();
+#ifdef SUBDIV_FINE_RELAX
     if (relax) {
         gGraph = build_relax_graph(gM, gPal, gSet, ms);
         gVseed = gM.V;
@@ -152,6 +153,12 @@ void subdiv_tracker_init(int64_t nTarget, const MatStruct * ms, bool relax, cons
             gAnchorKey.push_back(key);
         }
     }
+#else
+    // Fine-mesh relaxation (subdiv_relax.cpp, subdiv_relax_solve_project.cpp) is out of the
+    // build; define SUBDIV_FINE_RELAX and compile those two files to bring it back.
+    (void)method; (void)curveAnchors; (void)curveAnchorTol;
+    if (relax) fail("built without the fine-mesh relaxation (SUBDIV_FINE_RELAX=OFF)");
+#endif
 
     const size_t Vs = gM.carrierType.size();
     gFace.assign(Vs, -1);
@@ -682,7 +689,11 @@ void subdiv_tracker_export_seed_obj(const std::string & path, int64_t maxVerts)
 void subdiv_tracker_export_graph(const std::string & path)
 {
     if (!gEnabled || !gRelaxed) return;
+#ifdef SUBDIV_FINE_RELAX
     save_relax_graph(path, gVseed, gGraph, gPal, gSet);
+#else
+    (void)path;
+#endif
 }
 
 bool subdiv_tracker_relaxed() { return gRelaxed; }
