@@ -131,8 +131,49 @@ def export_relaxed_sdt(path, B, C, sess, M, nRequested):
         np.asarray(pal.typeMask, dtype='u1'),                            # 13 palette_type_mask
         np.asarray(sess.Vseed, dtype='<f8').reshape(Vs, 3),              # 14 sub_V_seed
     ]
-    header = dict(n_levels=int(S.nLevels), relaxed=True, n_samples_requested=int(nRequested), Vs=Vs,
-                  Fs=int(arrays[1].shape[0]), n_fine_verts=int(B.fineV.shape[0]), n_fine_faces=int(B.fineF.shape[0]),
-                  nE=int(arrays[3].shape[0]), n_coarse_verts=int(B.coarseV.shape[0]),
-                  n_coarse_faces=int(B.coarseF.shape[0]), P=int(len(pal.typeMask)), nPI=int(len(pal.ids)))
-    return write_sdt(path, header, arrays)
+    return write_sdt(path, _header(B, S, pal, arrays, True, nRequested), arrays)
+
+
+def export_unrelaxed_sdt(path, B, C, sess, nRequested, snapped=False):
+    """The subdivided coarse mesh WITHOUT relaxation, as an unrelaxed .sdt: version 1, relaxed 0,
+    14 arrays (no sub_V_seed), the layout of the C++ unrelaxed file.
+    snapped False: the samples exactly as the SSP coarse -> fine walk put them (C.P, C.fineFace /
+    C.fineBary; carriers FACE = that fine face). snapped True: the seeds snapped onto their own
+    structure (sess.M, the relaxation's iteration-0 state; curve samples get EDGE carriers)."""
+    from subdiv_mesh import SUBDIV_CARRIER_FACE
+    S, pal = C.S, sess.pal
+    if snapped:
+        M0 = sess.M
+        V, ff, fb = M0.V, M0.fineFace, M0.fineBary
+        ct = np.asarray(M0.carrierType, dtype=np.uint8)
+        ci = np.where(ct == SUBDIV_CARRIER_FACE, np.asarray(M0.fineFace), np.asarray(M0.carrierIndex))
+    else:
+        V, ff, fb = C.P, C.fineFace, C.fineBary
+        ct = np.full(len(ff), SUBDIV_CARRIER_FACE, dtype=np.uint8)
+        ci = np.asarray(ff)
+    Vs = V.shape[0]
+    arrays = [
+        np.asarray(V, dtype='<f8').reshape(Vs, 3),                       # 0  sub_V (no relaxation)
+        np.asarray(S.F, dtype='<i4').reshape(-1, 3),                     # 1  sub_F
+        np.asarray(S.faceOrig, dtype='<i4'),                             # 2  sub_face_orig (coarse face)
+        np.asarray(sess.M.origEdges, dtype='<i4').reshape(-1, 2),        # 3  orig_edges (fine mesh)
+        ct.astype('u1'),                                                 # 4  carrier_type
+        ci.astype('<i4'),                                                # 5  carrier_index
+        np.asarray(ff, dtype='<i4'),                                     # 6  fine_face
+        np.asarray(fb, dtype='<f8').reshape(Vs, 3),                      # 7  fine_bary
+        np.asarray(S.fineFace, dtype='<i4'),                             # 8  coarse_face
+        np.asarray(S.fineBary, dtype='<f8').reshape(Vs, 3),              # 9  coarse_bary
+        np.asarray(sess.setId, dtype='<i4'),                             # 10 struct_set_id
+        np.asarray(pal.offsets, dtype='<i4'),                            # 11 palette_offsets
+        np.asarray(pal.ids, dtype='<i4'),                                # 12 palette_ids
+        np.asarray(pal.typeMask, dtype='u1'),                            # 13 palette_type_mask
+    ]
+    return write_sdt(path, _header(B, S, pal, arrays, False, nRequested), arrays)
+
+
+def _header(B, S, pal, arrays, relaxed, nRequested):
+    return dict(n_levels=int(S.nLevels), relaxed=relaxed, n_samples_requested=int(nRequested),
+                Vs=int(arrays[0].shape[0]), Fs=int(arrays[1].shape[0]), n_fine_verts=int(B.fineV.shape[0]),
+                n_fine_faces=int(B.fineF.shape[0]), nE=int(arrays[3].shape[0]),
+                n_coarse_verts=int(B.coarseV.shape[0]), n_coarse_faces=int(B.coarseF.shape[0]),
+                P=int(len(pal.typeMask)), nPI=int(len(pal.ids)))

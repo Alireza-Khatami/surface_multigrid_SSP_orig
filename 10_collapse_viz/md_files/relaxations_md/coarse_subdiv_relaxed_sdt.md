@@ -149,3 +149,29 @@ Check a run with:
 `python relaxation_scripts_python/check_relaxed_sdt.py --run_dir <run_relax output folder>`.
 
 On ABC 00040057 with the default bundle, 277,700 samples come to about 38 MB.
+
+## Unrelaxed variant: `coarse_subdiv_norelax_<stem>.sdt`
+
+`relaxation_scripts_python/export_sdt_norelax.py` writes the same samples **without relaxation**:
+
+- **Layout:** the C++ unrelaxed layout, which is version 1, relaxed 0 and 14 arrays. There is no
+  `sub_V_seed`, since the positions are the seeds.
+- **Sampling:** the same as `run_relax.py`, and the same sampling flags apply.
+- **Default output:** `sub_V`, `fine_face` and `fine_bary` are exactly where the SSP coarse → fine
+  walk put the samples. Every carrier is FACE, with the index equal to `fine_face`.
+- **`--snap_seeds`:** writes the seeds snapped onto their own structure instead, which is the
+  relaxation's iteration-0 state. Curve samples then get EDGE carriers, and the file is named
+  `coarse_subdiv_norelax_snapped_<stem>.sdt`.
+
+The script reads the file back with `read_sdt.py` and checks it against the SSP run folder:
+- `sub_V` and the positions interpolated from `(fine_face, fine_bary)` equal
+  `coarse_subdiv_at_fine_pos_*.obj` (15 digits) for the default uniform sampling;
+- `sub_F` equals that OBJ's faces;
+- the coarse side equals `coarse_subdiv_*.obj` and `simplified_*.obj`.
+
+```
+cd relaxation_scripts_python
+bash run_norelax_sdt.sh [NAME] [extra flags...]           # default NAME py_norelax_sdt_valid
+bash run_norelax_sdt.sh py_norelax_snapped_sdt_valid --snap_seeds
+python export_sdt_norelax.py --output_dir ../output/relaxation_experiments/py_norelax_sdt_valid
+```
