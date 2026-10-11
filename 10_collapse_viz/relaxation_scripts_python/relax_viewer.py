@@ -298,6 +298,7 @@ class RelaxViewer:
                                    axis=0)
         self.treeDepth = [tree_depths(tr) for tr in sess.proj.trees]
         self.concCache = None
+        self.buildId = getattr(self, 'buildId', 0) + 1
         self.restart('rebuilt (%s)' % run_relax.equal_area_text(self.args))
         self.register_relax_structures()
         self.refresh()
@@ -535,9 +536,14 @@ class RelaxViewer:
         pc.add_color_quantity('random colour', self.colors, enabled=True)
         pc.add_to_group('points')
         self.pc = pc
-        for key, name in self.STEP_MESHES:
+        # a rebuild registers NEW meshes under new names (build number) and removes the old
+        # ones: re-registering a mesh under the same name could leave the old one drawn
+        for _, name in self.STEP_MESHES:
             if ps.has_surface_mesh(name):
                 ps.remove_surface_mesh(name)
+        b = getattr(self, 'buildId', 0)
+        self.STEP_MESHES = tuple((k, n if b == 0 else '%s [build %d]' % (n, b)) for k, n in self.STEP_MESH_BASE)
+        for key, name in self.STEP_MESHES:
             sm = ps.register_surface_mesh(name, self.rel.X, self.F, enabled=self.meshOn[key], edge_width=0.9)
             sm.add_to_group('step meshes')
         self.apply_mesh_looks()
@@ -559,7 +565,8 @@ class RelaxViewer:
         self.update_step_meshes()
         self.update_selection()
 
-    STEP_MESHES = (('committed', 'mesh: committed'), ('step', 'mesh: step y'), ('proj', 'mesh: projection Pi(y)'))
+    STEP_MESH_BASE = (('committed', 'mesh: committed'), ('step', 'mesh: step y'), ('proj', 'mesh: projection Pi(y)'))
+    STEP_MESHES = STEP_MESH_BASE  # names of the current build's step meshes (a rebuild makes new ones)
 
     TRANSP_MODES = ['pretty', 'simple', 'none']
     TRANSP_LABELS = ['pretty (depth peeling, correct layering)', 'simple (fast; back faces show through)',
@@ -821,7 +828,7 @@ class RelaxViewer:
         idx = -1
         if r.structure_name in ('points',):
             idx = r.local_index
-        elif r.structure_name in ('mesh: committed', 'mesh: step y', 'mesh: projection Pi(y)'):
+        elif r.structure_name in [n for _, n in self.STEP_MESHES]:
             if r.structure_data.get('element_type') == 'vertex':
                 idx = r.structure_data.get('index', -1)
         ps.reset_selection()

@@ -93,28 +93,39 @@ def main(argv=None):
                                          'coarse_face', 'coarse_bary', 'struct_set_id', 'sub_V_seed'))
           and len(A['sub_F']) == Fs and len(A['sub_face_orig']) == Fs)
 
-    # 3. fine side
+    # 3. unmapped samples: only coarse vertices that are on no coarse face (isolated in the
+    # decimated mesh); they have fine_face = coarse_face = -1 and zero barycentrics
     ff, fb = A['fine_face'].astype(np.int64), A['fine_bary']
+    cf, cb = A['coarse_face'].astype(np.int64), A['coarse_bary']
     on = ff >= 0
+    un = np.nonzero(~on)[0]
+    used = np.zeros(len(B.coarseV), bool)
+    used[B.coarseF.ravel()] = True
+    isolated = set(np.nonzero(~used)[0].tolist())
+    check('unmapped samples: %d (fine_face = coarse_face = -1, barycentrics 0) = the coarse vertices on no '
+          'coarse face %s' % (len(un), sorted(isolated)),
+          set(un.tolist()) == isolated and np.array_equal(cf < 0, ~on) and not fb[un].any() and not cb[un].any(),
+          'skip these samples (face < 0) when interpolating anything' if len(un) else '')
+
+    # 4. fine side (mapped samples)
     Pf = interp(B.fineV, B.fineF, ff[on], fb[on])
     err = np.abs(Pf - A['sub_V'][on]).max() / diag
-    check('fine side: (fine_face, fine_bary) on the fine mesh = sub_V for %d of %d samples' % (on.sum(), Vs),
-          on.all() and err == 0.0, 'max diff %.3g x diag' % err)
-    check('fine side: barycentrics >= 0 and sum to 1',
-          fb.min() >= 0.0 and np.abs(fb.sum(axis=1) - 1.0).max() <= 1e-12,
-          'min %.3g, max |sum - 1| %.3g' % (fb.min(), np.abs(fb.sum(axis=1) - 1.0).max()))
+    check('fine side: (fine_face, fine_bary) on the fine mesh = sub_V for all %d mapped samples' % on.sum(),
+          err == 0.0, 'max diff %.3g x diag' % err)
+    check('fine side: barycentrics >= 0 and sum to 1 (mapped samples)',
+          fb[on].min() >= 0.0 and np.abs(fb[on].sum(axis=1) - 1.0).max() <= 1e-12,
+          'min %.3g, max |sum - 1| %.3g' % (fb[on].min(), np.abs(fb[on].sum(axis=1) - 1.0).max()))
 
-    # 4. coarse side
-    cf, cb = A['coarse_face'].astype(np.int64), A['coarse_bary']
-    Pc = interp(B.coarseV, B.coarseF, cf, cb)
+    # 5. coarse side (mapped samples)
+    Pc = interp(B.coarseV, B.coarseF, cf[on], cb[on])
     sub = glob.glob(os.path.join(a.run_dir, 'relax_input', '02_subdiv_*.ply'))
     if sub:
         Vc = read_ply(sub[0])[0]
-        e = np.abs(Pc - Vc).max() / diag
+        e = np.abs(Pc - Vc[on]).max() / diag
         check('coarse side: (coarse_face, coarse_bary) on the coarse mesh = the samples\' coarse positions',
-              (cf >= 0).all() and e == 0.0, 'max diff %.3g x diag' % e)
+              e == 0.0, 'max diff %.3g x diag' % e)
     check('coarse side: barycentrics >= 0 and sum to 1; coarse_face / sub_face_orig in range',
-          cb.min() >= 0.0 and np.abs(cb.sum(axis=1) - 1.0).max() <= 1e-12 and cf.max() < len(B.coarseF)
+          cb[on].min() >= 0.0 and np.abs(cb[on].sum(axis=1) - 1.0).max() <= 1e-12 and cf.max() < len(B.coarseF)
           and A['sub_face_orig'].min() >= 0 and A['sub_face_orig'].max() < len(B.coarseF))
 
     # 5. seed / relaxed / faces vs the run's files
@@ -144,13 +155,13 @@ def main(argv=None):
         w = (d11 * r2 - d12 * r1) / den
         q = a_ + v[:, None] * e1 + w[:, None] * e2
         return np.stack([1 - v - w, v, w], 1), np.linalg.norm(Pt - q, axis=1)
-    bs, dist = bary_in(A['sub_V'], ff)
+    bs, dist = bary_in(A['sub_V'][on], ff[on])
     check('sliding: barycentrics recomputed from the relaxed xyz in the stored triangle = the stored ones',
-          np.abs(bs - fb).max() <= 1e-9 and bs.min() >= -1e-9 and dist.max() <= 1e-12 * diag,
-          'max diff %.2e, min %.2e, off-plane %.2e x diag' % (np.abs(bs - fb).max(), bs.min(), dist.max() / diag))
+          np.abs(bs - fb[on]).max() <= 1e-9 and bs.min() >= -1e-9 and dist.max() <= 1e-12 * diag,
+          'max diff %.2e, min %.2e, off-plane %.2e x diag' % (np.abs(bs - fb[on]).max(), bs.min(), dist.max() / diag))
     if inp:
         f0 = read_ply(inp[0])[2]['fine_face'].astype(np.int64)
-        slid = ff != f0
+        slid = (ff != f0) & on
         if slid.any():
             bo, do = bary_in(A['sub_V'][slid], f0[slid])
             out = int(((bo.min(1) < -1e-9) | (do > 1e-9 * diag)).sum())
@@ -195,9 +206,13 @@ def main(argv=None):
           '%d VERTEX' % ((ct == 2).sum(), len(eRows), (ct == 0).sum()),
           set(np.unique(ct).tolist()) <= {0, 1, 2} and ci[ct == 2].max() < len(B.fineF) and badE == 0
           and (eRows.size == 0 or ci[eRows].max() < len(E)), '%d EDGE carriers off their curves' % badE)
-    offSheet = sum(1 for i in np.nonzero(role == 0)[0].tolist() if not (set(ms.faceIds[ff[i]]) & sheetIds[sid[i]]))
+    # a sheet sample whose set has no sheet id is projected onto all faces (global target);
+    # then its face only has to be a face, which it is
+    offSheet = sum(1 for i in np.nonzero((role == 0) & on)[0].tolist()
+                   if sheetIds[sid[i]] and not (set(ms.faceIds[ff[i]]) & sheetIds[sid[i]]))
+    noSheet = int(sum(1 for i in np.nonzero((role == 0) & on)[0].tolist() if not sheetIds[sid[i]]))
     offCurve = 0
-    for i in np.nonzero(role == 1)[0].tolist():
+    for i in np.nonzero((role == 1) & on)[0].tolist():
         nz = [B.fineF[ff[i], c] for c in range(3) if fb[i, c] != 0.0]
         if len(nz) == 1:   # on a fine vertex: some curve edge of the sample's curves at it
             v = nz[0]
@@ -207,11 +222,12 @@ def main(argv=None):
             hit = len(nz) == 2 and bool(edgeCurve.get(matstruct_edge_key(nz[0], nz[1]), set()) & curveIds[sid[i]])
         offCurve += not hit
     check('own structure: %d sheet samples on one of their sheets, %d curve samples on one of their curves, '
-          '%d junction samples' % ((role == 0).sum(), (role == 1).sum(), (role == 3).sum()),
+          '%d junction samples (%d sheet samples have no sheet id: global target)'
+          % ((role == 0).sum(), (role == 1).sum(), (role == 3).sum(), noSheet),
           offSheet == 0 and offCurve == 0, 'off: sheet %d, curve %d' % (offSheet, offCurve))
     jverts = {st.id: set(st.elements) for st in ms.structs if st.type == 3}
     offJ = 0
-    for i in np.nonzero(role == 3)[0].tolist():
+    for i in np.nonzero((role == 3) & on)[0].tolist():
         c = [c for c in range(3) if fb[i, c] == 1.0]
         v = B.fineF[ff[i], c[0]] if c else -1
         offJ += not any(v in jverts.get(j, ()) for j in sets[sid[i]])

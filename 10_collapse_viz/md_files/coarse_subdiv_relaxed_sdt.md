@@ -77,9 +77,9 @@ face row.
 | 3 | `orig_edges` | int32 | nE × 2 | fine-mesh edges (min, max), indexed by EDGE carriers |
 | 4 | `carrier_type` | uint8 | Vs | carrier of the sample's **seed** (its position before relaxation) on the fine mesh: 1 EDGE (samples on a seam / boundary), 2 FACE (all others). 0 VERTEX is not used. |
 | 5 | `carrier_index` | int32 | Vs | FACE: the seed's fine face (gFO row). EDGE: the seed's fine edge (`orig_edges` row). |
-| 6 | `fine_face` | int32 | Vs | fine face (gFO row) of the **relaxed** position |
+| 6 | `fine_face` | int32 | Vs | fine face (gFO row) of the **relaxed** position; -1 for an unmapped sample (see Guarantees) |
 | 7 | `fine_bary` | float64 | Vs × 3 | barycentric coordinates of the relaxed position in `gFO[fine_face]`. On a seam / boundary edge, the coordinate of the third corner is 0. |
-| 8 | `coarse_face` | int32 | Vs | coarse face (Fout row) the sample was made in |
+| 8 | `coarse_face` | int32 | Vs | coarse face (Fout row) the sample was made in; -1 for an unmapped sample |
 | 9 | `coarse_bary` | float64 | Vs × 3 | barycentric coordinates in `Fout[coarse_face]`, exact dyadic values (made by edge midpoints) |
 | 10 | `struct_set_id` | int32 | Vs | index of the sample's struct-id set in the palette |
 | 11 | `palette_offsets` | int32 | P + 1 | set k = `palette_ids[offsets[k] : offsets[k+1]]` |
@@ -137,7 +137,13 @@ nested, so the helper does not apply.
 - Every sheet sample's relaxed fine face is in one of its sheets. Every curve sample's relaxed
   position is on a fine edge of one of its seams / boundaries.
 - Junction samples sit on their junction vertex.
-- Every sample is mapped: no `fine_face` or `coarse_face` is -1.
+- **Unmapped samples.** A coarse vertex that is on no coarse face (an isolated vertex of the
+  decimated mesh) gives a sample with `fine_face = coarse_face = -1` and all-zero barycentrics.
+  Its `sub_V` / `sub_V_seed` are the coarse vertex position, not a point on the fine mesh. All
+  other samples are mapped. Example: ABC 00040093 has 2 such samples (349, 350); ABC 00040057
+  has none.
+  **Consumers must skip samples with `fine_face < 0`, or fail on them.** In numpy, index -1 is
+  the last face, so interpolating through it silently gives 0, e.g. a radius of 0.
 
 Check a run with:
 `python relaxation_scripts_python/check_relaxed_sdt.py --run_dir <run_relax output folder>`.

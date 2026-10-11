@@ -93,6 +93,22 @@ Every `run_relax.py` run also writes `coarse_subdiv_relaxed_<stem>.sdt` (`sdt_io
 - **Spec for consumers:** `md_files/coarse_subdiv_relaxed_sdt.md`.
 - **Check:** `python check_relaxed_sdt.py --run_dir <run>`.
 
+## Radius validation
+
+`validate_radii.py` interpolates the fine MAT vertex radii (from the `.ma_struct`) at the samples
+of a relaxed `.sdt`, using their stored fine face and weights. It then checks each sphere against
+the surface mesh the MAT was computed from:
+1. **Touches the surface:** |distance − r| ≤ tol_touch × diagonal (default 1e-3).
+2. **Two distinct contact points:** at least 1e-3 × diagonal apart. Medial-axis ends with
+   r ≤ tolerance are exempt, because their contacts merge.
+3. **Inside the surface bounding box**, up to tol_touch.
+
+The MAT's own vertices pass the same tests (`--check_mat_vertices`).
+
+Any failure is logged (count and worst samples per check) and raises `RuntimeError`.
+`run_relax.py --surface_mesh <surface.obj>` runs it after the relaxation, and a failure fails
+the run (exit code 1).
+
 ## Equal-area mode (Python only)
 
 `equal_area_refine.py`: before the uniform subdivision, the big coarse faces are split

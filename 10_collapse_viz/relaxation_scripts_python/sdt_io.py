@@ -58,6 +58,50 @@ def write_sdt(path, header, arrays):
     return len(out)
 
 
+def sliding_stats(B, sess, M):
+    """How the relaxation moved the samples across fine triangles: the relaxed location
+    (M.fineFace / M.fineBary) against the seed's fine face (sess.M.fineFace). The barycentrics
+    of the relaxed xyz in the seed triangle are recomputed from the fine mesh: a sample that
+    changed triangle is either outside its seed triangle or on an edge it shares with the new
+    one. Also the unmapped samples and the stored barycentrics' range."""
+    V, F = np.asarray(B.fineV, dtype=np.float64)[:, :3], np.asarray(B.fineF, dtype=np.int64)
+    ff, fb = np.asarray(M.fineFace, dtype=np.int64), np.asarray(M.fineBary, dtype=np.float64)
+    f0 = np.asarray(sess.M.fineFace, dtype=np.int64)
+    X = np.asarray(M.V, dtype=np.float64)
+    on = ff >= 0
+    diag = float(np.linalg.norm(V.max(axis=0) - V.min(axis=0)))
+    changed = on & (f0 >= 0) & (ff != f0)
+    idx = np.nonzero(changed)[0]
+    outside = 0
+    if len(idx):
+        a, b, c = V[F[f0[idx], 0]], V[F[f0[idx], 1]], V[F[f0[idx], 2]]
+        e1, e2, r = b - a, c - a, X[idx] - a
+        d11, d12, d22 = (e1 * e1).sum(1), (e1 * e2).sum(1), (e2 * e2).sum(1)
+        r1, r2 = (r * e1).sum(1), (r * e2).sum(1)
+        den = d11 * d22 - d12 * d12
+        v = (d22 * r1 - d12 * r2) / den
+        w = (d11 * r2 - d12 * r1) / den
+        q = a + v[:, None] * e1 + w[:, None] * e2
+        bo = np.stack([1 - v - w, v, w], 1)
+        outside = int(((bo.min(1) < -1e-9) | (np.linalg.norm(X[idx] - q, axis=1) > 1e-9 * diag)).sum())
+    n = int(len(ff))
+    return dict(samples=n, unmapped=int((~on).sum()), unmappedIds=np.nonzero(~on)[0].tolist()[:20],
+                changedTriangle=int(len(idx)), changedPercent=100.0 * len(idx) / max(1, int(on.sum())),
+                outsideSeedTriangle=outside, onSharedEdge=int(len(idx)) - outside,
+                minBary=float(fb[on].min()) if on.any() else 0.0,
+                maxBarySumErr=float(np.abs(fb[on].sum(1) - 1.0).max()) if on.any() else 0.0)
+
+
+def sliding_text(st):
+    return ('sliding: %d of %d mapped samples (%.1f%%) ended on another fine triangle than their seed '
+            '(%d outside their seed triangle, %d on an edge it shares with the new one); the .sdt stores '
+            'the new triangle | stored barycentrics min %.3g, max |sum - 1| %.3g | unmapped samples (face -1, '
+            'on no coarse face) %d%s'
+            % (st['changedTriangle'], st['samples'] - st['unmapped'], st['changedPercent'],
+               st['outsideSeedTriangle'], st['onSharedEdge'], st['minBary'], st['maxBarySumErr'], st['unmapped'],
+               (' %s' % st['unmappedIds']) if st['unmapped'] else ''))
+
+
 def export_relaxed_sdt(path, B, C, sess, M, nRequested):
     """The relaxed subdivided coarse mesh as .sdt. M: the relaxed mesh (rel.M after
     finish(): V, F, fineFace, fineBary on the fine mesh); sess: its CoarseRelaxSession

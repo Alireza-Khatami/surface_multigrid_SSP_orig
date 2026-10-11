@@ -304,8 +304,9 @@ def main():
     v.apply_transparency_mode()
     v.meshTransp, v.meshCull, v.fineTransp = 0.5, True, 0.6
     v.apply_mesh_looks()
-    okt = (abs(v.ps.get_surface_mesh('mesh: committed').get_transparency() - 0.5) < 1e-6
-           and v.ps.get_surface_mesh('mesh: committed').get_back_face_policy() == 'cull'
+    cm = v.STEP_MESHES[0][1]
+    okt = (abs(v.ps.get_surface_mesh(cm).get_transparency() - 0.5) < 1e-6
+           and v.ps.get_surface_mesh(cm).get_back_face_policy() == 'cull'
            and abs(v.ps.get_surface_mesh('fine MAT').get_transparency() - 0.6) < 1e-6)
     print('transparency controls: %s' % okt)
     ok &= okt
@@ -329,6 +330,11 @@ def main():
         v.step(1)
         r2.step()
     okr &= np.array_equal(C2.S.F, v.F) and same_state(v.rel, r2)
+    # the rebuilt step meshes are new structures (new names), the old ones are gone
+    okr &= all(v.ps.has_surface_mesh(n) and n.endswith('[build %d]' % v.buildId) for _, n in v.STEP_MESHES)
+    okr &= not any(v.ps.has_surface_mesh(n) for _, n in v.STEP_MESH_BASE)
+    okr &= all(v.ps.get_surface_mesh(n).n_vertices() == v.Vs for _, n in v.STEP_MESHES)
+    okr &= all(v.meshPushed[k][0] == v.iters and len(v.meshPushed[k][1]) == v.Vs for k, _ in v.STEP_MESHES)
     print('rebuild: equal-area split to 60000 + flips -> %d samples, %d faces, run %d; 2 steps == fresh run: %s'
           % (v.Vs, v.F.shape[0], v.runId, same_state(v.rel, r2)))
     v.sampling.update(mode=0, n=200000, flips=False)

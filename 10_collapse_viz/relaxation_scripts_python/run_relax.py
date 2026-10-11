@@ -68,7 +68,7 @@ from bundle_io import load_bundle_flat  # noqa: E402
 from c2f_walk import coarse_subdiv_c2f_build  # noqa: E402
 from equal_area_refine import refine_from_args, target_arg, target_on  # noqa: E402
 from relax_exports import export_relax_input  # noqa: E402
-from sdt_io import export_relaxed_sdt  # noqa: E402
+from sdt_io import export_relaxed_sdt, sliding_stats, sliding_text  # noqa: E402
 from coarse_subdiv_relax import CoarseSubdivRelaxConfig, coarse_subdiv_relax_export, relaxed_obj_prefix  # noqa: E402
 from matstruct import load_matstruct  # noqa: E402
 from obj_io import read_obj, write_obj  # noqa: E402
@@ -124,6 +124,9 @@ def parse_args(argv=None):
     p.add_argument('--equal_area_target', type=target_arg, default=-1.0)
     p.add_argument('--equal_area_samples', type=int, default=0)
     p.add_argument('--delaunay_flips', action='store_true')
+    p.add_argument('--surface_mesh', default=None, help='surface mesh the MAT was computed from: validate the '
+                   'interpolated radii after the relaxation (validate_radii.py); a failure fails the run')
+    p.add_argument('--radii_tol_touch', type=float, default=1e-3)
     p.add_argument('--delaunay_scope', default='sheet', choices=['sheet', 'face'])
     p.add_argument('--no_input_ply', action='store_true')
     return p.parse_args(argv)
@@ -275,6 +278,13 @@ def main(argv=None):
         nReq = a.equal_area_samples if a.equal_area_samples > 0 else a.n_coarse_subdiv_samples
         nb = export_relaxed_sdt(sdtPath, B, C, held['sess'], M, nReq)
         log('[run_relax] relaxed coarse <-> fine correspondence -> %s (%.1f MB)' % (sdtPath, nb / 1048576.0))
+        slide = sliding_stats(B, held['sess'], M)
+        log('[run_relax] ' + sliding_text(slide))
+        radii = None
+        if a.surface_mesh:
+            # interpolated radii vs the surface (touch, two contacts, bbox); raises on failure
+            from validate_radii import validate
+            radii = validate(sdtPath, a.matstruct_path, a.surface_mesh, B.fineF, a.radii_tol_touch)
         result = [
             '[relax_explicit] %s after %d iterations (last max move %.3g x diag) | move max %.3g mean %.3g (x diag) | '
             'folded %d -> %d, moves held back %d' % ('converged' if R.converged else 'NOT CONVERGED', R.itersSheet,
@@ -283,9 +293,11 @@ def main(argv=None):
             'quality before -> after: edge CV %.4f -> %.4f | min angle p1 %.3f -> %.3f, p5 %.3f -> %.3f, median '
             '%.3f -> %.3f deg | degenerate %d -> %d | flipped vs seed %d'
             % (q0.edgeCV, q1.edgeCV, q0.p1, q1.p1, q0.p5, q1.p5, q0.median, q1.median, q0.degenerate,
-               q1.degenerate, q1.flippedVsRef)]
+               q1.degenerate, q1.flippedVsRef),
+            sliding_text(slide)]
         res = dict(folder=os.path.basename(os.path.normpath(out_dir)), config=dataclasses.asdict(cfg),
                    equal_area=equal_area_text(a), n_subdiv_verts=int(C.S.V.shape[0]), flips=C.flipStats,
+                   sliding=slide, radii=radii,
                    n_subdiv_faces=int(C.S.F.shape[0]),
                    report=dataclasses.asdict(R), quality_before=dataclasses.asdict(q0),
                    quality_after=dataclasses.asdict(q1), seconds=time.perf_counter() - t0, relaxed_obj=objPath)
