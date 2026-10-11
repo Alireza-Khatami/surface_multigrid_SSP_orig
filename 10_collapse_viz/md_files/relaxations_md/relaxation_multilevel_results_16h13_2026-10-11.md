@@ -96,4 +96,44 @@ had to stay at its seed (unmapped, junction or no target).
 
 ## 3000 iterations on each level
 
-(filled in below once run)
+Run: `bash run_multilevel.sh py_ml3_momentum_3000x3_valid 3000,3000,3000`. Folder
+`py_ml3_momentum_3000x3_valid`.
+
+| level | samples | relax s | edge CV start → end | min angle p1 / p5 / median at end | folded start → end | degenerate | adaptive restarts | last max move (× diag) |
+|---|---|---|---|---|---|---|---|---|
+| 0 | 17,356 | 8.8 | 0.306 → 0.233 | 21.96 / 30.74 / 49.48 | 51 → 16 | 0 | 28 | 1.1e-7 |
+| 1 | 69,425 | 33.5 | 0.266 → 0.223 | 23.47 / 33.36 / 51.11 | 162 → 91 | 3 | 41 | 3.7e-7 |
+| 2 | 277,700 | 143.5 | 0.246 → 0.218 | 24.48 / 34.79 / 51.94 | 485 → 339 | 14 | 27 | 3.3e-6 |
+
+Total: 185.9 s of relaxation, 219 s wall time. The `.sdt` check passes. 60.2% of the samples
+ended on another fine triangle than their seed.
+
+**Against the other runs** (final mesh):
+
+| run | iterations | relax s | edge CV | min angle p1 / p5 / median | folded | degenerate |
+|---|---|---|---|---|---|---|
+| 3 levels | 300,100,100 | 9.2 | 0.2165 | 24.25 / 34.62 / 51.13 | 334 | 16 |
+| **3 levels** | **3000,3000,3000** | **185.9** | 0.2178 | 24.48 / 34.79 / **51.94** | 339 | 14 |
+| single-level momentum | 300 | 20.2 | **0.2126** | 24.09 / 34.45 / 49.91 | **303** | 7 |
+| single-level momentum (`py_eqs278k_flip_momentum_b09_7k_valid`) | 7000 | 346.7 | 0.2172 | 24.53 / 34.66 / 51.7 | 302 | 5 |
+
+**Observations:**
+- **Ten to thirty times more iterations change little.**
+  - Median angle 51.13 → 51.94 and p1 24.25 → 24.48.
+  - Edge CV creeps up 0.2165 → 0.2178, the same drift the long single-level runs show.
+  - Folds 334 → 339 and degenerate triangles 16 → 14.
+  - The end state is close to single-level momentum at 7000 iterations, except for about 37
+    more folds and 9 more degenerate triangles.
+- **The folds are stuck on every level.**
+  - Level 0 ends at 16 folds after 300 iterations and after 3000.
+  - Level 1 ends at 90 vs 91; level 2 at 334 vs 339.
+  - More iterations don't remove them, which fits the explanation that folds left on a coarse
+    level are carried up and kept. Still unverified: it needs locating the final folds against
+    the level-0 folds (the `folded` face property in `levels/level<l>/07_relaxed`).
+- **No level converges** to the 1e-7 × diagonal stop rule, although level 0 comes close
+  (1.1e-7).
+- **The adaptive restart triggers here (27–41 times per level).** It never triggered in the single-level
+  2000- and 7000-iteration runs. Each level starts from an already-balanced state, so momentum
+  overshoots earlier.
+- **Conclusion:** 3000 iterations per level isn't worth it. 300,100,100 gives nearly the same
+  mesh in 9 s instead of 186 s.
