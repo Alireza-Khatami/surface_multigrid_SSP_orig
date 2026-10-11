@@ -185,3 +185,39 @@ Run folders in `output/relaxation_experiments/`:
 - explicit: `py_eqs278k_flip_nofold_global_2k_valid`
 
 Table: `py_experiments_results_accel_valid.md`.
+
+## Hold-back (no-new-folds) off (added 14h12, 2026-10-11)
+
+These runs repeat the setup with the no-new-folds rule switched off. The seed has 595 folded
+triangles in every run. Times are wall-clock and noisy: other runs shared the machine.
+
+| method | hold-back | iteration | edge CV | min angle p1 / p5 / median | folded | degenerate |
+|---|---|---|---|---|---|---|
+| explicit | on | 1000 | 0.2121 | 22.6 / 33.9 / 49.2 | 308 | 6 |
+| explicit | off | 1000 | 0.2120 | 22.8 / 34.0 / 49.2 | 420 | 17 |
+| explicit | off | 2000 | 0.2121 | 23.8 / 34.5 / 49.6 | 392 | 22 |
+| momentum β 0.9 | on | 300 | 0.2126 | 24.1 / 34.5 / 49.9 | 303 | 7 |
+| momentum β 0.9 | off | 300 | 0.2125 | 24.3 / 34.6 / 50.0 | 390 | 23 |
+| momentum β 0.9 | on | 2000 | 0.2158 | 24.6 / 34.7 / 51.3 | 303 | 5 |
+| momentum β 0.9 | off | 2000 | 0.2156 | 24.8 / 34.8 / 51.3 | 392 | 18 |
+| implicit τ 10 | on | 300 | 0.4636 | 8.0 / 23.3 / 46.7 | 282 | 2085 |
+| implicit τ 10 | off | 300 | 0.4607 | 8.7 / 25.3 / 47.0 | **2140** | 3083 |
+
+What the hold-back does:
+- **It barely changes edge evenness or angles.** With it off, edge CV is the same within 0.0003
+  and the angles are 0.1–0.2° better. The few moves it refuses cost almost nothing in quality.
+- **It keeps folds and degenerate triangles down.**
+  - Explicit and momentum: with it on, folds go 595 → about 303 and stay there. With it off,
+    folds go 595 → about 390, and there are 3–4× more degenerate triangles (18–23 vs 5–7).
+  - Both methods still remove about a third of the seed's folds without it.
+- **The implicit step is bad with or without it.** Without the hold-back, its edge CV is still
+  0.46 and its folds jump to 2140. So the hold-back is not what made the implicit step fail; the
+  3D averaging across curved sheets is (see `momentum_and_implicit_explained_14h12_2026-10-11.md`).
+
+Recommendation: keep the hold-back on. The best setup stays momentum β 0.9 with the hold-back,
+about 300–1000 iterations.
+
+Runs, all in `output/relaxation_experiments/`:
+- `py_eqs278k_flip_nohold_global_2k_valid`
+- `py_eqs278k_flip_momentum_b09_nohold_2k_valid`
+- `py_eqs278k_flip_implicit_t10_nohold_300_valid`

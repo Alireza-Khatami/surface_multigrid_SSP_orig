@@ -62,7 +62,8 @@ def _fail(msg):
 class RefinedCoarse:
     """F: refined faces (int64), faceOrig: coarse face of each, carrierType /
     carrierIndex / carrierCoord: carrier of each refined vertex on the coarse mesh
-    (vertices 0..|VO|-1 are the coarse vertices), V: positions on the coarse geometry."""
+    (vertices 0..|VO|-1 are the coarse vertices), V: positions on the coarse geometry,
+    splitParents: row v - |VO| = the edge (a, b) whose midpoint vertex v is (a, b < v)."""
     pass
 
 
@@ -87,6 +88,7 @@ def refine_equal_area(VO, FO, Astar, maxFaces=50000000, maxVerts=None):
     ccoord = [(1.0, 0.0, 0.0)] * nVO
     P = [tuple(r) for r in VO.tolist()]
 
+    splitParents = []  # the edge (a, b) whose midpoint each new vertex is (relax_multilevel.py)
     faces = [list(r) for r in FOl]
     parent = list(range(nFO))
     alive = [True] * nFO
@@ -181,6 +183,7 @@ def refine_equal_area(VO, FO, Astar, maxFaces=50000000, maxVerts=None):
             elif c != car:
                 _fail('faces around edge (%d, %d) disagree on its midpoint' % (a, b))
         m = len(ctype)
+        splitParents.append((a, b))
         ctype.append(car[0]); cidx.append(car[1]); ccoord.append(car[2])
         pa, pb = P[a], P[b]
         P.append((0.5 * (pa[0] + pb[0]), 0.5 * (pa[1] + pb[1]), 0.5 * (pa[2] + pb[2])))
@@ -244,6 +247,7 @@ def refine_equal_area(VO, FO, Astar, maxFaces=50000000, maxVerts=None):
     R.carrierIndex = cidx
     R.carrierCoord = ccoord
     R.V = np.array(P, dtype=np.float64)
+    R.splitParents = np.array(splitParents, dtype=np.int64).reshape(-1, 2)  # row v - |VO|: parents of vertex v
     R.Astar = Astar if maxVerts is None else float(tri_areas(R.V, R.F).max())  # sample mode: largest area left
 
     # conformity: a refined edge inside a coarse face has 2 faces, one on a coarse

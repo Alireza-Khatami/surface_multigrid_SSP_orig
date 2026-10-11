@@ -10,7 +10,8 @@ checks it against the bundle, the .ma_struct and the run's other outputs:
      >= 0 and sum 1
   4. coarse side: (coarse_face, coarse_bary) interpolated on the coarse mesh = the
      sample's position on the coarse geometry (relax_input/02_subdiv PLY)
-  5. sub_V_seed = the relaxation input (relax_input/04_relax_input PLY); sub_V = the relaxed
+  5. sub_V_seed = the relaxation input (relax_input/04_relax_input PLY; multilevel runs:
+     the final level's c2f seeds, 04s_c2f_seeds PLY); sub_V = the relaxed
      OBJ (15 digits); sub_F = the relaxed OBJ's faces
   6. carriers: FACE -> a fine face; EDGE -> a fine edge (orig_edges row) whose ends are fine
      vertices on one seam / boundary of the sample's struct set
@@ -130,7 +131,15 @@ def main(argv=None):
 
     # 5. seed / relaxed / faces vs the run's files
     inp = glob.glob(os.path.join(a.run_dir, 'relax_input', '04_relax_input_*.ply'))
-    if inp:
+    seeds = glob.glob(os.path.join(a.run_dir, 'relax_input', '04s_c2f_seeds_*.ply'))
+    if seeds:
+        # relax_multilevel.py: sub_V_seed = the final level's c2f seeds; 04_relax_input is the
+        # start prolonged from the coarser level
+        inp = seeds
+        Vi = read_ply(inp[0])[0]
+        check('sub_V_seed = the c2f seeds of the final level (multilevel run, 04s_c2f_seeds PLY)',
+              np.array_equal(Vi, A['sub_V_seed']))
+    elif inp:
         Vi = read_ply(inp[0])[0]
         check('sub_V_seed = the relaxation input (04_relax_input PLY)', np.array_equal(Vi, A['sub_V_seed']))
     objs = [o for o in glob.glob(os.path.join(a.run_dir, 'coarse_subdiv_at_fine_pos_relaxed_*.obj'))

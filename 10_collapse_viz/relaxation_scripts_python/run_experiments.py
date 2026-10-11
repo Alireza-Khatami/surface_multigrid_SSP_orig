@@ -35,6 +35,9 @@ MS = ('D:/datasets/abc_full_10k/out_ABC_v6_knn_poission40_20_15_10/'
 E = ['--coarse_subdiv_relax_method', 'explicit']
 NF = ['--coarse_subdiv_relax_no_new_folds']
 IT = ['--explicit_max_iter', '2000']
+MOM = ['--coarse_subdiv_relax_method', 'momentum', '--momentum_beta', '0.9']
+B278 = ['--explicit_global_proj', '--equal_area_samples', '277700', '--delaunay_flips']
+ML = ['@multilevel']  # first flag: run relax_multilevel.py instead of run_relax.py
 
 # name -> (description, flags)
 SETS = {
@@ -60,6 +63,22 @@ SETS = {
          ['--coarse_subdiv_relax_method', 'momentum', '--momentum_beta', '0.9'] + NF + IT
          + ['--explicit_global_proj', '--equal_area_samples', '277700', '--delaunay_flips',
             '--snapshot_iters', '10,30,100,300,1000,2000']),
+        ('py_eqs278k_flip_momentum_b09_7k', 'B with momentum beta 0.9 (adaptive restart), 7000 iterations',
+         ['--coarse_subdiv_relax_method', 'momentum', '--momentum_beta', '0.9'] + NF
+         + ['--explicit_max_iter', '7000', '--explicit_global_proj', '--equal_area_samples', '277700',
+            '--delaunay_flips', '--snapshot_iters', '100,300,1000,2000,3000,5000,7000']),
+        # the same with the no-new-folds hold-back OFF
+        ('py_eqs278k_flip_nohold_global_2k', 'B explicit, hold-back (no-new-folds) OFF, 2000 iterations',
+         E + IT + ['--explicit_global_proj', '--equal_area_samples', '277700', '--delaunay_flips',
+                   '--snapshot_iters', '10,30,100,300,1000,2000']),
+        ('py_eqs278k_flip_momentum_b09_nohold_2k', 'B momentum beta 0.9, hold-back (no-new-folds) OFF, 2000 iterations',
+         ['--coarse_subdiv_relax_method', 'momentum', '--momentum_beta', '0.9'] + IT
+         + ['--explicit_global_proj', '--equal_area_samples', '277700', '--delaunay_flips',
+            '--snapshot_iters', '10,30,100,300,1000,2000']),
+        ('py_eqs278k_flip_implicit_t10_nohold_300', 'B implicit tau 10, hold-back (no-new-folds) OFF, 300 iterations',
+         ['--coarse_subdiv_relax_method', 'implicit', '--implicit_tau', '10', '--explicit_max_iter', '300',
+          '--explicit_global_proj', '--equal_area_samples', '277700', '--delaunay_flips',
+          '--snapshot_iters', '10,30,100,300']),
         ('py_eqs278k_flip_implicit_t10_300', 'B with the implicit step, tau 10, 300 iterations',
          ['--coarse_subdiv_relax_method', 'implicit', '--implicit_tau', '10'] + NF
          + ['--explicit_max_iter', '300', '--explicit_global_proj', '--equal_area_samples', '277700',
@@ -85,6 +104,23 @@ SETS = {
          E + NF + IT + ['--explicit_global_proj', '--equal_area_samples', '277700', '--delaunay_flips',
                         '--coarse_subdiv_relax_weights', 'cotan']),
         ('py_eqarea2_nofold_2k', 'current best (existing run)', None),
+    ],
+    # coarse-to-fine (relax_multilevel.py, flags after ML): relax N/16, refine the relaxed mesh to
+    # N/4, relax, refine to N, relax; B's setup with momentum beta 0.9 (or explicit)
+    'multilevel': [
+        ('py_eqs278k_flip_momentum_b09_300', 'B momentum beta 0.9, single level, 300 iterations',
+         MOM + NF + B278 + ['--explicit_max_iter', '300', '--snapshot_iters', '30,100,300']),
+        ('py_ml3_momentum_300_100_100', 'multilevel 3 levels (ratio 4), B momentum beta 0.9, iterations 300,100,100',
+         ML + ['--levels', '3', '--level_iters', '300,100,100'] + MOM + NF + B278),
+        ('py_ml3_momentum_300_100_30', 'multilevel 3 levels (ratio 4), B momentum beta 0.9, iterations 300,100,30',
+         ML + ['--levels', '3', '--level_iters', '300,100,30'] + MOM + NF + B278),
+        ('py_ml4_momentum_300_100_100_100', 'multilevel 4 levels (ratio 4), B momentum beta 0.9, '
+         'iterations 300,100,100,100', ML + ['--levels', '4', '--level_iters', '300,100,100,100'] + MOM + NF + B278),
+        ('py_ml3_momentum_300_100_300', 'multilevel 3 levels (ratio 4), B momentum beta 0.9, iterations 300,100,300',
+         ML + ['--levels', '3', '--level_iters', '300,100,300'] + MOM + NF + B278),
+        ('py_eqs278k_flip_nofold_global_2k', 'B: explicit, single level, 2000 iterations (existing run)', None),
+        ('py_ml3_explicit_1000_300_300', 'multilevel 3 levels (ratio 4), B explicit, iterations 1000,300,300',
+         ML + ['--levels', '3', '--level_iters', '1000,300,300'] + E + NF + B278),
     ],
     # equal-area refinement of the coarse mesh before the subdivision (equal_area_refine.py);
     # flags None: an existing run, listed in the table for comparison
@@ -177,8 +213,12 @@ def main():
             out = os.path.join(EXP_ROOT, name + a.suffix)
             desc = '%s [bundle of C++ run %s]' % (desc, a.source_run)
             print('=== %s: %s' % (name + a.suffix, desc), flush=True)
-            run_relax.main(['--bundle', bundle, '--matstruct_path', MS, '--output_dir', out,
-                            '--no_subdiv_objs', '--description', desc] + flags)
+            entry = run_relax.main
+            if flags[0] == ML[0]:
+                import relax_multilevel
+                entry, flags = relax_multilevel.main, flags[1:]
+            entry(['--bundle', bundle, '--matstruct_path', MS, '--output_dir', out,
+                   '--no_subdiv_objs', '--description', desc] + flags)
     write_table([e[0] + a.suffix for e in SETS[a.set]],
                 'py_experiments_results' + ('' if a.set == 'default' else '_' + a.set) + a.suffix)
 
