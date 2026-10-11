@@ -90,7 +90,7 @@ Every `run_relax.py` run also writes `coarse_subdiv_relaxed_<stem>.sdt` (`sdt_io
 - **Content:** each sample of the subdivided coarse mesh with its coarse location
   (`coarse_face`, `coarse_bary`, unchanged) and its fine location after relaxation (`fine_face`,
   `fine_bary`).
-- **Spec for consumers:** `md_files/coarse_subdiv_relaxed_sdt.md`.
+- **Spec for consumers:** `md_files/relaxations_md/coarse_subdiv_relaxed_sdt.md`.
 - **Check:** `python check_relaxed_sdt.py --run_dir <run>`.
 
 ## Radius validation
@@ -125,7 +125,7 @@ the refined coarse OBJ): `python equal_area_refine.py --bundle <...>.c2f --equal
 
 `relax_viewer.py`: polyscope viewer that runs the relaxation one step at a time and shows each
 step's checkpoint (x, y, Pi(y), committed, search region, BVH). The configuration can be switched
-between steps. Spec: `md_files/relaxation_step_visualizer.md`. Headless test: `test_viewer.py`.
+between steps. Spec: `md_files/relaxations_md/relaxation_step_visualizer.md`. Headless test: `test_viewer.py`.
 The "Export (PLY)" panel has one button per mesh:
 - relaxation input
 - committed

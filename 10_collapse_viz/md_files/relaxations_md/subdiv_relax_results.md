@@ -1,6 +1,6 @@
 # Subdivided-sample relaxation: results (2026-09-27)
 
-Plan and implementation notes: `md_files/subdiv_relax_plan.md`.
+Plan and implementation notes: `md_files/relaxations_md/subdiv_relax_plan.md`.
 
 Relaxation is implemented and on by default. At every level tested (0–5), the
 result passes the definition: one more relaxation step

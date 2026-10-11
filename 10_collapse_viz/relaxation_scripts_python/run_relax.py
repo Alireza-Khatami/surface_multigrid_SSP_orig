@@ -10,7 +10,12 @@ collapse_viz_bin (main.cpp):
 (output/relaxation_experiments/src_qslim200_valid) and its .ma_struct.
 
 Relaxation flags (as in main.cpp):
-  --coarse_subdiv_relax_method explicit   (the only ported method; C++ default: newton)
+  --coarse_subdiv_relax_method explicit   (ported from C++; C++ default: newton)
+  --coarse_subdiv_relax_method momentum   Python-only: explicit + heavy-ball momentum (relax_momentum.py)
+                                          --momentum_beta B (0.9), --momentum_no_restart
+  --coarse_subdiv_relax_method implicit   Python-only: backward-Euler step, CG solve (relax_implicit.py)
+                                          --implicit_tau T (10), --implicit_cg_tol (1e-8),
+                                          --implicit_cg_max_iter (1000); symmetric graph only
   --coarse_subdiv_relax_per_face          hold vertices on coarse vertices / edges at their seeds
   --coarse_subdiv_relax_no_new_folds      no step may fold a triangle that is not folded
   --coarse_subdiv_relax_local_proj        newton only in C++ (only adds _local to the file name)
@@ -45,7 +50,7 @@ Python-only extras:
   --delaunay_scope S        sheet (default: also coarse edges inside a sheet) | face (only inside
                             one coarse face)
   (always written: coarse_subdiv_relaxed_<stem>.sdt, the relaxed coarse <-> fine correspondence
-   in the collapse_viz_bin .sdt format; spec md_files/coarse_subdiv_relaxed_sdt.md)
+   in the collapse_viz_bin .sdt format; spec md_files/relaxations_md/coarse_subdiv_relaxed_sdt.md)
   --no_input_ply            do not write relax_input/*.ply (default: written, see relax_exports.py:
                             coarse mesh, equal-area refined mesh if on, subdivided mesh, its c2f
                             positions, and the relaxation input at the relaxer's initialization)
@@ -124,6 +129,11 @@ def parse_args(argv=None):
     p.add_argument('--equal_area_target', type=target_arg, default=-1.0)
     p.add_argument('--equal_area_samples', type=int, default=0)
     p.add_argument('--delaunay_flips', action='store_true')
+    p.add_argument('--momentum_beta', type=float, default=0.9)
+    p.add_argument('--momentum_no_restart', action='store_true')
+    p.add_argument('--implicit_tau', type=float, default=10.0)
+    p.add_argument('--implicit_cg_tol', type=float, default=1e-8)
+    p.add_argument('--implicit_cg_max_iter', type=int, default=1000)
     p.add_argument('--surface_mesh', default=None, help='surface mesh the MAT was computed from: validate the '
                    'interpolated radii after the relaxation (validate_radii.py); a failure fails the run')
     p.add_argument('--radii_tol_touch', type=float, default=1e-3)
@@ -194,6 +204,11 @@ def config_from_args(a):
     c.explicitGlobalProj = not a.explicit_local_proj  # global by default
     c.explicitDirected = a.explicit_directed_graph
     c.weights = a.coarse_subdiv_relax_weights
+    c.momentumBeta = a.momentum_beta
+    c.momentumRestart = not a.momentum_no_restart
+    c.implicitTau = a.implicit_tau
+    c.implicitCgTol = a.implicit_cg_tol
+    c.implicitCgMaxIter = a.implicit_cg_max_iter
     c.logEvery = a.log_every
     c.snapshotIters = tuple(int(x) for x in a.snapshot_iters.split(',') if x.strip())
     return c
@@ -240,6 +255,11 @@ def main(argv=None):
                    'global' if cfg.explicitGlobalProj else 'local',
                    'directed' if cfg.explicitDirected and not cfg.jointPass else 'symmetric',
                    cfg.weights, 'on' if cfg.noNewFolds else 'off', 'on' if cfg.perCoarseFace else 'off'))
+        if cfg.method == 'momentum':
+            f.write('method params: momentum beta %g, adaptive restart %s\n' % (cfg.momentumBeta, cfg.momentumRestart))
+        if cfg.method == 'implicit':
+            f.write('method params: implicit tau %g, CG tol %g, CG max %d iterations\n'
+                    % (cfg.implicitTau, cfg.implicitCgTol, cfg.implicitCgMaxIter))
         f.write('output:       %s , log %s\n' % (out_dir, logPath))
         f.write('command:      %s\n' % cmd)
 

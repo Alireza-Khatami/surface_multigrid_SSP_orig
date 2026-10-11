@@ -412,6 +412,15 @@ class ExplicitRelaxer:
     def energy(self, P):
         return energy(P, self.rowOffs, self.cols, self.wts, self.uniformRow)
 
+    def _propose(self, trace):
+        """The candidate of every free vertex: nX / nFace / nEdge / nBary / move (and the
+        projection stats). The explicit step: x + lam (mean - x), projected. Subclasses
+        (relax_momentum.py, relax_implicit.py) replace only this part of step()."""
+        step_kernel(self.lst, self.rowOffs, self.cols, self.wts, self.uniformRow, self.X, self.face, self.edge,
+                    self.setId, self.opt.lam, self.opt.localProjection, self.PJ, self.proj.scratch, self.nX,
+                    self.nFace, self.nEdge, self.nBary, self.move, self.s_onb, self.s_fix, self.s_dist,
+                    self.s_grown, self.s_global, trace.buffers() if trace is not None else _NO_TR)
+
     def step(self, trace=None):
         """One iteration. trace: a StepTrace to fill (checkpoints), or None.
         Returns the largest move of the step."""
@@ -428,10 +437,7 @@ class ExplicitRelaxer:
             trace.winLeaf[:] = -1
             trace.watchN[0] = 0
             trace.local = bool(opt.localProjection)
-        step_kernel(lst, self.rowOffs, self.cols, self.wts, self.uniformRow, X, face, edge, self.setId,
-                    opt.lam, opt.localProjection, self.PJ, self.proj.scratch, nX, nFace, nEdge, nBary, move,
-                    self.s_onb, self.s_fix, self.s_dist, self.s_grown, self.s_global,
-                    trace.buffers() if trace is not None else _NO_TR)
+        self._propose(trace)
         if trace is not None:
             trace.P[:] = X
             trace.P[lst] = nX[lst]

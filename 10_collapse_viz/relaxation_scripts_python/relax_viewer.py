@@ -1,4 +1,4 @@
-"""Step viewer for the explicit relaxation (spec: md_files/relaxation_step_visualizer.md).
+"""Step viewer for the explicit relaxation (spec: md_files/relaxations_md/relaxation_step_visualizer.md).
 
 Runs the relaxation one iteration at a time (ExplicitRelaxer, the code verified
 against the C++) and shows what each iteration computed. Nothing about the

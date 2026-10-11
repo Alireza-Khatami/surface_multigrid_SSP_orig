@@ -1,7 +1,7 @@
 # Test scripts: coarse-subdivision relaxation
 
 Analysis scripts for the relaxation of the subdivided coarse mesh on the fine
-MAT (`coarse_subdiv_relax.cpp`, results in `md_files/coarse_subdiv_relax_results.md`).
+MAT (`coarse_subdiv_relax.cpp`, results in `md_files/relaxations_md/coarse_subdiv_relax_results.md`).
 Run them from this folder; a `<run_dir>` is one run's `--output_dir`, e.g.
 `../output/relaxation_experiments/base_newton`.
 
@@ -14,6 +14,7 @@ Run them from this folder; a `<run_dir>` is one run's `--output_dir`, e.g.
 | `snapshot_table.py` | explicit runs: folded / removed / new / degenerate / edge CV at every `_it<N>` snapshot |
 | `step_size_table.py` | explicit runs with different lambda: folded / degenerate / energy at equal lambda x iterations, from the logs |
 | `c2f_clamp_vs_folds.py` | how often the coarse -> fine walk clamped (snapped a point onto a triangle border) and whether the seed folds where it did (needs `coarse_subdiv_c2f_clamp_*.csv`) |
+| `c2f_chart_vs_folds.py` | where the correspondence noise comes from: chart quality, folds vs coarse face and vs fine surface, fold rate by one-step area change, spacing vs total area scaling (md_files/c2f_correspondence_noise/c2f_chart_diagnostics.md) |
 | `check_graph_ply.py` | validates the `laplacian_graph/*.ply` files of a run |
 | `relax_metrics_common.py` | shared loaders and metrics |
 

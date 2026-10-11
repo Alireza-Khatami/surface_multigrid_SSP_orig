@@ -19,7 +19,7 @@ are checked the same way first (--check_mat_vertices): the defaults are set so t
 source MAT passes; an interpolated sphere can't be held to a stricter test than the
 vertices it comes from.
 
-Samples with fine_face < 0 (unmapped, see md_files/coarse_subdiv_relaxed_sdt.md) are
+Samples with fine_face < 0 (unmapped, see md_files/relaxations_md/coarse_subdiv_relaxed_sdt.md) are
 skipped and counted. Any failure is logged (per check: count, worst samples) and the
 script raises RuntimeError (exit code 1).
 

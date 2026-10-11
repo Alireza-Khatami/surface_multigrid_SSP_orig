@@ -15,7 +15,7 @@ vertices of the subdivided coarse mesh after run_relax.py's relaxation:
   struct_set_id + palette        the samples' struct ids (as the relaxation uses them)
   sub_V_seed     positions before the relaxation (the relaxation input)
 
-Spec for consumers: md_files/coarse_subdiv_relaxed_sdt.md. Reader:
+Spec for consumers: md_files/relaxations_md/coarse_subdiv_relaxed_sdt.md. Reader:
 subdiv_sample_tracker/tools/read_sdt.py (unchanged).
 """
 import os

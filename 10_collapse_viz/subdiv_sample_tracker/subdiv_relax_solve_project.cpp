@@ -471,7 +471,7 @@ RelaxReport subdiv_relax_solve_project(SubdivMesh & M, const MatrixXd & VO, cons
     // the projected curve positions as boundary values.
     // (A joint solve of seams + sheets at once was tried and was worse on the
     // fine subdivision: the sheets then see the seams before projection. See
-    // md_files/subdiv_relax_solve_project_experiments.md, commit 84b44fc.)
+    // md_files/relaxations_md/subdiv_relax_solve_project_experiments.md, commit 84b44fc.)
     //
     // opt.jointSolve: instead, one system for all free curve and sheet vertices
     // at once (non-symmetric, since sheets are pulled by curves but not the

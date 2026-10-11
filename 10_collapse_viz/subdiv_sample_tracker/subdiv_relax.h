@@ -1,5 +1,5 @@
 #pragma once
-// Structure-aware relaxation of the subdivided vertices (md_files/subdiv_relax_plan.md).
+// Structure-aware relaxation of the subdivided vertices (md_files/relaxations_md/subdiv_relax_plan.md).
 //
 // Graph (row i = the vertices that pull on i, uniform weights 1/deg):
 //   JUNCTION row: empty (never moves)

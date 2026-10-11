@@ -50,6 +50,13 @@ class CoarseSubdivRelaxConfig:
     # Python-only extras (C++: fixed values)
     logEvery: int = 100
     snapshotIters: tuple = (1, 10, 100, 1000, 10000)
+    # method 'momentum' (relax_momentum.py) / 'implicit' (relax_implicit.py): the explicit
+    # relaxer with another candidate step; they use the explicit* options too
+    momentumBeta: float = 0.9
+    momentumRestart: bool = True
+    implicitTau: float = 10.0
+    implicitCgTol: float = 1e-8
+    implicitCgMaxIter: int = 1000
 
 
 def relaxed_obj_prefix(c):
@@ -61,8 +68,8 @@ def relaxed_obj_prefix(c):
             + ('_joint' if c.jointPass else '')
             + ('_jointsolve' if c.jointSolve else '')
             + ('_' + c.weights if c.weights != 'uniform' else '')
-            + ('_global' if c.method == 'explicit' and c.explicitGlobalProj else '')
-            + ('_directed' if c.method == 'explicit' and c.explicitDirected else '') + '_')
+            + ('_global' if c.method in ('explicit', 'momentum', 'implicit') and c.explicitGlobalProj else '')
+            + ('_directed' if c.method in ('explicit', 'momentum', 'implicit') and c.explicitDirected else '') + '_')
 
 
 class RelaxFailure(RuntimeError):
@@ -225,11 +232,12 @@ class CoarseRelaxSession:
         seeds); it0 = iterations already done."""
         log, C, M = self.log, self.C, self.M
         method = cfg.method
-        isExplicit = method == 'explicit'
-        if method not in ('newton', 'solve_project', 'explicit'):
+        isExplicit = method in ('explicit', 'momentum', 'implicit')   # momentum / implicit: explicit relaxer, other step
+        if method not in ('newton', 'solve_project') + ('explicit', 'momentum', 'implicit'):
             raise RelaxFailure('[coarse_subdiv_relax] unknown relax method ' + method)
         if not isExplicit:
-            raise RelaxFailure('[coarse_subdiv_relax] only the explicit method is ported to Python')
+            raise RelaxFailure('[coarse_subdiv_relax] newton / solve_project are not ported to Python '
+                               '(use explicit, momentum or implicit)')
         G = self.graph(cfg.jointPass or (isExplicit and not cfg.explicitDirected))
         if log_quality is not None:
             log_quality()
@@ -259,8 +267,17 @@ class CoarseRelaxSession:
         if cfg.weights == 'meanvalue':
             eo.weights = meanvalue_weights(C.S.V, M.F, G, log)
         Mw = M.copy()  # the relaxer writes its result here
-        return ExplicitRelaxer(Mw, self.B.fineV, self.B.fineF, self.ms, self.pal, self.setId, G, eo, log,
-                               state=state, proj=self.proj, it0=it0)
+        args = (Mw, self.B.fineV, self.B.fineF, self.ms, self.pal, self.setId, G, eo, log)
+        kw = dict(state=state, proj=self.proj, it0=it0)
+        if method == 'momentum':
+            from relax_momentum import MomentumRelaxer
+            return MomentumRelaxer(*args, beta=cfg.momentumBeta, restart=cfg.momentumRestart, **kw)
+        if method == 'implicit':
+            from relax_implicit import ImplicitRelaxer
+            return ImplicitRelaxer(*args, tau=cfg.implicitTau, cg_tol=cfg.implicitCgTol,
+                                   cg_max_iter=cfg.implicitCgMaxIter,
+                                   symmetric=cfg.jointPass or not cfg.explicitDirected, **kw)
+        return ExplicitRelaxer(*args, **kw)
 
 
 def coarse_subdiv_relax_export(B, C, ms, cfg, maxObjVerts, objPath, log=None, anc=None, on_relaxer=None):

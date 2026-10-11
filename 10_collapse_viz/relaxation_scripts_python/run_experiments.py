@@ -52,6 +52,23 @@ SETS = {
         ('py_mv_nofold_lam1_2k', 'mean-value weights, symmetric graph, no new folds, lambda 1',
          E + NF + IT + ['--coarse_subdiv_relax_weights', 'meanvalue', '--explicit_lambda', '1']),
     ],
+    # faster convergence of the best setup (B: equal-area 277700 + flips, uniform, no new folds,
+    # global projection): momentum (relax_momentum.py) and the implicit step (relax_implicit.py)
+    'accel': [
+        ('py_eqs278k_flip_nofold_global_2k', 'B: explicit (existing run)', None),
+        ('py_eqs278k_flip_momentum_b09_2k', 'B with momentum beta 0.9 (adaptive restart), 2000 iterations',
+         ['--coarse_subdiv_relax_method', 'momentum', '--momentum_beta', '0.9'] + NF + IT
+         + ['--explicit_global_proj', '--equal_area_samples', '277700', '--delaunay_flips',
+            '--snapshot_iters', '10,30,100,300,1000,2000']),
+        ('py_eqs278k_flip_implicit_t10_300', 'B with the implicit step, tau 10, 300 iterations',
+         ['--coarse_subdiv_relax_method', 'implicit', '--implicit_tau', '10'] + NF
+         + ['--explicit_max_iter', '300', '--explicit_global_proj', '--equal_area_samples', '277700',
+            '--delaunay_flips', '--snapshot_iters', '10,30,100,300']),
+        ('py_eqs278k_flip_implicit_t100_300', 'B with the implicit step, tau 100, 300 iterations',
+         ['--coarse_subdiv_relax_method', 'implicit', '--implicit_tau', '100'] + NF
+         + ['--explicit_max_iter', '300', '--explicit_global_proj', '--equal_area_samples', '277700',
+            '--delaunay_flips', '--snapshot_iters', '10,30,100,300']),
+    ],
     # equal-area splitting to N samples (no uniform subdivision), Delaunay flips, cotan weights:
     # the adviser's pipeline (D) and its parts (A-C); N = 277,700 (as py_eqarea2_nofold_2k_valid)
     'delaunay': [
