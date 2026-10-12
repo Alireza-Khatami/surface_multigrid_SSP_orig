@@ -138,6 +138,8 @@ def parse_args(argv=None):
     p.add_argument('--implicit_tau', type=float, default=10.0)
     p.add_argument('--implicit_cg_tol', type=float, default=1e-8)
     p.add_argument('--implicit_cg_max_iter', type=int, default=1000)
+    p.add_argument('--newton_cg_tol', type=float, default=1e-10)
+    p.add_argument('--newton_cg_max_iter', type=int, default=20000)
     p.add_argument('--surface_mesh', default=None, help='surface mesh the MAT was computed from: validate the '
                    'interpolated radii after the relaxation (validate_radii.py); a failure fails the run')
     p.add_argument('--radii_tol_touch', type=float, default=1e-3)
@@ -216,6 +218,8 @@ def config_from_args(a):
     c.implicitTau = a.implicit_tau
     c.implicitCgTol = a.implicit_cg_tol
     c.implicitCgMaxIter = a.implicit_cg_max_iter
+    c.newtonCgTol = a.newton_cg_tol
+    c.newtonCgMaxIter = a.newton_cg_max_iter
     c.logEvery = a.log_every
     c.snapshotIters = tuple(int(x) for x in a.snapshot_iters.split(',') if x.strip())
     return c
@@ -264,6 +268,12 @@ def main(argv=None):
                    cfg.weights, 'on' if cfg.noNewFolds else 'off', 'on' if cfg.perCoarseFace else 'off'))
         if cfg.method == 'momentum':
             f.write('method params: momentum beta %g, adaptive restart %s\n' % (cfg.momentumBeta, cfg.momentumRestart))
+        if cfg.method == 'newton':
+            f.write('method params: newton (C++ port), %s, tangent system by CG tol %g max %d, max %s iterations '
+                    'per pass, %s projection\n'
+                    % ('joint pass' if cfg.jointPass else 'curves then sheets (directed graph)', cfg.newtonCgTol,
+                       cfg.newtonCgMaxIter, cfg.maxIter if cfg.maxIter > 0 else 100000,
+                       'local' if cfg.localProjection else 'global'))
         if cfg.method == 'implicit':
             f.write('method params: implicit tau %g, CG tol %g, CG max %d iterations\n'
                     % (cfg.implicitTau, cfg.implicitCgTol, cfg.implicitCgMaxIter))
@@ -283,6 +293,18 @@ def main(argv=None):
             raise SystemExit('simplified mesh does not match the bundle')
     ms = load_matstruct(a.matstruct_path, B.fineV, B.fineF)
     C = build_c2f(B, a, ms)
+    # is the coarse -> fine map bijective? (check_c2f_bijective.py; diagnostic, never fails the run)
+    bij, bijRef, bijFold = {}, None, None
+    try:
+        from check_c2f_bijective import bijectivity_stats
+        from coarse_subdiv_relax import _fold_ref
+        bijFold = _fold_ref(np.ascontiguousarray(C.S.V), np.ascontiguousarray(C.P),
+                            np.ascontiguousarray(C.S.F, dtype=np.int64),
+                            np.ascontiguousarray(C.S.faceOrig, dtype=np.int64), B.coarseF.shape[0])
+        bij['seeds'], bijRef = bijectivity_stats(B, C, C.P, C.fineFace, C.fineBary, 'c2f seeds', log,
+                                                 foldRef=bijFold)
+    except Exception as e:  # noqa: BLE001
+        log('[bijectivity] check failed: %s' % e)
     if not a.no_subdiv_objs and C.S.V.shape[0] <= a.subdiv_obj_max_verts:
         write_obj(out('coarse_subdiv_', '.obj'), C.S.V, C.S.F)
         write_obj(out('coarse_subdiv_at_fine_pos_', '.obj'), C.P, C.S.F)
@@ -306,6 +328,12 @@ def main(argv=None):
         nb = export_relaxed_sdt(sdtPath, B, C, held['sess'], M, nReq)
         log('[run_relax] relaxed coarse <-> fine correspondence -> %s (%.1f MB)' % (sdtPath, nb / 1048576.0))
         slide = sliding_stats(B, held['sess'], M)
+        if bijRef is not None:
+            try:
+                bij['relaxed'], _ = bijectivity_stats(B, C, M.V, M.fineFace, M.fineBary, 'relaxed', log,
+                                                      ref=bijRef, foldRef=bijFold)
+            except Exception as e:  # noqa: BLE001
+                log('[bijectivity] check of the relaxed mesh failed: %s' % e)
         log('[run_relax] ' + sliding_text(slide))
         radii = None
         if a.surface_mesh:
@@ -321,10 +349,15 @@ def main(argv=None):
             '%.3f -> %.3f deg | degenerate %d -> %d | flipped vs seed %d'
             % (q0.edgeCV, q1.edgeCV, q0.p1, q1.p1, q0.p5, q1.p5, q0.median, q1.median, q0.degenerate,
                q1.degenerate, q1.flippedVsRef),
-            sliding_text(slide)]
+            sliding_text(slide)] + [
+            'bijectivity (%s): %s | coincident %d, flipped triangles %d, degenerate %d, one-ring fold %d, wrap %d '
+            'of %d sheet-interior vertices'
+            % (k, 'locally bijective' if v['locally_bijective'] else 'NOT bijective', v['coincident_exact'],
+               v['tri_flipped'], v['tri_degenerate'], v['onering_fold'], v['onering_wrap'], v['interior_vertices'])
+            for k, v in bij.items()]
         res = dict(folder=os.path.basename(os.path.normpath(out_dir)), config=dataclasses.asdict(cfg),
                    equal_area=equal_area_text(a), n_subdiv_verts=int(C.S.V.shape[0]), flips=C.flipStats,
-                   sliding=slide, radii=radii,
+                   sliding=slide, radii=radii, bijectivity=bij,
                    n_subdiv_faces=int(C.S.F.shape[0]),
                    report=dataclasses.asdict(R), quality_before=dataclasses.asdict(q0),
                    quality_after=dataclasses.asdict(q1), seconds=time.perf_counter() - t0, relaxed_obj=objPath)

@@ -374,7 +374,7 @@ class ExplicitRelaxer:
                 isFree[i] = 0
                 R.seedOffStructure += 1
         # a connected group of free vertices that nothing fixed pulls on: pin its lowest-index vertex
-        R.nPinned = _pin_unanchored(isFree, self.rowOffs, self.cols)
+        R.nPinned = self._pin(isFree)
         self.isFree = isFree
         self.lst = np.nonzero(isFree)[0].astype(np.int64)
         R.nFree = len(self.lst)
@@ -404,6 +404,11 @@ class ExplicitRelaxer:
         self.it = 0
         self.lastMove = 0.0
         self.done = False
+
+    def _pin(self, isFree):
+        """Pins the lowest-index vertex of every connected group of free vertices that
+        nothing fixed pulls on; returns the number pinned. relax_newton.py overrides it."""
+        return _pin_unanchored(isFree, self.rowOffs, self.cols)
 
     # metrics
     def count_folded(self, P):

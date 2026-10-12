@@ -35,7 +35,7 @@ class CoarseSubdivRelaxConfig:
     """CoarseSubdivRelaxConfig (coarse_subdiv_relax.h), same defaults."""
     method: str = 'newton'
     curveAnchorTol: float = 3e-3   # solve_project only (not ported)
-    maxIter: int = -1              # newton only (not ported)
+    maxIter: int = -1              # newton only: iterations per pass (-1: 100000)
     perCoarseFace: bool = False    # hold vertices on coarse vertices / edges
     noNewFolds: bool = False
     localProjection: bool = False  # newton only (only changes the output name for explicit)
@@ -57,6 +57,9 @@ class CoarseSubdivRelaxConfig:
     implicitTau: float = 10.0
     implicitCgTol: float = 1e-8
     implicitCgMaxIter: int = 1000
+    # method 'newton' (relax_newton.py): CG on the tangent system (C++: sparse LDLT)
+    newtonCgTol: float = 1e-10
+    newtonCgMaxIter: int = 20000
 
 
 def relaxed_obj_prefix(c):
@@ -235,9 +238,9 @@ class CoarseRelaxSession:
         isExplicit = method in ('explicit', 'momentum', 'implicit')   # momentum / implicit: explicit relaxer, other step
         if method not in ('newton', 'solve_project') + ('explicit', 'momentum', 'implicit'):
             raise RelaxFailure('[coarse_subdiv_relax] unknown relax method ' + method)
-        if not isExplicit:
-            raise RelaxFailure('[coarse_subdiv_relax] newton / solve_project are not ported to Python '
-                               '(use explicit, momentum or implicit)')
+        if method == 'solve_project':
+            raise RelaxFailure('[coarse_subdiv_relax] solve_project is not ported to Python '
+                               '(use newton, explicit, momentum or implicit)')
         G = self.graph(cfg.jointPass or (isExplicit and not cfg.explicitDirected))
         if log_quality is not None:
             log_quality()
@@ -256,6 +259,11 @@ class CoarseRelaxSession:
         eo.maxIter = cfg.explicitMaxIter
         eo.tol = cfg.explicitTol
         eo.localProjection = not cfg.explicitGlobalProj
+        if method == 'newton':
+            # the C++ RelaxOptions: tol 1e-12, maxIter per pass (-1: 100000), localProjection from the config
+            eo.maxIter = cfg.maxIter if cfg.maxIter > 0 else 100000
+            eo.tol = 1e-12
+            eo.localProjection = cfg.localProjection
         eo.holdFixed = holdFixed
         eo.noNewFolds = cfg.noNewFolds
         eo.foldRef = foldRef
@@ -272,6 +280,13 @@ class CoarseRelaxSession:
         if method == 'momentum':
             from relax_momentum import MomentumRelaxer
             return MomentumRelaxer(*args, beta=cfg.momentumBeta, restart=cfg.momentumRestart, **kw)
+        if method == 'newton':
+            from relax_newton import NewtonRelaxer
+            if cfg.weights != 'uniform':
+                log('[coarse_subdiv_relax] WARNING: %s weights are explicit only; newton uses uniform' % cfg.weights)
+                eo.weights = None
+            return NewtonRelaxer(*args, joint=cfg.jointPass, cg_tol=cfg.newtonCgTol,
+                                 cg_max_iter=cfg.newtonCgMaxIter, **kw)
         if method == 'implicit':
             from relax_implicit import ImplicitRelaxer
             return ImplicitRelaxer(*args, tau=cfg.implicitTau, cg_tol=cfg.implicitCgTol,

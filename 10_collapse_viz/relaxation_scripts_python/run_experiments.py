@@ -184,6 +184,15 @@ SETS = {
          E + NF + B278 + SYM + ['--explicit_lambda', '1', '--explicit_max_iter', '300',
                                 '--snapshot_iters', '30,100,300']),
     ],
+    # the C++ Newton relaxation (relax_newton.py; tangent-plane Gauss-Newton, curves then sheets = the
+    # directed graph) on B, no new folds; iterations are per pass
+    'newton': [
+        ('py_eqs278k_flip_momentum_b09_300', 'B momentum beta 0.9, two-sided graph (existing run)', None),
+        ('py_eqs278k_flip_dir_nofold_newton_300', 'B Newton (C++ port), directed graph, no new folds, '
+         'max 300 iterations per pass',
+         ['--coarse_subdiv_relax_method', 'newton'] + NF + B278 + DIR
+         + ['--coarse_subdiv_relax_max_iter', '300', '--snapshot_iters', '10,50,100,300,600']),
+    ],
     # equal-area refinement of the coarse mesh before the subdivision (equal_area_refine.py);
     # flags None: an existing run, listed in the table for comparison
     'equal_area': [
