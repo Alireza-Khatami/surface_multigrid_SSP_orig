@@ -27,7 +27,10 @@ Relaxation flags (as in main.cpp):
   --explicit_global_proj                  global closest point projection (Python DEFAULT since
                                           2026-10-05; the C++ default is local)
   --explicit_local_proj                   local projection (the C++ default; Python-only flag)
-  --explicit_directed_graph               curves pulled only by curve / junction neighbours
+  --explicit_directed_graph               curves pulled only by curve / junction neighbours (Python
+                                          DEFAULT since 2026-10-11; the C++ default is symmetric)
+  --explicit_symmetric_graph              two-sided mesh graph (the C++ default; Python-only flag;
+                                          the implicit method always uses it)
   --coarse_subdiv_relax_weights W         uniform | cotan | meanvalue
   --n_coarse_subdiv_samples N             default 200000 (= the runs' --n_subdiv_samples)
   --subdiv_obj_max_verts N                default 2000000
@@ -115,7 +118,8 @@ def parse_args(argv=None):
     p.add_argument('--explicit_tol', type=float, default=1e-7)
     p.add_argument('--explicit_global_proj', action='store_true')  # the default; kept for the C++ flag set
     p.add_argument('--explicit_local_proj', action='store_true')
-    p.add_argument('--explicit_directed_graph', action='store_true')
+    p.add_argument('--explicit_directed_graph', action='store_true')  # the default; kept for the C++ flag set
+    p.add_argument('--explicit_symmetric_graph', action='store_true')
     p.add_argument('--coarse_subdiv_relax_weights', default='uniform')
     p.add_argument('--n_coarse_subdiv_samples', type=int, default=200000)
     p.add_argument('--subdiv_obj_max_verts', type=int, default=2000000)
@@ -202,7 +206,10 @@ def config_from_args(a):
     if a.explicit_global_proj and a.explicit_local_proj:
         raise SystemExit('--explicit_global_proj and --explicit_local_proj exclude each other')
     c.explicitGlobalProj = not a.explicit_local_proj  # global by default
-    c.explicitDirected = a.explicit_directed_graph
+    if a.explicit_directed_graph and a.explicit_symmetric_graph:
+        raise SystemExit('--explicit_directed_graph and --explicit_symmetric_graph exclude each other')
+    # directed by default; the implicit step needs the symmetric graph unless asked otherwise
+    c.explicitDirected = a.explicit_directed_graph or not (a.explicit_symmetric_graph or c.method == 'implicit')
     c.weights = a.coarse_subdiv_relax_weights
     c.momentumBeta = a.momentum_beta
     c.momentumRestart = not a.momentum_no_restart

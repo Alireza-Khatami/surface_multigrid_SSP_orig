@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Coarse-to-fine (multilevel) relaxation run with setup B (relax_multilevel.py):
-# equal-area split to 277,700 samples + Delaunay flips, uniform weights, two-sided graph,
+# equal-area split to 277,700 samples + Delaunay flips, uniform weights, the default graph (directed since
+# 2026-10-11; the documented multilevel runs used --explicit_symmetric_graph),
 # global projection, no new folds, momentum beta 0.9; levels N/16 -> N/4 -> N (ratio 4).
 # Input: the default bundle (output/relaxation_experiments/src_qslim200_valid, validity checks on)
 # and the ABC 00040057 .ma_struct. Notes: md_files/relaxations_md/relaxation_multilevel_*.md

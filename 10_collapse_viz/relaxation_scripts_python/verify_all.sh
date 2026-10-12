@@ -11,6 +11,8 @@ E="--coarse_subdiv_relax_method explicit"
 run() {  # name, C++ iterations, flags...
     local name=$1 iters=$2; shift 2
     local it=$(( iters < N ? iters : N ))
+    # the C++ default graph is symmetric, the Python default directed
+    case " $* " in *" --explicit_directed_graph "*) ;; *) set -- "$@" --explicit_symmetric_graph ;; esac
     python verify_relax.py --cpp_dir $EXP/$name --out_dir "$OUT/$name" -- $E "$@" --explicit_max_iter $it \
         > "$OUT/$name.verify.txt" 2> "$OUT/$name.stderr.txt"
     echo "$name ($it of $iters iterations): $(tail -1 "$OUT/$name.verify.txt")"
