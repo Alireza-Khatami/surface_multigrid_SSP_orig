@@ -148,6 +148,45 @@ exiting. The table gives the rerun, which produced the same mesh in 23.0 s.
 - **Cost.** About the same time per iteration; the fold check and the projection didn't get more
   expensive.
 
+## λ = 1 on the directed graph, 5000 iterations (bad, cancelled)
+
+Run `py_eqs278k_flip_dir_nofold_momentum_b09_lam1_5k_valid`:
+- **Settings:** directed graph, uniform weights, no new folds, momentum β 0.9, λ 1, 5000
+  iterations.
+- **Status:** cancelled while writing the final OBJ, after iteration 5000, so there is no
+  `results.json` or `.sdt`.
+- **Where the numbers come from:** the iteration snapshots, with the same quality code as the
+  finished runs, which reproduces their numbers.
+
+| iteration | edge CV | min angle p1 / p5 / median | folded | degenerate | max move (× diag) | energy |
+|---|---|---|---|---|---|---|
+| 300 | 0.4239 | 2.34 / 7.56 / 29.71 | 232 | 9 | 1.44e-3 | 1.737e6 |
+| 1000 | 0.4325 | 2.20 / 7.22 / 28.38 | 227 | 14 | about 1.5e-3 | — |
+| 2000 | 0.4393 | 2.14 / 7.08 / 27.85 | 226 | 16 | about 1.7e-3 | — |
+| 5000 | **0.4529** | **2.01 / 6.59 / 27.05** | 225 | 17 | 1.95e-3 | 1.874e6 |
+
+Against λ 0.5 on the directed graph at 300 iterations (edge CV 0.2223, p1 19.47) and λ 1 on the
+two-sided graph at 300 iterations (edge CV 0.2136, p1 24.50).
+
+**Observations:**
+- **The triangles become very unequal.** The edge CV doubles (0.45 against 0.21–0.22) and the
+  smallest angles collapse to about 2°. It also gets worse with every iteration.
+  - **Reason:** λ 1 lets every step move a sample all the way to its neighbours' average, so
+    samples move a lot. On the directed graph the pulls aren't balanced:
+    - a curve sample ignores its sheet neighbours, while those sheet samples are still pulled
+      toward it;
+    - the sheet side has no counter-force, so samples keep drifting toward the curves and pile
+      up there, leaving long edges elsewhere.
+  - The energy rises the whole time (1.28e6 at iteration 100 → 1.87e6 at 5000), and the largest
+    move per iteration grows instead of shrinking (7.8e-4 → 1.95e-3 × diag): the run drifts and
+    never settles.
+  - λ 0.5 on the directed graph stalled; λ 1 drifts away.
+- **Fewer folds is not a gain here.** It ends with 225 folded triangles, the fewest of any run,
+  but in a mesh with near-zero angles.
+- **Conclusion:** large steps (λ 1) are only safe on the two-sided graph, where the pulls are
+  symmetric and there is a real energy for the step to decrease. On the directed graph, use λ
+  0.5 or nothing.
+
 ## Recommendation (so far)
 
 Single-level momentum with **uniform weights on the two-sided graph** (`--explicit_symmetric_graph`)

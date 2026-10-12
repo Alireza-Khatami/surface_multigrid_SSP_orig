@@ -172,6 +172,10 @@ SETS = {
          'lambda 1, 300 iterations',
          MOM + NF + B278 + SYM + ['--explicit_lambda', '1', '--explicit_max_iter', '300',
                                   '--snapshot_iters', '30,100,300']),
+        ('py_eqs278k_flip_dir_nofold_momentum_b09_lam1_5k', 'B DIRECTED graph, no new folds, momentum beta 0.9, '
+         'lambda 1, 5000 iterations',
+         MOM + NF + B278 + DIR + ['--explicit_lambda', '1', '--explicit_max_iter', '5000',
+                                  '--snapshot_iters', '300,1000,2000,5000']),
         ('py_eqs278k_flip_sym_nofold_explicit_lam05_300', 'B two-sided graph, no new folds, explicit, lambda 0.5, '
          '300 iterations',
          E + NF + B278 + SYM + ['--explicit_max_iter', '300', '--snapshot_iters', '30,100,300']),
