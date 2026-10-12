@@ -171,7 +171,7 @@ two-sided graph at 300 iterations (edge CV 0.2136, p1 24.50).
 **Observations:**
 - **The triangles become very unequal.** The edge CV doubles (0.45 against 0.21–0.22) and the
   smallest angles collapse to about 2°. It also gets worse with every iteration.
-  - **Reason:** λ 1 lets every step move a sample all the way to its neighbours' average, so
+  - **Likely reason (not verified):** λ 1 lets every step move a sample all the way to its neighbours' average, so
     samples move a lot. On the directed graph the pulls aren't balanced:
     - a curve sample ignores its sheet neighbours, while those sheet samples are still pulled
       toward it;
