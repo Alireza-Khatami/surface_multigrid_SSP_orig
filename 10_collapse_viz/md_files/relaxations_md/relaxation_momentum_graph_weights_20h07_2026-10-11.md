@@ -56,7 +56,7 @@ To keep earlier results reproducible:
 | `py_eqs278k_flip_momentum_b09_cotan_300_valid` | cotan | two-sided | no new | 21.0 | 0.2301 | 17.99 / 26.77 / 43.31 | 329 | 8 | 0 |
 | `py_eqs278k_flip_momentum_b09_meanvalue_300_valid` | mean-value | two-sided | no new | 27.1 | 0.2289 | 17.55 / 26.96 / 43.34 | 323 | 8 | 0 |
 | `py_eqs278k_flip_momentum_b09_dir_300_valid` | uniform | directed | no new | 86.4 | 0.2223 | 19.47 / 29.45 / 46.69 | 326 | 9 | 208 |
-| `py_eqs278k_flip_momentum_b09_dir_folds_300_valid` | uniform | directed | allowed | 17.6 | 0.2234 | 19.19 / 29.34 / 46.71 | 444 | 10 | 205 |
+| `py_eqs278k_flip_momentum_b09_dir_allowfolds_300_valid` | uniform | directed | allowed | 17.6 | 0.2234 | 19.19 / 29.34 / 46.71 | 444 | 10 | 205 |
 
 **References** (two-sided, uniform weights):
 
@@ -95,12 +95,65 @@ All `.sdt` checks (`check_relaxed_sdt.py`) pass on the two-sided weight runs.
 
 ## Results: 5000 iterations, directed graph, folds allowed
 
-*Running; this section is filled in when the runs finish.*
+The folders of the fold-allowed runs are named `..._dir_allowfolds_...` (renamed from `..._dir_folds_...`).
+
+| run | weights | iterations | relax s | edge CV | min angle p1 / p5 / median | folded | degenerate | restarts |
+|---|---|---|---|---|---|---|---|---|
+| `py_eqs278k_flip_momentum_b09_dir_allowfolds_300_valid` | uniform | 300 | 17.6 | 0.2234 | 19.19 / 29.34 / 46.71 | 444 | 10 | 205 |
+| `py_eqs278k_flip_momentum_b09_dir_allowfolds_5k_valid` | uniform | 5000 | 234.8 | 0.2421 | 16.66 / 25.97 / 45.69 | 437 | 10 | 4905 |
+| `py_eqs278k_flip_momentum_b09_dir_allowfolds_cotan_5k_valid` | cotan | 5000 | 236.0 | **0.8800** | **0.00 / 2.10 / 30.35** | **4642** | **4241** | 4985 |
+| mean-value, 5000 iterations | mean-value | stopped at 2700 | — | — | — | **37,025** at 2700 | 14,070 at 2700 | — |
+
+- **More iterations make the directed graph worse.** Uniform at 5000 iterations has edge CV
+  0.242, against 0.223 at 300, and lower angles. The restart fires in almost every iteration (4905
+  of 5000), so momentum does nothing and the run drifts.
+- **Cotan and mean-value diverge** without the no-new-folds rule. Cotan ends with 4642 folded and
+  4241 degenerate triangles. Mean-value had 37,025 folded triangles at iteration 2700 and was
+  stopped; its partial folder was removed. Cotan and mean-value weights can be negative or very
+  uneven, so without the fold check the step can turn triangles over, and the folds then grow.
+- **Conclusion:** the directed graph, with or without the fold rule, isn't worth pursuing with
+  momentum. The two-sided graph stays the best.
+
+## Step size λ = 1 against 0.5
+
+The step moves each sample a fraction λ toward its neighbours' average. All runs above use λ 0.5.
+Here: two-sided graph, uniform weights, no new folds, 300 iterations, setup B
+(`python run_experiments.py --set lambda --suffix _valid`).
+
+| run | method | λ | relax s | edge CV | min angle p1 / p5 / median | folded | degenerate | moves held back |
+|---|---|---|---|---|---|---|---|---|
+| `py_eqs278k_flip_momentum_b09_300_valid` | momentum β 0.9 | 0.5 | 20.2 | **0.2126** | 24.09 / 34.45 / 49.91 | 303 | 7 | 59,911 |
+| `py_eqs278k_flip_sym_nofold_momentum_b09_lam1_300_valid` | momentum β 0.9 | 1 | 23.0 | 0.2136 | **24.50 / 34.67 / 50.67** | **294** | 10 | 62,421 |
+| `py_eqs278k_flip_sym_nofold_explicit_lam05_300_valid` | explicit | 0.5 | 19.9 | 0.2154 | 21.15 / 32.08 / 47.87 | 322 | **4** | 46,333 |
+| `py_eqs278k_flip_sym_nofold_explicit_lam1_300_valid` | explicit | 1 | 19.4 | 0.2128 | 21.99 / 33.29 / 48.70 | 309 | 9 | 51,691 |
+
+All three new runs pass `check_relaxed_sdt.py`. Momentum λ 1 needed 0 adaptive restarts.
+
+The first momentum λ 1 run took 82 s. Its setup steps, which don't depend on λ, were also 3.5×
+slower than usual, so the machine was busy, most likely with the stopped mean-value run still
+exiting. The table gives the rerun, which produced the same mesh in 23.0 s.
+
+**Observations:**
+- **Explicit steps gain clearly from λ 1.** In the same 300 iterations, edge CV goes from 0.2154
+  to 0.2128 and folds from 322 to 309, with better angles. Explicit λ 1 at 300 iterations is about
+  as even as momentum λ 0.5 (0.2128 against 0.2126), but its angles are about 2° lower.
+- **Momentum gains a little from λ 1.**
+  - Better: the angles (p1 24.50, median 50.67) and the fewest folds of any run so far (294).
+  - Slightly worse: edge CV (0.2136 against 0.2126) and degenerate triangles (10 against 7).
+  - It is similar to momentum λ 0.5 run longer (2000 iterations: edge CV 0.2158, median 51.3,
+    303 folds), but in 300 iterations.
+- **No instability.** λ 1 doesn't oscillate here, with or without momentum. Momentum is stable
+  up to about 2(1 + β), and the no-new-folds rule holds back the moves that would fold a triangle
+  (slightly more of them at λ 1).
+- **Cost.** About the same time per iteration; the fold check and the projection didn't get more
+  expensive.
 
 ## Recommendation (so far)
 
 Single-level momentum with **uniform weights on the two-sided graph** (`--explicit_symmetric_graph`)
-is still the best setting: 300 iterations, about 20 s of relaxation.
+is still the best setting: 300 iterations, about 20 s of relaxation. With λ 0.5 it has the most
+even edges (edge CV 0.2126). With `--explicit_lambda 1` it has better angles and the fewest folds
+(294), for slightly less even edges (0.2136); which one is better depends on what matters more.
 
 ```
 python run_relax.py \

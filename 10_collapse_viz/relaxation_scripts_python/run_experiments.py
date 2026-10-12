@@ -38,6 +38,7 @@ IT = ['--explicit_max_iter', '2000']
 MOM = ['--coarse_subdiv_relax_method', 'momentum', '--momentum_beta', '0.9']
 B278 = ['--explicit_global_proj', '--equal_area_samples', '277700', '--delaunay_flips']
 DIR = ['--explicit_directed_graph']
+SYM = ['--explicit_symmetric_graph']
 ML = ['@multilevel']  # first flag: run relax_multilevel.py instead of run_relax.py
 
 # name -> (description, flags)
@@ -147,22 +148,37 @@ SETS = {
          MOM + NF + B278 + DIR + ['--coarse_subdiv_relax_weights', 'meanvalue', '--explicit_max_iter', '5000',
                                   '--snapshot_iters', '300,1000,2000,5000']),
         # directed graph, folds ALLOWED (no --coarse_subdiv_relax_no_new_folds)
-        ('py_eqs278k_flip_momentum_b09_dir_folds_300', 'B momentum beta 0.9, DIRECTED graph, folds allowed, uniform '
+        ('py_eqs278k_flip_momentum_b09_dir_allowfolds_300', 'B momentum beta 0.9, DIRECTED graph, folds allowed, uniform '
          'weights, 300 iterations',
          MOM + B278 + DIR + ['--explicit_max_iter', '300', '--snapshot_iters', '30,100,300']),
-        ('py_eqs278k_flip_momentum_b09_dir_folds_5k', 'B momentum beta 0.9, DIRECTED graph, folds allowed, uniform '
+        ('py_eqs278k_flip_momentum_b09_dir_allowfolds_5k', 'B momentum beta 0.9, DIRECTED graph, folds allowed, uniform '
          'weights, 5000 iterations',
          MOM + B278 + DIR + ['--explicit_max_iter', '5000', '--snapshot_iters', '300,1000,2000,5000']),
-        ('py_eqs278k_flip_momentum_b09_dir_folds_cotan_5k', 'B momentum beta 0.9, DIRECTED graph, folds allowed, '
+        ('py_eqs278k_flip_momentum_b09_dir_allowfolds_cotan_5k', 'B momentum beta 0.9, DIRECTED graph, folds allowed, '
          'cotan weights, 5000 iterations',
          MOM + B278 + DIR + ['--coarse_subdiv_relax_weights', 'cotan', '--explicit_max_iter', '5000',
                              '--snapshot_iters', '300,1000,2000,5000']),
-        ('py_eqs278k_flip_momentum_b09_dir_folds_meanvalue_5k', 'B momentum beta 0.9, DIRECTED graph, folds allowed, '
+        ('py_eqs278k_flip_momentum_b09_dir_allowfolds_meanvalue_5k', 'B momentum beta 0.9, DIRECTED graph, folds allowed, '
          'mean-value weights, 5000 iterations',
          MOM + B278 + DIR + ['--coarse_subdiv_relax_weights', 'meanvalue', '--explicit_max_iter', '5000',
                              '--snapshot_iters', '300,1000,2000,5000']),
         ('py_eqs278k_flip_momentum_b09_7k', 'B momentum beta 0.9, uniform weights, 7000 iterations (existing run)',
          None),
+    ],
+    # step size lambda 1 vs 0.5 on B: two-sided graph, uniform weights, no new folds, 300 iterations
+    'lambda': [
+        ('py_eqs278k_flip_momentum_b09_300', 'B momentum beta 0.9, lambda 0.5 (existing run)', None),
+        ('py_eqs278k_flip_sym_nofold_momentum_b09_lam1_300', 'B two-sided graph, no new folds, momentum beta 0.9, '
+         'lambda 1, 300 iterations',
+         MOM + NF + B278 + SYM + ['--explicit_lambda', '1', '--explicit_max_iter', '300',
+                                  '--snapshot_iters', '30,100,300']),
+        ('py_eqs278k_flip_sym_nofold_explicit_lam05_300', 'B two-sided graph, no new folds, explicit, lambda 0.5, '
+         '300 iterations',
+         E + NF + B278 + SYM + ['--explicit_max_iter', '300', '--snapshot_iters', '30,100,300']),
+        ('py_eqs278k_flip_sym_nofold_explicit_lam1_300', 'B two-sided graph, no new folds, explicit, lambda 1, '
+         '300 iterations',
+         E + NF + B278 + SYM + ['--explicit_lambda', '1', '--explicit_max_iter', '300',
+                                '--snapshot_iters', '30,100,300']),
     ],
     # equal-area refinement of the coarse mesh before the subdivision (equal_area_refine.py);
     # flags None: an existing run, listed in the table for comparison
