@@ -31,10 +31,13 @@ Script: `relaxation_scripts_python/check_c2f_bijective.py`.
 
    Two details:
    - **Coarse faces wound against the fine sheet.** Some coarse faces are wound the opposite way
-     to the fine sheet under them. That's a convention, not a fold. So, per coarse face, the
-     majority orientation of its triangles at the c2f seeds is taken as "correct", and a triangle
-     counts as flipped only when it disagrees with that majority. The relaxed mesh uses the
-     seeds' majority.
+     to the fine sheet under them. That's a convention, not a fold. So the majority orientation
+     at the c2f seeds is taken as "correct", and a triangle counts as flipped only when it
+     disagrees with that majority. The relaxed mesh uses the seeds' majority.
+   - **Majority per patch.** The majority is taken over a coarse patch, not a single face. A
+     patch is the coarse faces joined across edges with exactly two faces and wound consistently;
+     seams separate patches. A first version voted per face, and that hid folds; see "Fix: vote
+     per patch" below.
    - **Seam samples.** A sample on a seam or crease edge sits on a fine face of any of the sheets
      that meet there, and that face's normal says nothing about this triangle's sheet. So only
      corners strictly inside a fine face give the reference normal; all corners are used only
@@ -124,3 +127,63 @@ overlap). The log says so on every run.
   corners and reported 880 flipped triangles on the small test. 849 of those had a corner on a
   seam, where the fine face (and so the normal) may belong to another sheet. After the fix, the
   triangle check and the one-ring check agree.
+
+## Second mesh: ABC 01_00040093 and a fix
+
+Run: `Experiments/01_00040093_6f8f50d16c8a4ef7abda5aea_trimesh_000/mats_2595_interp_20/subdiv_n1000000/relaxation`.
+- **Settings:** the best setting (equal-area split to 277,700 samples, Delaunay flips, momentum
+  β 0.9, two-sided graph, no new folds, 300 iterations).
+- **Inputs:**
+  - bundle: `correspondence_*_mat_initial.c2f` in `subdiv_n1000000`;
+  - `.ma_struct`: `Data/ABC_Dataset/<mesh>/<mesh>_mat_initial.ma_struct`.
+
+### Fix: vote per patch
+
+The first version decided each coarse face's orientation by a vote among that face's own
+triangles. On this mesh that went wrong for 7 coarse faces:
+- **What they are:** thin slivers on seams, of area 2–6 against a median of 995 (face 167 has
+  edges 1.6 / 21 / 22.6), each with only 2–9 triangles.
+- **What went wrong:** most of their triangles are folded at the c2f seeds, so the vote decided
+  they were "wound backwards".
+- **Why that's wrong:** face 167 is wound like its neighbours 448 and 162 and lies within 1–7° of
+  their plane, and those neighbours agree with the fine sheet.
+- **Effect at the seeds:** their folds were hidden.
+- **Effect after relaxation:** relaxation turned their triangles the right way round, and the
+  check then counted those as flips: 38 flipped triangles and 25 folded one-rings, all false.
+
+The vote now covers a whole patch (17 patches on this mesh, 24 on 00040057), so a sliver face
+takes its sheet's orientation. The numbers for 00040057 above don't change.
+
+### Results (with the fix)
+
+| check | c2f seeds | after relaxation |
+|---|---|---|
+| unmapped samples | 2 (coarse vertices 349, 350: on no coarse face) | 2 |
+| coincident samples | 0 | 0 |
+| flipped triangles (against the fine surface) | **71** (in 28 coarse faces, median area 21) | **11** (in 9 coarse faces) |
+| … of them with all corners on seams / boundaries | 9 | 9 |
+| one-ring, folded, of 273,613 sheet-interior vertices | 0 | 0 |
+| one-ring, wrapping | 0 | 0 |
+| degenerate triangles | 0 | 0 |
+| c2f walk: clamped queries | 0 | — |
+| fold count against the coarse normal | 0 | 0 |
+
+**What it shows:**
+- **c2f seeds:** the map folds only in small patches, mostly in thin coarse faces on seams. No
+  samples coincide and no sheet interior is turned over (no folded one-ring).
+- **After relaxation:** 11 flipped triangles are left. 9 of them have all three corners on seams
+  or boundaries, so the triangle crosses between sheets. The relaxation fixes the rest.
+- **The fold count against the coarse normal says 0 at both stages.** These thin seam faces share
+  the orientation of their fold, so comparing with the coarse face's own normal can't see it.
+  This is another reason to use the flipped count from this check.
+
+### Why some log lines appear twice
+
+These are repeated work, not a bug:
+- **`coarse struct IDs` and `palette`:** `delaunay_flip.py` computes the struct IDs it needs to
+  find the seams. `CoarseRelaxSession` then computes them again for the relaxation, with the same
+  result.
+- **`graph`:** two different graphs. The directed graph is always built first, because the
+  two-sided graph copies its vertex roles. Then the two-sided graph this run uses is built. Its
+  line shows `curve 0, junction 0` because a plain mesh graph knows no roles; they are copied
+  over just after.

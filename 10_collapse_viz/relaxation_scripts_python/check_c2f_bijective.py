@@ -6,9 +6,11 @@ The map is piecewise linear on the subdivided triangles. It is locally bijective
   1. vertex injectivity: no two samples land on the same fine point;
   2. orientation: no image triangle is degenerate or flipped. Flipped = its normal disagrees
      with the fine surface under it (the normal of the fine faces of its corners), after the
-     orientation of its coarse face relative to the fine sheet is taken out (per coarse face,
-     the majority sign of its triangles at the c2f seeds; some coarse faces are wound against
-     the fine sheet under them, which is not a fold);
+     orientation of its coarse face relative to the fine sheet is taken out (some coarse faces
+     are wound against the fine sheet under them, which is not a fold). That orientation is the
+     majority sign at the c2f seeds over the face's consistently wound coarse patch (faces joined
+     across manifold coarse edges), not over the face alone, so that a tiny face with a mostly
+     folded image cannot vote its fold away;
   3. one-ring check: at every vertex inside a sheet (every incident edge has exactly two
      faces) the image triangles around it, projected onto the fine tangent plane at the
      vertex, turn by exactly 2 pi (oriented angle sum). Less: a fold; 4 pi or more: the
@@ -139,14 +141,39 @@ def _interior(F, Vs):
 
 
 class OrientRef:
-    """Per coarse face: +1 / -1, how its triangles are wound relative to the fine sheet under
-    them (majority at the c2f seeds). Reused for the relaxed mesh."""
+    """How each coarse face is wound relative to the fine sheet under it: +1 / -1. Decided per
+    coarse PATCH, not per face: coarse faces joined across manifold coarse edges (two faces) with
+    consistent winding form a patch, and the patch takes the majority sign of all its triangles
+    at the c2f seeds. A per-face vote would let a tiny sliver face whose image is mostly folded
+    vote itself "wound against the sheet" and hide its fold. Reused for the relaxed mesh."""
 
-    def __init__(self, sgn, faceOrig, nCoarse):
-        vote = np.zeros(nCoarse, dtype=np.int64)
+    def __init__(self, sgn, faceOrig, coarseF):
+        CF = np.asarray(coarseF, dtype=np.int64)
+        nC = CF.shape[0]
+        parent = np.arange(nC)
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+        he = {}
+        for f in range(nC):
+            for c in range(3):
+                u, v = int(CF[f, c]), int(CF[f, (c + 1) % 3])
+                he.setdefault((min(u, v), max(u, v)), []).append((f, u < v))
+        for l in he.values():
+            if len(l) == 2 and l[0][1] != l[1][1]:     # manifold edge, traversed oppositely = consistent
+                a, b = find(l[0][0]), find(l[1][0])
+                if a != b:
+                    parent[a] = b
+        comp = np.array([find(f) for f in range(nC)])
+        vote = np.zeros(nC, dtype=np.int64)
         ok = (sgn == 1) | (sgn == -1)
-        np.add.at(vote, faceOrig[ok], sgn[ok])
-        self.coarse = np.where(vote >= 0, 1, -1).astype(np.int64)
+        np.add.at(vote, comp[faceOrig[ok]], sgn[ok])
+        self.patch = comp
+        self.nPatches = int(len(np.unique(comp)))
+        self.coarse = np.where(vote[comp] >= 0, 1, -1).astype(np.int64)
 
 
 def bijectivity_stats(B, C, P, fineFace, fineBary, name, log=None, ref=None, foldRef=None):
@@ -183,12 +210,13 @@ def bijectivity_stats(B, C, P, fineFace, fineBary, name, log=None, ref=None, fol
     fb = np.ascontiguousarray(fineBary, dtype=np.float64)
     _tri_signs(P, F, ff, fb, fn, diag, sgn, area)
     if ref is None:
-        ref = OrientRef(sgn, faceOrig, len(B.coarseF))
+        ref = OrientRef(sgn, faceOrig, B.coarseF)
     rel = sgn * ref.coarse[faceOrig]          # +1 agrees with its coarse face's majority
     st['tri_unmapped_corner'] = int((sgn == 2).sum())
     st['tri_degenerate'] = int((sgn == 0).sum())
     st['tri_flipped'] = int((((sgn == 1) | (sgn == -1)) & (rel == -1)).sum())
     st['coarse_faces_wound_against_fine'] = int((ref.coarse < 0).sum())
+    st['coarse_patches'] = ref.nPatches
     st['coarse_faces_with_flips'] = int(len(np.unique(faceOrig[((sgn == 1) | (sgn == -1)) & (rel == -1)])))
     if foldRef is not None:
         from relax_explicit import count_folded
