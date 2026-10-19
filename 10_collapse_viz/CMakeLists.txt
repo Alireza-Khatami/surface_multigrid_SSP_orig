@@ -2,9 +2,16 @@ cmake_minimum_required(VERSION 3.14)
 project(collapse_viz)
 
 # ---- polyscope via FetchContent ----
-# Force real OpenGL/GLFW backend; disable headless mock before polyscope's CMakeLists runs.
-set(POLYSCOPE_BACKEND_OPENGL3_GLFW "ON"  CACHE BOOL "Enable real OpenGL3+GLFW backend" FORCE)
-set(POLYSCOPE_BACKEND_OPENGL_MOCK  "OFF" CACHE BOOL "Disable headless mock backend"    FORCE)
+# Backend is forced before polyscope's CMakeLists runs.
+# SSP_POLYSCOPE_MOCK: headless mock backend (no X11/OpenGL), for HPC nodes.
+option(SSP_POLYSCOPE_MOCK "Headless polyscope mock backend (no X11/OpenGL)" OFF)
+if(SSP_POLYSCOPE_MOCK)
+    set(POLYSCOPE_BACKEND_OPENGL3_GLFW "OFF" CACHE BOOL "Disable OpenGL3+GLFW backend" FORCE)
+    set(POLYSCOPE_BACKEND_OPENGL_MOCK  "ON"  CACHE BOOL "Enable headless mock backend"  FORCE)
+else()
+    set(POLYSCOPE_BACKEND_OPENGL3_GLFW "ON"  CACHE BOOL "Enable real OpenGL3+GLFW backend" FORCE)
+    set(POLYSCOPE_BACKEND_OPENGL_MOCK  "OFF" CACHE BOOL "Disable headless mock backend"    FORCE)
+endif()
 
 include(FetchContent)
 FetchContent_Declare(
