@@ -161,7 +161,8 @@ static double face_quality(const Vector3d & p0, const Vector3d & p1, const Vecto
     double a2 = (p1-p0).squaredNorm();
     double b2 = (p2-p1).squaredNorm();
     double c2 = (p0-p2).squaredNorm();
-    double denom = std::powf(a2, 2.0f) + std::powf(b2, 2.0f) + std::powf(c2, 2.0f);
+    // ::powf, not std::powf: libstdc++ has no std::powf; same float math as MSVC.
+    double denom = ::powf(a2, 2.0f) + ::powf(b2, 2.0f) + ::powf(c2, 2.0f);
     if (denom < 1e-30) return 0.0;
     return 4.0*std::sqrt(3.0) * (p1-p0).cross(p2-p0).norm() / denom;
 }

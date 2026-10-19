@@ -8,6 +8,8 @@ option(SSP_POLYSCOPE_MOCK "Headless polyscope mock backend (no X11/OpenGL)" OFF)
 if(SSP_POLYSCOPE_MOCK)
     set(POLYSCOPE_BACKEND_OPENGL3_GLFW "OFF" CACHE BOOL "Disable OpenGL3+GLFW backend" FORCE)
     set(POLYSCOPE_BACKEND_OPENGL_MOCK  "ON"  CACHE BOOL "Enable headless mock backend"  FORCE)
+    # EGL defaults to AUTO (on if EGL/egl.h exists) and then needs glad.
+    set(POLYSCOPE_BACKEND_OPENGL3_EGL  "OFF" CACHE STRING "Disable openGL3_egl backend" FORCE)
 else()
     set(POLYSCOPE_BACKEND_OPENGL3_GLFW "ON"  CACHE BOOL "Enable real OpenGL3+GLFW backend" FORCE)
     set(POLYSCOPE_BACKEND_OPENGL_MOCK  "OFF" CACHE BOOL "Disable headless mock backend"    FORCE)
