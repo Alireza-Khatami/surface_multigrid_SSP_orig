@@ -5,7 +5,10 @@ subdivided vertex to the fine mesh by walking the SSP collapses backwards.
 Same arithmetic, in the same order, as the C++:
   * the sheet of a step is the one whose global_sheet_id equals
     faceSheetID[face] (single-sheet collapses fall back to sheet 0; a seam
-    collapse with no matching sheet is skipped),
+    collapse with no matching sheet is skipped). Python-only fix: when several
+    sheets of one collapse share that id (a sheet meeting itself along a seam),
+    the one holding the face is used; the C++ takes the first and then skips the
+    step or leaves the coarse face unmatched. Identical when ids are unique,
   * the chosen pre-collapse triangle is the first one whose
     -min(barycentric) < the running minimum, starting at 1.0 (row 0 when the
     point is outside every triangle by >= 1),
@@ -74,24 +77,39 @@ def query_coarse_to_fine_kernel(decIM_off, decIM_idx, faceSheetID,
             if not found:
                 break
             sid = faceSheetID[queryF] if queryF < nFS else 0
+            # the sheet of this collapse with the face's global sheet id. Python-only fix: a
+            # collapse can hold several sheets with the same global id (a sheet meeting itself
+            # along a seam); the C++ takes the first and skips the step when the face is not in
+            # it. Here: the first matching sheet that holds the face (same result when ids are
+            # unique).
             s = -1
+            pre_row = -1
+            firstMatch = -1
             for k in range(sh_off[dIdx], sh_off[dIdx + 1]):
                 if sh_gid[k] == sid:
-                    s = k
-                    break
-            if s < 0 and sh_off[dIdx + 1] - sh_off[dIdx] == 1:
-                s = sh_off[dIdx]
+                    if firstMatch < 0:
+                        firstMatch = k
+                    for r in range(sh_fpre_off[k + 1] - sh_fpre_off[k]):
+                        if FIdx_pre[sh_fpre_off[k] + r] == queryF:
+                            pre_row = r
+                            break
+                    if pre_row >= 0:
+                        s = k
+                        break
             if s < 0:
-                continue
+                if firstMatch >= 0:
+                    continue          # no matching sheet holds the face (C++: same skip)
+                if sh_off[dIdx + 1] - sh_off[dIdx] != 1:
+                    continue
+                s = sh_off[dIdx]      # single-sheet collapse with another id
+                for r in range(sh_fpre_off[s + 1] - sh_fpre_off[s]):
+                    if FIdx_pre[sh_fpre_off[s] + r] == queryF:
+                        pre_row = r
+                        break
+                if pre_row < 0:
+                    continue
             pr0 = sh_fpre_off[s]
             pr1 = sh_fpre_off[s + 1]
-            pre_row = -1
-            for r in range(pr1 - pr0):
-                if FIdx_pre[pr0 + r] == queryF:
-                    pre_row = r
-                    break
-            if pre_row < 0:
-                continue
             u0 = sh_uv_off[s]
             v0 = FUV_pre[pr0 + pre_row, 0]
             v1 = FUV_pre[pr0 + pre_row, 1]
@@ -225,11 +243,16 @@ def coarse_subdiv_c2f_build(B, nTarget, refined=None):
                 init = (fi, cur, [0, 1, 2])
             else:
                 sid = int(B.faceSheetID[fi]) if fi < nFS else 0
+                # the matching sheet that holds the face (see the walk kernel: several sheets of
+                # one collapse can share a global id; the C++ takes the first)
                 s = -1
                 for k in range(B.sh_off[dIdx], B.sh_off[dIdx + 1]):
                     if B.sh_gid[k] == sid:
-                        s = k
-                        break
+                        if s < 0:
+                            s = k
+                        if (B.FIdx_pre[B.sh_fpre_off[k]:B.sh_fpre_off[k + 1]] == fi).any():
+                            s = k
+                            break
                 if s < 0 and B.sh_off[dIdx + 1] - B.sh_off[dIdx] == 1:
                     s = int(B.sh_off[dIdx])
                 row = -1

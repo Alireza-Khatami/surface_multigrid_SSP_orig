@@ -157,7 +157,11 @@ def coarse_matstruct(B, ms, anc):
         for c in range(3):
             coarseEdges.add(matstruct_edge_key(CF[f][c], CF[f][(c + 1) % 3]))
 
-    fineCurveEdges = inside = noOwner = notCoarseEdge = 0
+    onFace = [False] * NCE
+    for f in range(FC):
+        for c in range(3):
+            onFace[CF[f][c]] = True
+    fineCurveEdges = inside = noOwner = notCoarseEdge = toNoFace = 0
     edgeIds = {}
     for e0, e1 in ms.maEdges:
         ids = ms.edgeIds.get(matstruct_edge_key(e0, e1))
@@ -174,6 +178,11 @@ def coarse_matstruct(B, ms, anc):
             continue
         key = matstruct_edge_key(a, b)
         if key not in coarseEdges:
+            if not (onFace[a] and onFace[b]):
+                # an edge of a 1-D part of the MAT (a coarse end on no coarse face): no sample
+                # can lie on it, so it carries no IDs for the subdivided surface
+                toNoFace += 1
+                continue
             notCoarseEdge += 1
             continue
         edgeIds.setdefault(key, []).extend(ids)
@@ -188,8 +197,9 @@ def coarse_matstruct(B, ms, anc):
     cms.edgeIds = edgeIds
     log('[coarse_subdiv_relax] coarse struct IDs: %d vertices (%d differ from the fine vertex\'s IDs), %d faces, '
           '%d curve edges from %d fine curve edges (%d collapsed inside a coarse vertex, %d without owner, '
-          '%d not a coarse edge); %d owner conflicts, %d curve edges whose IDs are not on both endpoints'
-          % (NCE, idsDiffer, FC, len(edgeIds), fineCurveEdges, inside, noOwner, notCoarseEdge,
+          '%d not a coarse edge, %d to a coarse vertex on no coarse face (1-D MAT part, skipped)); '
+          '%d owner conflicts, %d curve edges whose IDs are not on both endpoints'
+          % (NCE, idsDiffer, FC, len(edgeIds), fineCurveEdges, inside, noOwner, notCoarseEdge, toNoFace,
              ownerConflicts, notOnEndpoints))
     if idsDiffer or noOwner or notCoarseEdge or ownerConflicts or notOnEndpoints:
         raise StructError('[coarse_subdiv_relax] coarse structure IDs are inconsistent (see counts above)')
