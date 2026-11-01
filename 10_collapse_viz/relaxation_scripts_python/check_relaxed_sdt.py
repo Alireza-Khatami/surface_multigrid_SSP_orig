@@ -215,7 +215,7 @@ def main(argv=None):
           '%d VERTEX' % ((ct == 2).sum(), len(eRows), (ct == 0).sum()),
           set(np.unique(ct).tolist()) <= {0, 1, 2} and ci[ct == 2].max() < len(B.fineF) and badE == 0
           and (eRows.size == 0 or ci[eRows].max() < len(E)), '%d EDGE carriers off their curves' % badE)
-    # a sheet sample whose set has no sheet id is projected onto all faces (global target);
+    # a sheet sample whose set has no sheet id has no target (kept fixed at its seed);
     # then its face only has to be a face, which it is
     offSheet = sum(1 for i in np.nonzero((role == 0) & on)[0].tolist()
                    if sheetIds[sid[i]] and not (set(ms.faceIds[ff[i]]) & sheetIds[sid[i]]))
@@ -231,7 +231,7 @@ def main(argv=None):
             hit = len(nz) == 2 and bool(edgeCurve.get(matstruct_edge_key(nz[0], nz[1]), set()) & curveIds[sid[i]])
         offCurve += not hit
     check('own structure: %d sheet samples on one of their sheets, %d curve samples on one of their curves, '
-          '%d junction samples (%d sheet samples have no sheet id: global target)'
+          '%d junction samples (%d sheet samples have no sheet id: no target, kept fixed)'
           % ((role == 0).sum(), (role == 1).sum(), (role == 3).sum(), noSheet),
           offSheet == 0 and offCurve == 0, 'off: sheet %d, curve %d' % (offSheet, offCurve))
     jverts = {st.id: set(st.elements) for st in ms.structs if st.type == 3}

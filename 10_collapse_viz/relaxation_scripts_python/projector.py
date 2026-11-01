@@ -606,7 +606,10 @@ class Projector:
                 for i in S.sheet[k]:
                     if i in self.sheetTree:
                         targets[k].append(self.sheetTree[i])
-                if not S.sheet[k]:
+                # no sheet id: with a .ma_struct the set gets no target (sheet id "-1"), so
+                # its samples are never projected and stay fixed at their seeds; without a
+                # .ma_struct every set is empty and all of them project onto the whole mesh
+                if not S.sheet[k] and ms is None:
                     if self.globalTree < 0:
                         self.globalTree = add_tree(list(range(nF)), False)
                     targets[k].append(self.globalTree)

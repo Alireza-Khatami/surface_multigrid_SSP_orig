@@ -798,6 +798,44 @@ int main(int argc, char * argv[])
                   << gStaleVertexSet.size() << " vertices protected\n";
     }
 
+    // Lock: fine faces in no sheet of the .ma_struct are never collapsed.
+    // A collapse (u, v) changes every face on u or v, so a face is kept as it is
+    // exactly when no collapse uses one of its corners. We lock all corners of
+    // the no-sheet faces (same as the stale lock). Only with --mat_struct_check.
+    if (gHaveMatStruct && matStructCheck) {
+        std::set<int> noSheetVerts;
+        int nNoSheetFaces = 0;
+        const int nf = (int)gMatStruct.faceIds.size();
+        for (int f = 0; f < nf && f < (int)gFO.rows(); ++f) {
+            if (!gMatStruct.faceIds[f].empty()) continue;
+            ++nNoSheetFaces;
+            for (int k = 0; k < 3; ++k) noSheetVerts.insert(gFO(f, k));
+        }
+        if (!noSheetVerts.empty()) {
+            auto ns_pre = gPreFn;
+            gPreFn = [ns_pre, noSheetVerts](
+                const MatrixXd & V, const MatrixXi & F, const MatrixXi & E,
+                const VectorXi & EMAP, const MatrixXi & EF, const MatrixXi & EI,
+                const igl::min_heap<std::tuple<double,int,int>> & Q,
+                const VectorXi & EQ, const MatrixXd & C, const int e) -> bool
+            {
+                if (!ns_pre(V, F, E, EMAP, EF, EI, Q, EQ, C, e)) return false;
+                const int u = E(e,0), v = E(e,1);
+                const bool blocked = noSheetVerts.count(u) || noSheetVerts.count(v);
+                if (blocked && gStructGateLog) {
+                    fprintf(gStructGateLog,
+                        "[GATE] collapse=#%d  e=%d  u=%d  v=%d  BLOCK-NO-SHEET-FACE\n",
+                        gCollapseCount + 1, e, u, v);
+                    fflush(gStructGateLog);
+                }
+                return !blocked;
+            };
+        }
+        std::cout << "[NO-SHEET] pre-collapse lock: " << nNoSheetFaces
+                  << " fine faces in no sheet, " << noSheetVerts.size()
+                  << " corner vertices locked\n";
+    }
+
     // Wrap gPreFn to detect seam collapses at collapse time.
     // A seam edge is one where 3+ live real faces share the same vertex pair in the
     // CURRENT topology (rechecked every collapse, not just from the initial seam list).
