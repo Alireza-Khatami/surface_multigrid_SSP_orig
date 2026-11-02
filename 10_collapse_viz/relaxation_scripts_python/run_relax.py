@@ -80,6 +80,7 @@ from sdt_io import export_relaxed_sdt, sliding_stats, sliding_text  # noqa: E402
 from coarse_subdiv_relax import CoarseSubdivRelaxConfig, coarse_subdiv_relax_export, relaxed_obj_prefix  # noqa: E402
 from matstruct import load_matstruct  # noqa: E402
 from obj_io import read_obj, write_obj  # noqa: E402
+from projector import set_no_sheet_mode  # noqa: E402
 
 
 # Default input of every experiment (2026-10-05): the decimation WITH validity checks and the
@@ -145,6 +146,10 @@ def parse_args(argv=None):
     p.add_argument('--radii_tol_touch', type=float, default=1e-3)
     p.add_argument('--delaunay_scope', default='sheet', choices=['sheet', 'face'])
     p.add_argument('--no_input_ply', action='store_true')
+    p.add_argument('--no_sheet_mode', default='sheet', choices=['sheet', 'fixed', 'global'],
+                   help='samples with no sheet id (fine faces in no sheet): sheet = slide inside the no-sheet '
+                   'faces only (default); fixed = never projected, kept at their seeds; global = project onto '
+                   'all fine faces (old rule)')
     return p.parse_args(argv)
 
 
@@ -237,6 +242,7 @@ def write_clamp_csv(C, path):
 def main(argv=None):
     a = parse_args(argv)
     cfg = config_from_args(a)
+    set_no_sheet_mode(a.no_sheet_mode)
     out_dir = a.output_dir
     os.makedirs(out_dir, exist_ok=True)
     stem = a.stem if a.stem is not None else bundle_stem(a.bundle)
@@ -266,6 +272,10 @@ def main(argv=None):
                    'global' if cfg.explicitGlobalProj else 'local',
                    'directed' if cfg.explicitDirected and not cfg.jointPass else 'symmetric',
                    cfg.weights, 'on' if cfg.noNewFolds else 'off', 'on' if cfg.perCoarseFace else 'off'))
+        f.write('no-sheet samples: %s\n' % {
+            'sheet': 'sheet (no-sheet faces form one extra sheet; samples slide inside them only)',
+            'fixed': 'fixed (no projection target; kept at their seeds)',
+            'global': 'global (projected onto all fine faces)'}[a.no_sheet_mode])
         if cfg.method == 'momentum':
             f.write('method params: momentum beta %g, adaptive restart %s\n' % (cfg.momentumBeta, cfg.momentumRestart))
         if cfg.method == 'newton':

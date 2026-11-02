@@ -28,6 +28,23 @@ from matstruct import matstruct_edge_key
 from struct_ids import RELAX_CURVE, RELAX_SHEET, intersects
 from subdiv_mesh import subdiv_find_edges
 
+# Samples whose set has no sheet id (sheet role, with a .ma_struct), and the fine faces in no sheet:
+#   'sheet'  (default) both get the pseudo sheet id NO_SHEET_ID, so these samples project onto the
+#            no-sheet faces only: they slide inside them but never leave them
+#   'fixed'  the set gets no target: its samples are never projected and stay at their seeds
+#   'global' the set projects onto all fine faces (the old rule)
+# Without a .ma_struct every set is empty and all of them project onto all faces, whatever the mode.
+NO_SHEET_MODES = ('sheet', 'fixed', 'global')
+NO_SHEET_MODE = 'sheet'
+NO_SHEET_ID = -1
+
+
+def set_no_sheet_mode(mode):
+    global NO_SHEET_MODE
+    if mode not in NO_SHEET_MODES:
+        raise ValueError('no-sheet mode must be one of %s, not %r' % (NO_SHEET_MODES, mode))
+    NO_SHEET_MODE = mode
+
 INF = np.inf
 NO_TRACE = np.zeros(0, dtype=np.int64)  # empty checkpoint buffer
 INT_MAX = 2 ** 31 - 1
@@ -569,6 +586,8 @@ class Projector:
         edgeCurves = [[] for _ in range(nE)]
         if ms is not None:
             faceSheets = [list(ms.faceIds[f]) for f in range(nF)]
+            if NO_SHEET_MODE == 'sheet':
+                faceSheets = [fs if fs else [NO_SHEET_ID] for fs in faceSheets]
             El = E.tolist()
             for e in range(nE):
                 edgeCurves[e] = list(ms.edgeIds.get(matstruct_edge_key(El[e][0], El[e][1]), []))
@@ -594,6 +613,14 @@ class Projector:
         self.curveTree = {i: add_tree(curveEdges[i], True) for i in sorted(curveEdges)}
         self.globalTree = -1
         P = pal.size()
+        # sheet ids per set as the projector sees them (pseudo id for no-sheet sets in 'sheet' mode)
+        setSheets = [list(S.sheet[k]) for k in range(P)]
+        if ms is not None and NO_SHEET_MODE == 'sheet':
+            for k in range(P):
+                if setRole[k] == RELAX_SHEET and not setSheets[k]:
+                    setSheets[k] = [NO_SHEET_ID]
+        self.setSheets = setSheets
+        self.noSheetMode = NO_SHEET_MODE if ms is not None else 'global'
         targets = [[] for _ in range(P)]
         isCurveSet = np.zeros(P, dtype=np.uint8)
         for k in range(P):
@@ -603,13 +630,12 @@ class Projector:
                     if i in self.curveTree:
                         targets[k].append(self.curveTree[i])
             elif setRole[k] == RELAX_SHEET:
-                for i in S.sheet[k]:
+                for i in setSheets[k]:
                     if i in self.sheetTree:
                         targets[k].append(self.sheetTree[i])
-                # no sheet id: with a .ma_struct the set gets no target (sheet id "-1"), so
-                # its samples are never projected and stay fixed at their seeds; without a
-                # .ma_struct every set is empty and all of them project onto the whole mesh
-                if not S.sheet[k] and ms is None:
+                # still no sheet id (see NO_SHEET_MODE): 'fixed' leaves the set without a target,
+                # so its samples stay at their seeds; 'global' / no .ma_struct: the whole mesh
+                if not setSheets[k] and (ms is None or NO_SHEET_MODE == 'global'):
                     if self.globalTree < 0:
                         self.globalTree = add_tree(list(range(nF)), False)
                     targets[k].append(self.globalTree)
@@ -622,7 +648,7 @@ class Projector:
         ve_off, ve = _csr(vertEdges)
         fs_off, fs = _csr(faceSheets)
         ec_off, ec = _csr(edgeCurves)
-        ss_off, ss = _csr(S.sheet)
+        ss_off, ss = _csr(setSheets)
         sc_off, sc = _csr(S.curve)
         tg_off, tg = _csr(targets)
         prim_off = np.zeros(len(trees) + 1, dtype=np.int64)
@@ -654,9 +680,9 @@ class Projector:
 
     # Python-side helpers (same answers as the kernels)
     def face_in(self, k, f):
-        if not self.S.sheet[k]:
+        if not self.setSheets[k]:
             return True
-        return intersects(self.faceSheets[f], self.S.sheet[k])
+        return intersects(self.faceSheets[f], self.setSheets[k])
 
     def edge_in(self, k, e):
         return intersects(self.edgeCurves[e], self.S.curve[k])

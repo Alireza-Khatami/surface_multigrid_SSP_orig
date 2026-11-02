@@ -215,11 +215,14 @@ def main(argv=None):
           '%d VERTEX' % ((ct == 2).sum(), len(eRows), (ct == 0).sum()),
           set(np.unique(ct).tolist()) <= {0, 1, 2} and ci[ct == 2].max() < len(B.fineF) and badE == 0
           and (eRows.size == 0 or ci[eRows].max() < len(E)), '%d EDGE carriers off their curves' % badE)
-    # a sheet sample whose set has no sheet id has no target (kept fixed at its seed);
-    # then its face only has to be a face, which it is
+    # a sheet sample whose set has no sheet id: depending on run_relax.py --no_sheet_mode it
+    # slides inside the no-sheet faces (sheet), stays at its seed (fixed) or may go anywhere
+    # (global); so its face only has to be a face. How many are on a no-sheet face is reported.
     offSheet = sum(1 for i in np.nonzero((role == 0) & on)[0].tolist()
                    if sheetIds[sid[i]] and not (set(ms.faceIds[ff[i]]) & sheetIds[sid[i]]))
     noSheet = int(sum(1 for i in np.nonzero((role == 0) & on)[0].tolist() if not sheetIds[sid[i]]))
+    noSheetOnNoSheet = int(sum(1 for i in np.nonzero((role == 0) & on)[0].tolist()
+                               if not sheetIds[sid[i]] and not ms.faceIds[ff[i]]))
     offCurve = 0
     for i in np.nonzero((role == 1) & on)[0].tolist():
         nz = [B.fineF[ff[i], c] for c in range(3) if fb[i, c] != 0.0]
@@ -231,8 +234,8 @@ def main(argv=None):
             hit = len(nz) == 2 and bool(edgeCurve.get(matstruct_edge_key(nz[0], nz[1]), set()) & curveIds[sid[i]])
         offCurve += not hit
     check('own structure: %d sheet samples on one of their sheets, %d curve samples on one of their curves, '
-          '%d junction samples (%d sheet samples have no sheet id: no target, kept fixed)'
-          % ((role == 0).sum(), (role == 1).sum(), (role == 3).sum(), noSheet),
+          '%d junction samples (%d sheet samples have no sheet id, %d of them on a fine face in no sheet)'
+          % ((role == 0).sum(), (role == 1).sum(), (role == 3).sum(), noSheet, noSheetOnNoSheet),
           offSheet == 0 and offCurve == 0, 'off: sheet %d, curve %d' % (offSheet, offCurve))
     jverts = {st.id: set(st.elements) for st in ms.structs if st.type == 3}
     offJ = 0
