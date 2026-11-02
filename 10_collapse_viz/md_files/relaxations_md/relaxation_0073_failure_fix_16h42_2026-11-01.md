@@ -92,3 +92,66 @@ face −1.
     target) and not kept on their own sheet.
   - Faces like 1496 lie entirely inside sheet 44, so the `.ma_struct` sheet labelling looks
     incomplete there.
+
+## Update (2026-11-01, 16:56): the 10 faces in no sheet
+
+Commit `5e6e9c7`. Two changes, both about the 10 fine faces that are in no sheet of the `.ma_struct`
+(faces 662, 663, 1244, 1261, 1266, 1484, 1496, 1503, 1562, 1563).
+
+### Change 1: these faces are never collapsed (`main.cpp`)
+
+- **What.** A collapse of edge (u, v) changes every face on u or v. So the corners of the no-sheet
+  faces are locked: any collapse using one of them is blocked. It works like the stale-chain lock.
+- **When.** Only with `--mat_struct_check` (which `c2f_preprocess.py` passes by default).
+- **Log.** `[NO-SHEET] pre-collapse lock: 10 fine faces in no sheet, 18 corner vertices locked`;
+  each blocked collapse is `BLOCK-NO-SHEET-FACE` in `struct_gate_log.txt`.
+- **Effect on the pipeline.**
+  - The coarse mesh keeps these 10 faces exactly as in the fine mesh (checked: 10 / 10).
+  - The coarse mesh has a few more faces: 527 instead of 514 (26 collapses blocked).
+  - Collapse tracker counters stay 0; c2f walk: 0 unmatched, 0 off their fine face.
+  - The struct-ID check passes as before (3 curve edges of the 1-D part skipped).
+
+### Change 2: samples with no sheet ID are not projected (`projector.py`)
+
+- **Before.** A sample whose set has no sheet ID was projected onto the whole MAT (global target),
+  so it could slide onto any sheet.
+- **Now.** With a `.ma_struct`, such a set gets **no target** (a sheet ID of "−1"). The relaxation
+  already keeps a sample with no target fixed, so these samples stay at their c2f seed positions.
+  Because of change 1, those seeds lie on the original no-sheet fine faces.
+- **Without a `.ma_struct`** nothing changes: every set is empty, so all samples still use the
+  global target.
+- `check_relaxed_sdt.py`: only the message changed ("no target, kept fixed").
+- **Effect on the pipeline.**
+  - Every run with a `.ma_struct` is affected, not only 0073: any shape with no-sheet faces now
+    has fixed samples there. Shapes without such faces give the same result as before.
+  - On 0073: 1,044 samples kept fixed, none moved; all consistency checks 0;
+    `check_relaxed_sdt.py` passes.
+
+### Results on 0073
+
+Run with the `c2f_preprocess.py` defaults (40 target faces, 1M subdiv samples, qslim, validity
+checks, struct check; equal-area 277,700, momentum β 0.9, 300 iterations, Delaunay flips).
+
+- Output: `mats_893_interp_20/subdiv_n1000000_nosheet_lock/`
+  - `relaxation/`: change 1 only (no-sheet samples still use the global target);
+  - `relaxation_nosheet_fixed/`: changes 1 and 2.
+
+| | before the update | change 1 | changes 1 + 2 |
+|---|---|---|---|
+| coarse faces | 514 | 527 | 527 |
+| edge CV (seed → relaxed) | 0.2034 → 0.1998 | 0.2024 → 0.2001 | 0.2024 → **0.1989** |
+| min angle p1 | 21.33 → 20.80 | 21.75 → 20.80 | 21.75 → **22.81** |
+| min angle p5 / median (relaxed) | 40.18 / 53.63 | 40.37 / 53.54 | 40.37 / 53.54 |
+| flipped triangles (seeds → relaxed) | 22 → 31 | 29 → **21** | 29 → 26 |
+| folded one-rings (seeds → relaxed) | 92 → 21 | 92 → **18** | 92 → 42 |
+| `check_relaxed_sdt.py` | pass | pass | pass |
+
+### What this means
+
+- **Change 1** helps the bijectivity: fewer flipped triangles and folded one-rings after
+  relaxation.
+- **Change 2** helps the mesh quality (edge CV, and p1 now goes up instead of down), but gives more
+  folds than the global target. The fixed patches act as walls: their neighbours cannot even out
+  across them, so folds collect at the patch borders.
+- **Not tried yet:** treat all no-sheet faces as one extra sheet, so their samples can slide inside
+  those faces but never leave them.
