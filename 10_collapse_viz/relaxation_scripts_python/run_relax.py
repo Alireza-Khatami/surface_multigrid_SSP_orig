@@ -78,7 +78,7 @@ from equal_area_refine import refine_from_args, target_arg, target_on  # noqa: E
 from relax_exports import export_relax_input  # noqa: E402
 from sdt_io import export_relaxed_sdt, sliding_stats, sliding_text  # noqa: E402
 from coarse_subdiv_relax import CoarseSubdivRelaxConfig, coarse_subdiv_relax_export, relaxed_obj_prefix  # noqa: E402
-from matstruct import load_matstruct  # noqa: E402
+from matstruct import add_no_sheet_borders, load_matstruct  # noqa: E402
 from obj_io import read_obj, write_obj  # noqa: E402
 from projector import set_no_sheet_mode  # noqa: E402
 
@@ -273,7 +273,8 @@ def main(argv=None):
                    'directed' if cfg.explicitDirected and not cfg.jointPass else 'symmetric',
                    cfg.weights, 'on' if cfg.noNewFolds else 'off', 'on' if cfg.perCoarseFace else 'off'))
         f.write('no-sheet samples: %s\n' % {
-            'sheet': 'sheet (no-sheet faces form one extra sheet; samples slide inside them only)',
+            'sheet': 'sheet (no-sheet faces form one extra sheet; samples slide inside them only; '
+                     'their unlabelled open edges form one pseudo boundary)',
             'fixed': 'fixed (no projection target; kept at their seeds)',
             'global': 'global (projected onto all fine faces)'}[a.no_sheet_mode])
         if cfg.method == 'momentum':
@@ -303,6 +304,13 @@ def main(argv=None):
             raise SystemExit('simplified mesh does not match the bundle')
     ms = load_matstruct(a.matstruct_path, B.fineV, B.fineF)
     C = build_c2f(B, a, ms)
+    # sheet mode: unlabelled open edges of the no-sheet faces become one pseudo boundary
+    # (after the c2f build, so the seeds do not depend on it)
+    a.noSheetBorder = (-1, 0)
+    if a.no_sheet_mode == 'sheet':
+        a.noSheetBorder = add_no_sheet_borders(ms, B.fineF)
+        log('[run_relax] no-sheet faces: %d unlabelled open edges -> pseudo boundary id %d'
+            % (a.noSheetBorder[1], a.noSheetBorder[0]))
     # is the coarse -> fine map bijective? (check_c2f_bijective.py; diagnostic, never fails the run)
     bij, bijRef, bijFold = {}, None, None
     try:
@@ -381,6 +389,9 @@ def main(argv=None):
         f.write('finished:     %s (exit code %d, %.1f s)\n'
                 % (datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'), status, time.perf_counter() - t0))
         f.write('result lines:\n')
+        nsb = getattr(a, 'noSheetBorder', (-1, 0))
+        if nsb[1]:
+            f.write('  no-sheet pseudo boundary: id %d, %d unlabelled open edges\n' % nsb)
         for s in result:
             f.write('  ' + s + '\n')
     log_util.set_log_file(None)

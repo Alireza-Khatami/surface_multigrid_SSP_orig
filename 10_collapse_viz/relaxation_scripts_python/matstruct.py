@@ -183,3 +183,53 @@ def load_matstruct(fname, VO, FO):
           '%d/%d faces in no sheet, %d seam/boundary edges on no face'
           % (fname, numStructs, out.maxPosDiff, nFacesNoSheet, nf, out.nEdgesWithoutFace))
     return out
+
+
+def no_sheet_border_id(ms):
+    """The struct id add_no_sheet_borders gives its pseudo boundary: one more than the largest id."""
+    return max(ms.structType, default=-1) + 1
+
+
+def add_no_sheet_borders(ms, FO):
+    """Pseudo boundary for the fine faces in no sheet (run_relax.py --no_sheet_mode sheet).
+
+    An open edge (on one face) of a face in no sheet that has no seam / boundary id is a
+    border of the MAT the .ma_struct does not label. Without a curve there, nothing holds
+    the border and the relaxation squeezes the samples onto it. All such edges get one new
+    BOUNDARY struct (id no_sheet_border_id(ms)), like a boundary listed in the file: the
+    edge gets the id, its endpoints get it, and the edge is added to maEdges if missing.
+    Deterministic, so a reader of the .sdt can rebuild the same id. Changes ms in place;
+    returns (id, number of edges), id -1 when there are none."""
+    FOl = [list(map(int, f)) for f in FO]
+    faceCount = {}
+    for f in FOl:
+        for c in range(3):
+            k = matstruct_edge_key(f[c], f[(c + 1) % 3])
+            faceCount[k] = faceCount.get(k, 0) + 1
+    edges = []
+    for fi, f in enumerate(FOl):
+        if ms.faceIds[fi]:
+            continue
+        for c in range(3):
+            a, b = f[c], f[(c + 1) % 3]
+            k = matstruct_edge_key(a, b)
+            if faceCount[k] == 1 and not ms.edgeIds.get(k):
+                edges.append((min(a, b), max(a, b)))
+    if not edges:
+        return -1, 0
+    sid = no_sheet_border_id(ms)
+    maIndex = {matstruct_edge_key(a, b): i for i, (a, b) in enumerate(ms.maEdges)}
+    st = MatStructEntry(id=sid, type=2)
+    for a, b in sorted(set(edges)):
+        k = matstruct_edge_key(a, b)
+        if k not in maIndex:
+            maIndex[k] = len(ms.maEdges)
+            ms.maEdges.append((a, b))
+        st.elements.append(maIndex[k])
+        ms.edgeIds[k] = sorted(ms.edgeIds.get(k, []) + [sid])
+        ms.vertexIds[a].add(sid)
+        ms.vertexIds[b].add(sid)
+    ms.structs.append(st)
+    ms.structType[sid] = 2
+    ms.ne = len(ms.maEdges)
+    return sid, len(st.elements)

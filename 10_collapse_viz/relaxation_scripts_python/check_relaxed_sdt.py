@@ -36,7 +36,7 @@ sys.path.insert(0, os.path.join(HERE, '..', 'subdiv_sample_tracker', 'tools'))
 
 import run_relax  # noqa: E402
 from bundle_io import load_bundle_flat  # noqa: E402
-from matstruct import load_matstruct, matstruct_edge_key  # noqa: E402
+from matstruct import add_no_sheet_borders, load_matstruct, matstruct_edge_key, no_sheet_border_id  # noqa: E402
 from obj_io import read_obj  # noqa: E402
 from ply_io import read_ply  # noqa: E402
 from read_sdt import read_sdt  # noqa: E402  (the consumer-side reader, unchanged)
@@ -65,6 +65,11 @@ def main(argv=None):
     buf = open(path, 'rb').read()
     B = load_bundle_flat(a.bundle)
     ms = load_matstruct(a.matstruct_path, B.fineV, B.fineF)
+    # a run with --no_sheet_mode sheet adds a pseudo boundary (matstruct.add_no_sheet_borders);
+    # its id is in the palette then, so rebuild it the same way
+    if no_sheet_border_id(ms) in set(A['palette_ids'].tolist()):
+        nsb = add_no_sheet_borders(ms, B.fineF)
+        print('     no-sheet pseudo boundary rebuilt: id %d, %d edges' % nsb)
     diag = float(np.linalg.norm(B.fineV.max(axis=0) - B.fineV.min(axis=0)))
 
     # 1. layout
